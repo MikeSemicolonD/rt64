@@ -5,6 +5,8 @@
 #include "rt64_gbi_f3d.h"
 
 #include <cassert>
+#include <cstdio>
+#include <unordered_map>
 
 #include "../include/rt64_extended_gbi.h"
 
@@ -63,9 +65,24 @@ namespace RT64 {
             case F3D_G_MV_LOOKATY:
                 state->rsp->setLookAt(1, (*dl)->w1);
                 break;
-            default:
-                assert(false && "Unimplemented move mem.");
+            default: {
+                // Factor5 (and likely other custom ucodes) emit G_MOVEMEM with
+                // indices outside the F3D set. Asserting kills the game; instead
+                // log the index once-per-value and continue. The relevant state
+                // (matrix/light/etc.) just doesn't update — visually that means
+                // some geometry uses stale state, which is preferable to a hard
+                // abort. Useful for tracking which indices Factor5 actually uses
+                // so a future RE pass can map them.
+                static std::unordered_map<uint8_t, int> seen;
+                uint8_t idx = (*dl)->p0(16, 8);
+                int &n = seen[idx];
+                if (++n <= 3) {
+                    fprintf(stderr, "[gbi_f3d] moveMem unknown idx=0x%02X (n=%d) w0=0x%08X w1=0x%08X\n",
+                        idx, n, (*dl)->w0, (*dl)->w1);
+                    fflush(stderr);
+                }
                 break;
+            }
             }
         }
         
@@ -74,15 +91,45 @@ namespace RT64 {
         }
 
         void runDl(State *state, DisplayList **dl) {
+            { static int n = 0;
+              const uint32_t targetAddr = state->rsp->fromSegmentedMasked((*dl)->w1);
+              const uint8_t branch = (uint8_t)((*dl)->p0(16, 1));
+              if (++n <= 20 || (n % 5000) == 0) {
+                  fprintf(stderr, "[trace] G_DL #%d -> 0x%08X branch=%u\n",
+                      n, targetAddr, (unsigned)branch);
+                  fflush(stderr);
+              }
+            }
+            const uint32_t rdramAddress = state->rsp->fromSegmentedMasked((*dl)->w1);
+            // Guard: invalid target (NULL or outside RDRAM). Reached when an
+            // unmapped Factor5 opcode mis-advances dl into MIPS code memory,
+            // and the interpreter parses raw instruction bytes as opcodes;
+            // an instruction-encoded "op_06" (any MIPS lwc1/sw with bits[31:24]
+            // == 0x06) lands here with garbage w1. Without this check we walk
+            // into NULL and trigger a vector subscript out-of-range crash deep
+            // in RT64. Treat as no-op (consume the cmd, don't follow).
+            if (rdramAddress == 0 || rdramAddress >= 0x00800000) {
+                static int n = 0;
+                if (++n <= 10) {
+                    fprintf(stderr, "[trace] G_DL skip-invalid #%d target=0x%08X (raw w1=0x%08X)\n",
+                        n, rdramAddress, (*dl)->w1);
+                    fflush(stderr);
+                }
+                return;
+            }
             if ((*dl)->p0(16, 1) == 0) {
                 state->pushReturnAddress(*dl);
             }
-
-            const uint32_t rdramAddress = state->rsp->fromSegmentedMasked((*dl)->w1);
             *dl = reinterpret_cast<DisplayList *>(state->fromRDRAM(rdramAddress)) - 1;
         }
 
         void endDl(State *state, DisplayList **dl) {
+            { static int n = 0;
+              if (++n <= 20 || (n % 5000) == 0) {
+                  fprintf(stderr, "[trace] G_ENDDL #%d\n", n);
+                  fflush(stderr);
+              }
+            }
             *dl = state->popReturnAddress();
         }
 
@@ -91,10 +138,20 @@ namespace RT64 {
         }
 
         void tri1(State *state, DisplayList **dl) {
+            static int n = 0;
+            if (++n <= 4) {
+                fprintf(stderr, "[gbi_f3d] tri1 #%d w0=0x%08X w1=0x%08X\n", n, (*dl)->w0, (*dl)->w1);
+                fflush(stderr);
+            }
             state->rsp->drawIndexedTri((*dl)->p1(16, 8) / 10, (*dl)->p1(8, 8) / 10, (*dl)->p1(0, 8) / 10);
         }
-        
+
         void quad(State *state, DisplayList **dl) {
+            static int n = 0;
+            if (++n <= 4) {
+                fprintf(stderr, "[gbi_f3d] quad #%d w0=0x%08X w1=0x%08X\n", n, (*dl)->w0, (*dl)->w1);
+                fflush(stderr);
+            }
             const uint8_t v0 = (*dl)->p1(24, 8) / 10;
             const uint8_t v1 = (*dl)->p1(16, 8) / 10;
             const uint8_t v2 = (*dl)->p1(8, 8) / 10;
