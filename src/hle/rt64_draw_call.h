@@ -80,6 +80,7 @@ namespace RT64 {
         uint16_t rectLeftOrigin;
         uint16_t rectRightOrigin;
         FixedRect scissorRect;
+        uint8_t scissorMode;
         uint16_t scissorLeftOrigin;
         uint16_t scissorRightOrigin;
         interop::ColorCombiner colorCombiner;
@@ -90,12 +91,9 @@ namespace RT64 {
         uint32_t tileCount;
         uint32_t loadIndex;
         uint32_t loadCount;
-        uint8_t rectAspect;
-        uint8_t scissorMode;
         uint8_t textureOn;
         uint8_t textureTile;
         uint8_t textureLevels;
-        bool NoN;
 
         // RSP specific parameters.
         uint32_t geometryMode;
@@ -104,6 +102,7 @@ namespace RT64 {
         // GBI specific parameters.
         uint32_t cullBothMask;
         uint32_t shadingSmoothMask;
+        bool NoN;
 
         // GBI extended parameters.
         DrawExtendedType extendedType;

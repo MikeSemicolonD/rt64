@@ -4,6 +4,8 @@
 
 #pragma once
 
+#include "rhi/rt64_render_interface.h"
+
 #include "rt64_sampler_library.h"
 
 namespace RT64 {

@@ -4,7 +4,7 @@
 
 #pragma once
 
-#include "common/rt64_plume.h"
+#include "rt64_render_interface.h"
 
 namespace RT64 {
     using RenderHookInit = void(RenderInterface *rhi, RenderDevice *device);

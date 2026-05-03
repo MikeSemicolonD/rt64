@@ -4,6 +4,7 @@
 
 #include "rt64_file_dialog.h"
 
+#include <atomic>
 #include <cassert>
 
 #include <nfd.h>

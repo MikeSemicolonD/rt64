@@ -229,13 +229,6 @@ namespace RT64 {
         fullScreen = newFullScreen;
 #   elif defined(__APPLE__)
         windowWrapper->toggleFullscreen();
-#   elif defined(RT64_SDL_WINDOW_VULKAN)
-        if (newFullScreen) {
-            SDL_SetWindowFullscreen(windowHandle, SDL_WINDOW_FULLSCREEN_DESKTOP);
-        } else {
-            SDL_SetWindowFullscreen(windowHandle, 0);
-        }
-        fullScreen = newFullScreen;
 #   endif
     }
 

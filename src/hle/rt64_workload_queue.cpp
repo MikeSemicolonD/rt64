@@ -11,6 +11,9 @@
 #define ENABLE_HIGH_RESOLUTION_RENDERER 1
 
 namespace RT64 {
+    static const int ReferenceHeight = 240;
+    static const int ReferenceInterlacedHeight = 480;
+
     // WorkloadQueue
 
     WorkloadQueue::WorkloadQueue() {
@@ -102,12 +105,10 @@ namespace RT64 {
         vertexProcessor = std::make_unique<VertexProcessor>(ext.device);
         framebufferRenderer = std::make_unique<FramebufferRenderer>(ext.workloadGraphicsWorker, true, ext.createdGraphicsAPI, ext.shaderLibrary);
         renderFramebufferManager = std::make_unique<RenderFramebufferManager>(ext.device);
-        queryPool = ext.device->createQueryPool(2);
 
         projectionProcessor.setup(ext.workloadGraphicsWorker);
         transformProcessor.setup(ext.workloadGraphicsWorker);
         tileProcessor.setup(ext.workloadGraphicsWorker);
-        lookAtProcessor.setup(ext.workloadGraphicsWorker);
 
         threadsRunning = true;
         renderThread = new std::thread(&WorkloadQueue::renderThreadLoop, this);
@@ -120,19 +121,14 @@ namespace RT64 {
         framebufferRenderer->updateMultisampling();
     }
 
-    void WorkloadQueue::threadConfigurationUpdate(hlslpp::uint2 viFbSize, WorkloadConfiguration &workloadConfig) {
+    void WorkloadQueue::threadConfigurationUpdate(WorkloadConfiguration &workloadConfig) {
         const std::scoped_lock lock(ext.sharedResources->configurationMutex);
         const bool sizeChanged = ext.sharedResources->swapChainSizeChanged;
         ext.sharedResources->swapChainSizeChanged = false;
-        
-        // Retrieve the reference height to be used for determining the resolution scale. Impose a minimum in case
-        // the game is using too small of a portion of the VI.
-        const uint32_t MinimumReferenceHeight = 60;
-        const uint32_t referenceHeight = (viFbSize[1] > 0) ? std::max(viFbSize[1], MinimumReferenceHeight) : 240;
 
         // Compute the aspect ratio to be used for the frame.
-        workloadConfig.aspectRatioSource = (viFbSize[1] > 0) ? float(viFbSize[0]) / float(viFbSize[1]) : (4.0f / 3.0f);
-
+        // TODO: Derive aspect ratio source from VI mode.
+        workloadConfig.aspectRatioSource = (4.0f / 3.0f);
         const auto ratioMode = ext.sharedResources->userConfig.aspectRatio;
         switch (ratioMode) {
         case UserConfiguration::AspectRatio::Expand:
@@ -188,7 +184,7 @@ namespace RT64 {
         switch (resolutionMode) {
         case UserConfiguration::Resolution::WindowIntegerScale:
             if (ext.sharedResources->swapChainHeight > 0) {
-                resolutionMultiplier = std::max(float((ext.sharedResources->swapChainHeight + referenceHeight - 1) / referenceHeight), 1.0f);
+                resolutionMultiplier = std::max(float((ext.sharedResources->swapChainHeight + ReferenceHeight - 1) / ReferenceHeight), 1.0f);
             }
             else {
                 resolutionMultiplier = 1.0f;
@@ -250,6 +246,7 @@ namespace RT64 {
         }
 #   endif
         
+        workloadConfig.fixRectLR = ext.sharedResources->enhancementConfig.rect.fixRectLR;
         workloadConfig.postBlendNoise = ext.sharedResources->emulatorConfig.dither.postBlendNoise;
         workloadConfig.postBlendNoiseNegative = ext.sharedResources->emulatorConfig.dither.postBlendNoiseNegative;
         
@@ -292,7 +289,7 @@ namespace RT64 {
     void WorkloadQueue::threadRenderFrame(GameFrame &curFrame, const GameFrame &prevFrame, const WorkloadConfiguration &workloadConfig,
         const DebuggerRenderer &debuggerRenderer, const DebuggerCamera &debuggerCamera, float curFrameWeight, float prevFrameWeight,
         float deltaTimeMs, RenderTargetKey overrideTargetKey, int32_t overrideTargetFbPairIndex, RenderTarget *overrideTarget,
-        uint32_t overrideTargetModifier, bool uploadVelocity, bool uploadExtras, bool interpolateTiles, bool interpolateLookAts)
+        uint32_t overrideTargetModifier, bool uploadVelocity, bool uploadExtras, bool interpolateTiles)
     {
 #   if ENABLE_HIGH_RESOLUTION_RENDERER
         std::scoped_lock<std::mutex> managerLock(ext.sharedResources->workloadMutex);
@@ -300,7 +297,7 @@ namespace RT64 {
         RenderTargetManager &targetManager = ext.sharedResources->renderTargetManager;
         const bool usingMSAA = (targetManager.multisampling.sampleCount > 1);
 
-        rendererCPUProfiler.start();
+        rendererProfiler.start();
 
         const bool aspectRatioAdjustment = (abs(workloadConfig.aspectRatioScale - 1.0f) > 1e-6f);
         const bool processProjections = aspectRatioAdjustment || prevFrame.matched|| curFrame.isDebuggerCameraEnabled(*this);
@@ -346,20 +343,6 @@ namespace RT64 {
             tileProcessor.process(tileParams);
             tileProcessor.upload(tileParams);
             uploadTiles = true;
-        }
-
-        bool uploadLookAts = false;
-        if (interpolateLookAts) {
-            LookAtProcessor::ProcessParams lookAtParams;
-            lookAtParams.worker = ext.workloadGraphicsWorker;
-            lookAtParams.workloadQueue = this;
-            lookAtParams.curFrame = &curFrame;
-            lookAtParams.prevFrame = &prevFrame;
-            lookAtParams.curFrameWeight = curFrameWeight;
-            lookAtParams.prevFrameWeight = prevFrameWeight;
-            lookAtProcessor.process(lookAtParams);
-            lookAtProcessor.upload(lookAtParams);
-            uploadLookAts = true;
         }
 
         // Reset the max height tracking for all active framebuffers.
@@ -435,9 +418,9 @@ namespace RT64 {
                     nativeColorHeight = fbPair.drawColorRect.bottom(true);
 
                     // When the target is much bigger than the reference height, we reduce the resolution scaling (but clamped to 1.0).
-                    const uint32_t heightThreshold = (workload.viFbSize[1] > 0) ? ((workload.viFbSize[1] * 3) / 2) : 360;
+                    const int referenceMiddleHeight = (ReferenceHeight + ReferenceInterlacedHeight) / 2;
                     uint32_t downsampleMultiplier = workloadConfig.downsampleMultiplier;
-                    if ((nativeColorHeight >= heightThreshold) && (fixedResScale[1] >= 2.0f)) {
+                    if ((nativeColorHeight >= referenceMiddleHeight) && (fixedResScale[1] >= 2.0f)) {
                         fixedResScale = hlslpp::max(fixedResScale / 2.0f, hlslpp::float2(1.0f, 1.0f));
                         downsampleMultiplier = std::max(downsampleMultiplier / 2U, 1U);
                     }
@@ -645,6 +628,7 @@ namespace RT64 {
                     drawParams.submissionFrame = workload.submissionFrame;
                     drawParams.deltaTimeMs = deltaTimeMs;
                     drawParams.ubershadersOnly = ubershadersOnly;
+                    drawParams.fixRectLR = workloadConfig.fixRectLR;
                     drawParams.postBlendNoise = workloadConfig.postBlendNoise;
                     drawParams.postBlendNoiseNegative = workloadConfig.postBlendNoiseNegative;
                     drawParams.maxGameCall = std::min(gameCallCountMax - gameCallCursor, fbPair.gameCallCount);
@@ -695,11 +679,6 @@ namespace RT64 {
                 uploadTiles = false;
             }
 
-            if (uploadLookAts) {
-                bufferUploaders.emplace_back(lookAtProcessor.bufferUploader.get());
-                uploadLookAts = false;
-            }
-
 #       if RT_ENABLED
             if (workloadConfig.raytracingEnabled) {
                 ext.rtShaderCache->setNextState();
@@ -708,8 +687,6 @@ namespace RT64 {
 
             workerMutex.lock();
             ext.workloadGraphicsWorker->commandList->begin();
-            ext.workloadGraphicsWorker->commandList->resetQueryPool(queryPool.get(), 0, 2);
-            ext.workloadGraphicsWorker->commandList->writeTimestamp(queryPool.get(), 0);
             framebufferRenderer->endFramebuffers(ext.workloadGraphicsWorker, &workload.drawBuffers, &workload.outputBuffers, workloadConfig.raytracingEnabled);
             framebufferRenderer->recordSetup(ext.workloadGraphicsWorker, bufferUploaders, processRSP ? rspProcessor.get() : nullptr, processWorldVertices ? vertexProcessor.get() : nullptr, &workload.outputBuffers, workloadConfig.raytracingEnabled);
             
@@ -846,17 +823,11 @@ namespace RT64 {
                     fbPair.endFbOperations, targetManager, fixedResScale, f, workload.submissionFrame);
             }
 
-            ext.workloadGraphicsWorker->commandList->writeTimestamp(queryPool.get(), 1);
             ext.workloadGraphicsWorker->commandList->end();
             framebufferRenderer->waitForUploaders();
             ext.workloadGraphicsWorker->execute();
             ext.workloadGraphicsWorker->wait();
             workerMutex.unlock();
-
-            // Update the GPU profiler with the results from the timestamps of the frame.
-            queryPool->queryResults();
-            const uint64_t *frameTimestamps = queryPool->getResults();
-            rendererGPUProfiler.log(double(frameTimestamps[1] - frameTimestamps[0]) / 1000000.0);
 
             // Indicate to the texture cache it's safe to delete the textures if no locks are active.
             ext.textureCache->decrementLock();
@@ -867,9 +838,9 @@ namespace RT64 {
         }
 
         framebufferRenderer->advanceFrame(workloadConfig.raytracingEnabled);
-        rendererCPUProfiler.end();
-        rendererCPUProfiler.log();
-        rendererCPUProfiler.reset();
+        rendererProfiler.end();
+        rendererProfiler.log();
+        rendererProfiler.reset();
 #   endif
     }
 
@@ -921,7 +892,7 @@ namespace RT64 {
 
                 ElapsedTimer workloadTimer;
                 workloadProfiler.start();
-                threadConfigurationUpdate(workload.viFbSize, workloadConfig);
+                threadConfigurationUpdate(workloadConfig);
 
                 // FIXME: This is a very hacky way to find out if we need to advance the frame if the workload was paused for the first time.
                 if (!workload.paused || (!gameFrames[curFrameIndex].workloads.empty() && (gameFrames[curFrameIndex].workloads[0] != (uint32_t)processCursor))) {
@@ -986,11 +957,10 @@ namespace RT64 {
                 bool generateInterpolatedFrames = false;
                 bool velocityUploaderUsed = false;
                 bool tileInterpolationUsed = false;
-                bool lookAtInterpolationUsed = false;
                 if (requiresFrameMatching) {
                     matchingProfiler.reset();
                     matchingProfiler.start();
-                    curFrame.match(ext.workloadGraphicsWorker, *this, prevFrame, ext.workloadVelocityUploader, velocityUploaderUsed, tileInterpolationUsed, lookAtInterpolationUsed);
+                    curFrame.match(ext.workloadGraphicsWorker, *this, prevFrame, ext.workloadVelocityUploader, velocityUploaderUsed, tileInterpolationUsed);
                     matchingProfiler.end();
                     matchingProfiler.log();
 
@@ -1127,7 +1097,7 @@ namespace RT64 {
 
                     int64_t renderTimeMicro = workloadTimer.elapsedMicroseconds();
                     threadRenderFrame(curFrame, prevFrame, workloadConfig, workload.debuggerRenderer, workload.debuggerCamera, curFrameWeight, prevFrameWeight, deltaTimeMs,
-                        interpolationTargetKey, interpolationTargetFbPairIndex, overrideTarget, overrideModifier, velocityUploaderUsed, uploadExtras, tileInterpolationUsed, lookAtInterpolationUsed);
+                        interpolationTargetKey, interpolationTargetFbPairIndex, overrideTarget, overrideModifier, velocityUploaderUsed, uploadExtras, tileInterpolationUsed);
 
                     // Add total time the frame took to render.
                     renderTimeTotalMicro += workloadTimer.elapsedMicroseconds() - renderTimeMicro;

@@ -22,6 +22,9 @@
 
 namespace RT64 {
     struct VI {
+        static const uint32_t Width;
+        static const uint32_t Height;
+
         union Status {
             struct {
                 // Refer to VI_STATUS_TYPE_ values.
@@ -145,8 +148,8 @@ namespace RT64 {
         float xOffsetFloat() const;
         float yScaleFloat() const;
         float yOffsetFloat() const;
-        hlslpp::float4 viewRectangle() const;
-        hlslpp::float4 cropRectangle() const;
+        RectI viewRectangle() const;
+        RectI cropRectangle() const;
         float gamma() const;
         bool compatibleWith(const VI &vi) const;
         bool visible() const;

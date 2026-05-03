@@ -189,14 +189,4 @@ namespace RT64 {
     uint32_t Framebuffer::bestDitherPattern() const {
         return std::max_element(ditherPatterns.begin(), ditherPatterns.end()) - ditherPatterns.begin();
     }
-
-    // FramebufferTile
-
-    bool FramebufferTile::valid() const {
-        return (bottom > top) && (right > left);
-    }
-
-    uint64_t FramebufferTile::hash() const {
-        return XXH3_64bits(this, sizeof(FramebufferTile));
-    }
 };

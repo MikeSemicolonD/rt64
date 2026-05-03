@@ -92,11 +92,10 @@ namespace RT64 {
             struct {
                 ExtendedAlignment rect;
                 ExtendedAlignment scissor;
-                uint8_t rectAspect;
             } global;
 
-            uint16_t scissorLeftOriginStack[RDP_EXTENDED_STACK_SIZE];
-            uint16_t scissorRightOriginStack[RDP_EXTENDED_STACK_SIZE];
+            uint16_t scissorLeftOrigin;
+            uint16_t scissorRightOrigin;
             DrawExtendedFlags drawExtendedFlags;
         } extended;
 
@@ -195,7 +194,6 @@ namespace RT64 {
         void fillRect(int32_t ulx, int32_t uly, int32_t lrx, int32_t lry, const ExtendedAlignment &extAlignment);
         void setRectAlign(const ExtendedAlignment &extAlignment);
         void setScissorAlign(const ExtendedAlignment &extAlignment);
-        void setRectAspect(uint8_t aspect);
         void forceUpscale2D(bool force);
         void forceTrueBilerp(uint8_t mode);
         void forceScaleLOD(bool force);

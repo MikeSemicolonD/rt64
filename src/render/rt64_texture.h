@@ -5,7 +5,7 @@
 #pragma once
 
 #include "common/rt64_load_types.h"
-#include "common/rt64_plume.h"
+#include "rhi/rt64_render_interface.h"
 
 namespace RT64 {
     struct Texture {

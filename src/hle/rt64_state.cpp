@@ -106,7 +106,6 @@ namespace RT64 {
         drawCall.rectDtdy = 0;
         drawCall.rectLeftOrigin = G_EX_ORIGIN_NONE;
         drawCall.rectRightOrigin = G_EX_ORIGIN_NONE;
-        drawCall.rectAspect = G_EX_ASPECT_AUTO;
         drawCall.scissorRect.reset();
         drawCall.scissorMode = 0;
         drawCall.scissorLeftOrigin = G_EX_ORIGIN_NONE;
@@ -213,8 +212,8 @@ namespace RT64 {
         if (drawStatus.isChanged(DrawAttribute::Scissor)) {
             drawCall.scissorRect = rdp->scissorRectStack[rdp->scissorStackSize - 1];
             drawCall.scissorMode = rdp->scissorModeStack[rdp->scissorStackSize - 1];
-            drawCall.scissorLeftOrigin = rdp->extended.scissorLeftOriginStack[rdp->scissorStackSize - 1];
-            drawCall.scissorRightOrigin = rdp->extended.scissorRightOriginStack[rdp->scissorStackSize - 1];
+            drawCall.scissorLeftOrigin = rdp->extended.scissorLeftOrigin;
+            drawCall.scissorRightOrigin = rdp->extended.scissorRightOrigin;
         }
         
         if (drawStatus.isChanged(DrawAttribute::Texture) || textureCheck) {
@@ -357,8 +356,10 @@ namespace RT64 {
                         dstCallTile.reinterpretSiz = checkResult.siz;
                         dstCallTile.reinterpretFmt = checkResult.fmt;
 
-                        // Native samplers can't be used with tile copies, as they can reference a subregion of a larger texture.
-                        nativeSamplerSupported = false;
+                        // Native samplers can't apply the texel shift and mask that tile reinterpretation requires.
+                        if (dstCallTile.reinterpretTile) {
+                            nativeSamplerSupported = false;
+                        }
                     }
                     else {
                         dstCallTile.tileCopyUsed = false;
@@ -666,18 +667,10 @@ namespace RT64 {
                 }
             }
             else if (callTile.reinterpretTile) {
-                struct ReinterpretHashData {
-                    uint64_t tmemHashOrID = 0;
-                    uint64_t tlutHash = 0;
-                    uint8_t reinterpretSiz = 0;
-                    uint8_t reinterpretFmt = 0;
-                    bool ulScaleS = true;
-                    bool ulScaleT = true;
-                    interop::uint2 texelShift = { 0, 0 };
-                    interop::uint2 texelMask = { UINT_MAX, UINT_MAX };
-                };
-
-                ReinterpretHashData hashData;
+                bool ulScaleS = true;
+                bool ulScaleT = true;
+                interop::uint2 texelShift = { 0, 0 };
+                interop::uint2 texelMask = { UINT_MAX, UINT_MAX };
 
                 // In cases where the tile pixel size is smaller than tile copy pixel size, we check for certain alignment conditions
                 // to improve the quality of the final result when the effect's resolution is increased.
@@ -692,8 +685,8 @@ namespace RT64 {
                     uint16_t rectMultiplier = drawCall.rectDsdx >> 10;
                     const bool powerOfTwo = ((rectMultiplier & (rectMultiplier - 1)) == 0);
                     if ((rectMultiplier > 1) && powerOfTwo && (callTile.loadTile.uls & 0x3) == 0) {
-                        hashData.texelMask.x = ~(rectMultiplier - 1);
-                        hashData.texelShift.x = (callTile.loadTile.uls >> 2) % rectMultiplier;
+                        texelMask.x = ~(rectMultiplier - 1);
+                        texelShift.x = (callTile.loadTile.uls >> 2) % rectMultiplier;
 
                         // This part fixes an artifact caused by how the scaling at high resolution affects the uls component. This is
                         // left under a special condition since it falls under the category of a developer intended fix rather than
@@ -707,38 +700,27 @@ namespace RT64 {
                         //
                         const bool ulsFix = ext.enhancementConfig->framebuffer.reinterpretFixULS;
                         if (ulsFix && ((callTile.loadTile.uls >> 2) <= (1 << sizDifference))) {
-                            hashData.ulScaleS = false;
+                            ulScaleS = false;
                         }
                     }
                 }
 
                 // Upload the TLUT as raw TMEM if the reinterpretation requires it.
+                uint64_t tlutHash = 0;
                 if (callTile.tlut > 0) {
                     const bool CI4 = (callTile.loadTile.siz == G_IM_SIZ_4b);
                     const uint16_t byteOffset = (RDP_TMEM_BYTES >> 1) + (CI4 ? (callTile.loadTile.palette << 7) : 0);
                     const uint16_t byteCount = CI4 ? 0x100 : 0x800;
-                    hashData.tlutHash = textureManager.uploadTMEM(this, {}, ext.textureCache, workload.submissionFrame, byteOffset, byteCount, 0, 0, 0);
+                    tlutHash = textureManager.uploadTMEM(this, {}, ext.textureCache, workload.submissionFrame, byteOffset, byteCount, 0, 0, 0);
                 }
 
-                hashData.tmemHashOrID = callTile.tmemHashOrID;
-                hashData.reinterpretSiz = callTile.reinterpretSiz;
-                hashData.reinterpretFmt = callTile.reinterpretFmt;
+                // Create a tile copy and tile reinterperation operation and queue it.
+                uint64_t newTileId = framebufferManager.findTileCopyId(callTile.tileCopyWidth, callTile.tileCopyHeight);
+                FramebufferOperation fbOp = framebufferManager.makeTileReintepretation(callTile.tmemHashOrID, callTile.reinterpretSiz, callTile.reinterpretFmt,
+                    newTileId, callTile.loadTile.siz, callTile.loadTile.fmt, ulScaleS, ulScaleT, texelShift, texelMask, tlutHash, callTile.tlut);
 
-                uint64_t reinterpretHash = XXH3_64bits(&hashData, sizeof(hashData));
-                auto it = framebufferManager.reinterpretTileCache.find(reinterpretHash);
-                if (it != framebufferManager.reinterpretTileCache.end()) {
-                    callTile.tmemHashOrID = it->second;
-                }
-                else {
-                    // Create a tile copy and tile reinterperation operation and queue it.
-                    uint64_t newTileId = framebufferManager.findTileCopyId(callTile.tileCopyWidth, callTile.tileCopyHeight);
-                    FramebufferOperation fbOp = framebufferManager.makeTileReintepretation(hashData.tmemHashOrID, hashData.reinterpretSiz, hashData.reinterpretFmt,
-                        newTileId, callTile.loadTile.siz, callTile.loadTile.fmt, hashData.ulScaleS, hashData.ulScaleT, hashData.texelShift, hashData.texelMask, hashData.tlutHash, callTile.tlut);
-
-                    fbPair.startFbOperations.emplace_back(fbOp);
-                    framebufferManager.reinterpretTileCache[reinterpretHash] = newTileId;
-                    callTile.tmemHashOrID = newTileId;
-                }
+                fbPair.startFbOperations.emplace_back(fbOp);
+                callTile.tmemHashOrID = newTileId;
             }
         };
 
@@ -799,14 +781,6 @@ namespace RT64 {
         }
     }
     
-    void State::listProcessBegin() {
-        dlCpuProfiler.start();
-    }
-
-    void State::listProcessEnd() {
-        dlCpuProfiler.end();
-    }
-
     void State::fullSync() {
         {
             static int n = 0;
@@ -837,7 +811,6 @@ namespace RT64 {
         
         // Copy the current state's extended parameters into the workload.
         workload.extended.ditherNoiseStrength = extended.ditherNoiseStrength;
-        workload.extended.texcoordWrapPoint = extended.texcoordWrapPoint;
 
         auto emitTileWarning = [&](CommandWarning warning, size_t tileIndex) {
             warning.indexType = CommandWarning::IndexType::TileIndex;
@@ -973,6 +946,7 @@ namespace RT64 {
         const bool scaleLOD = ext.enhancementConfig->textureLOD.scale;
         const bool usesHDR = ext.shaderLibrary->usesHDR;
         const std::vector<uint32_t> &faceIndices = workload.drawData.faceIndices;
+        const std::vector<int16_t> &posShorts = workload.drawData.posShorts;
         uint32_t faceIndex = uint32_t(workload.drawRanges.faceIndices.first);
         uint32_t rawVertexIndex = uint32_t(workload.drawRanges.triPosFloats.first) / 4;
         for (uint32_t f = 0; f < workload.fbPairCount; f++) {
@@ -1329,6 +1303,7 @@ namespace RT64 {
                         drawParams.submissionFrame = workload.submissionFrame;
                         drawParams.deltaTimeMs = 0.0f;
                         drawParams.ubershadersOnly = false;
+                        drawParams.fixRectLR = false;
                         drawParams.postBlendNoise = ext.emulatorConfig->dither.postBlendNoise;
                         drawParams.postBlendNoiseNegative = ext.emulatorConfig->dither.postBlendNoiseNegative;
                         drawParams.maxGameCall = UINT_MAX;
@@ -1646,10 +1621,6 @@ namespace RT64 {
         }
         else {
             workload.viOriginalRate = viHistory.logicalRateFromFactors();
-        }
-
-        if (viHistory.top().vi.visible()) {
-            workload.viFbSize = viHistory.top().vi.fbSize();
         }
 
         // Log and reset profilers.
@@ -2088,26 +2059,27 @@ namespace RT64 {
         //appData.m_cursorRayDirection = Im3d::Vec3(rayDir.x, rayDir.y, rayDir.z);
         //appData.m_keyDown[Im3d::Mouse_Left] = (GetAsyncKeyState(VK_LBUTTON) & 0x8000) != 0;
         */
-        
+
         if (ImGui::IsMouseClicked(ImGuiMouseButton_Right) && !ImGui::GetIO().WantCaptureMouse) {
             // We need to figure out the dimensions of where the viewport is being rendered at first.
             ext.sharedQueueResources->configurationMutex.lock();
             const hlslpp::float2 resolutionScale = ext.sharedQueueResources->resolutionScale;
-            bool removeBlackBorders = ext.sharedQueueResources->enhancementConfig.presentation.removeBlackBorders;
             const uint32_t downsampleMultiplier = ext.userConfig->downsampleMultiplier;
             ext.sharedQueueResources->configurationMutex.unlock();
             RenderViewport viewport;
             RenderRect scissor;
-            VIRenderer::getViewportAndScissor(ext.swapChain, lastScreenVI, resolutionScale, downsampleMultiplier, removeBlackBorders, viewport, scissor);
+            hlslpp::float2 fbHdRegion;
+            VIRenderer::getViewportAndScissor(ext.swapChain, lastScreenVI, resolutionScale, downsampleMultiplier, viewport, scissor, fbHdRegion);
 
             // Convert the mouse coordinates to native coordinates.
+            // FIXME: This needs a lot more work to be compatible with games with less standard VI modes.
             hlslpp::float2 screenCursorPos;
-            hlslpp::float2 halfFbSize = hlslpp::float2(lastScreenVI.fbSize()) / 2.0f;
             ImVec2 nativeMousePos = ImGui::GetMousePos();
             const float aspectRatio = resolutionScale.x / resolutionScale.y;
-            screenCursorPos.x = ((nativeMousePos.x - (viewport.x + viewport.width / 2)) / (viewport.width / 2)) * aspectRatio;
-            screenCursorPos.y = (nativeMousePos.y - (viewport.y + viewport.height / 2)) / (viewport.height / 2);
-            screenCursorPos = halfFbSize + screenCursorPos * halfFbSize;
+            screenCursorPos.x = ((nativeMousePos.x - (viewport.x + viewport.width / 2)) / viewport.width) * aspectRatio;
+            screenCursorPos.y = (nativeMousePos.y - (viewport.y + viewport.height / 2)) / viewport.height;
+            screenCursorPos.x = (VI::Width / 4) + screenCursorPos.x * (VI::Width / 2);
+            screenCursorPos.y = (VI::Height / 4) + screenCursorPos.y * (VI::Height / 2);
             debuggerInspector.rightClick(workload, screenCursorPos);
         }
 
@@ -2236,7 +2208,6 @@ namespace RT64 {
                     ImGui::Text("Presentation");
                     ImGui::Indent();
                     enhanceConfigChanged = ImGui::Combo("Mode##Presentation", reinterpret_cast<int *>(&enhancementConfig.presentation.mode), "Console\0Skip Buffering\0Present Early\0") || enhanceConfigChanged;
-                    enhanceConfigChanged = ImGui::Checkbox("Remove Black Borders", &enhancementConfig.presentation.removeBlackBorders) || enhanceConfigChanged;
                     ImGui::Unindent();
                     ImGui::Text("Rect");
                     ImGui::Indent();
@@ -2447,14 +2418,13 @@ namespace RT64 {
 
                     ImGui::EndTabItem();
                 }
-                
+
                 if (ImGui::BeginTabItem("Render")) {
                     if (ImPlot::BeginPlot("Frametimes")) {
                         const double FrametimeLimit = 20.0;
                         const int Stride = static_cast<int>(sizeof(double));
                         const auto &presentProfiler = ext.presentQueue->presentProfiler;
-                        const auto &rendererCPUProfiler = ext.workloadQueue->rendererCPUProfiler;
-                        const auto &rendererGPUProfiler = ext.workloadQueue->rendererGPUProfiler;
+                        const auto &rendererProfiler = ext.workloadQueue->rendererProfiler;
                         const auto &matchingProfiler = ext.workloadQueue->matchingProfiler;
                         const auto &workloadProfiler = ext.workloadQueue->workloadProfiler;
                         const auto &dlApiProfiler = *ext.dlApiProfiler;
@@ -2462,8 +2432,7 @@ namespace RT64 {
                         ImPlot::SetupAxisLimits(ImAxis_Y1, 0.0, FrametimeLimit);
                         ImPlot::SetupAxis(ImAxis_Y1, "ms", ImPlotAxisFlags_AutoFit);
                         ImPlot::PlotLine<double>("Present", presentProfiler.data(), static_cast<int>(presentProfiler.size()), 1.0, 0.0, ImPlotLineFlags_None, presentProfiler.index(), Stride);
-                        ImPlot::PlotLine<double>("Renderer (CPU)", rendererCPUProfiler.data(), static_cast<int>(rendererCPUProfiler.size()), 1.0, 0.0, ImPlotLineFlags_None, rendererCPUProfiler.index(), Stride);
-                        ImPlot::PlotLine<double>("Renderer (GPU)", rendererGPUProfiler.data(), static_cast<int>(rendererGPUProfiler.size()), 1.0, 0.0, ImPlotLineFlags_None, rendererGPUProfiler.index(), Stride);
+                        ImPlot::PlotLine<double>("Renderer", rendererProfiler.data(), static_cast<int>(rendererProfiler.size()), 1.0, 0.0, ImPlotLineFlags_None, rendererProfiler.index(), Stride);
                         ImPlot::PlotLine<double>("Matching", matchingProfiler.data(), static_cast<int>(matchingProfiler.size()), 1.0, 0.0, ImPlotLineFlags_None, matchingProfiler.index(), Stride);
                         ImPlot::PlotLine<double>("Workload", workloadProfiler.data(), static_cast<int>(workloadProfiler.size()), 1.0, 0.0, ImPlotLineFlags_None, workloadProfiler.index(), Stride);
                         ImPlot::PlotLine<double>("Display List (API)", dlApiProfiler.data(), static_cast<int>(dlApiProfiler.size()), 1.0, 0.0, ImPlotLineFlags_None, dlApiProfiler.index(), Stride);
@@ -2475,8 +2444,7 @@ namespace RT64 {
                         ImPlot::EndPlot();
                         
                         const double averagePresent = presentProfiler.average();
-                        const double averageRendererCPU = rendererCPUProfiler.average();
-                        const double averageRendererGPU = rendererGPUProfiler.average();
+                        const double averageRenderer = rendererProfiler.average();
                         const double averageMatching = matchingProfiler.average();
                         const double averageWorkload = workloadProfiler.average();
                         const double dlApiProfilerAverage = dlApiProfiler.average();
@@ -2486,8 +2454,7 @@ namespace RT64 {
                         const double screenCpuProfilerAverage = screenCpuProfiler.average();
                         const double textureStreamAverage = ext.textureCache->getAverageStreamLoadTime() / 1000.0;
                         ImGui::Text("Average Present (OS): %fms (%.1f FPS)\n", averagePresent, 1000.0 / averagePresent);
-                        ImGui::Text("Average Renderer (CPU): %fms (%.1f FPS)\n", averageRendererCPU, 1000.0 / averageRendererCPU);
-                        ImGui::Text("Average Renderer (GPU): %fms (%.1f FPS)\n", averageRendererGPU, 1000.0 / averageRendererGPU);
+                        ImGui::Text("Average Renderer: %fms (%.1f FPS)\n", averageRenderer, 1000.0 / averageRenderer);
                         ImGui::Text("Average Matching (CPU): %fms (%.1f FPS)\n", averageMatching, 1000.0 / averageMatching);
                         ImGui::Text("Average Workload: %fms (%.1f FPS)\n", averageWorkload, 1000.0 / averageWorkload);
                         ImGui::Text("Average Display List (API): %fms (%.1f FPS)\n", dlApiProfilerAverage, 1000.0 / dlApiProfilerAverage);
@@ -2611,7 +2578,6 @@ namespace RT64 {
                     ImGui::Text("Sample Locations: %d", capabilities.sampleLocations);
                     ImGui::Text("Descriptor Indexing: %d", capabilities.descriptorIndexing);
                     ImGui::Text("Scalar Block Layout: %d", capabilities.scalarBlockLayout);
-                    ImGui::Text("Sampler Mirror Clamp To Edge: %d", capabilities.samplerMirrorClampToEdge);
                     ImGui::Text("Present Wait: %d", capabilities.presentWait);
                     ImGui::Text("Display Timing: %d", capabilities.displayTiming);
                     ImGui::Text("Prefer HDR: %d", capabilities.preferHDR);
@@ -2759,10 +2725,6 @@ namespace RT64 {
     
     void State::setExtendedRDRAM(bool isExtended) {
         extended.extendRDRAM = isExtended;
-    }
-
-    void State::setTexcoordWrapPoint(int16_t wrapU, int16_t wrapV) {
-        extended.texcoordWrapPoint = { wrapU / 4.0f, wrapV / 4.0f };
     }
 
     void State::startSpriteCommand(uint64_t replacementHash) {

@@ -23,18 +23,18 @@ namespace RT64 {
     }
 
     // FramebufferManager
-
+    
     FramebufferManager::FramebufferManager() {
         writeTimestamp = 0;
     }
 
-    FramebufferManager::~FramebufferManager() {}
-
+    FramebufferManager::~FramebufferManager() { }
+    
     Framebuffer &FramebufferManager::get(uint32_t address, uint8_t siz, uint32_t width, uint32_t height) {
         auto &fb = framebuffers[address];
         fb.widthChanged = (fb.width != width);
         fb.sizChanged = (fb.siz != siz);
-
+        
         if (fb.widthChanged || fb.sizChanged) {
             fb.maxHeight = height;
             fb.readHeight = 0;
@@ -60,7 +60,7 @@ namespace RT64 {
             return nullptr;
         }
     }
-
+    
     Framebuffer *FramebufferManager::findMostRecentContaining(uint32_t addressStart, uint32_t addressEnd) {
         Framebuffer *mostRecent = nullptr;
         auto it = framebuffers.begin();
@@ -86,8 +86,8 @@ namespace RT64 {
 
         return mostRecent;
     }
-
-    void FramebufferManager::writeChanges(RenderWorker *renderWorker, const FramebufferChangePool &fbChangePool, const FramebufferOperation &op,
+    
+    void FramebufferManager::writeChanges(RenderWorker *renderWorker, const FramebufferChangePool &fbChangePool, const FramebufferOperation &op, 
         RenderTargetManager &targetManager, const ShaderLibrary *shaderLibrary)
     {
         auto it = framebuffers.find(op.writeChanges.address);
@@ -109,7 +109,7 @@ namespace RT64 {
             tileCopy.ignore = true;
             return;
         }
-
+        
         const FramebufferTile &fbTile = op.createTileCopy.fbTile;
         const uint32_t tileWidth = std::clamp<long>(lround((fbTile.right - fbTile.left) * resolutionScale.x), 1L, RenderTarget::MaxDimension);
         const uint32_t tileHeight = std::clamp<long>(lround((fbTile.bottom - fbTile.top) * resolutionScale.y), 1L, RenderTarget::MaxDimension);
@@ -145,14 +145,13 @@ namespace RT64 {
 
             const RenderTextureDesc textureDesc = RenderTextureDesc::Texture2D(tileCopy.textureWidth, tileCopy.textureHeight, 1, RenderTarget::colorBufferFormat(targetManager.usesHDR), textureFlags);
             tileCopy.texture = renderWorker->device->createTexture(textureDesc);
-            tileCopy.needsDiscard = true;
         }
 
         if (tileCopy.framebuffer == nullptr) {
             const RenderTexture *framebufferTexture = tileCopy.texture.get();
             tileCopy.framebuffer = renderWorker->device->createFramebuffer(RenderFramebufferDesc(&framebufferTexture, 1));
         }
-
+        
         RenderTargetKey colorTargetKey(fbIt->second.addressStart, fbIt->second.width, fbIt->second.siz, Framebuffer::Type::Color);
         RenderTarget &colorTarget = targetManager.get(colorTargetKey);
         uint32_t rtWidth, rtHeight, rtMisalignX;
@@ -176,9 +175,9 @@ namespace RT64 {
         }
     }
 
-    void FramebufferManager::createTileCopyRecord(RenderWorker *renderWorker, const FramebufferOperation &op, const FramebufferStorage &fbStorage,
+    void FramebufferManager::createTileCopyRecord(RenderWorker *renderWorker, const FramebufferOperation &op, const FramebufferStorage &fbStorage, 
         RenderTargetManager &targetManager, const hlslpp::float2 resolutionScale, uint32_t maxFbPairIndex, CommandListCopies &cmdListCopies,
-        CommandListDiscards &cmdListDiscards, const ShaderLibrary *shaderLibrary)
+        const ShaderLibrary *shaderLibrary)
     {
         // Texture for tile copy must exist.
         TileCopy &tileCopy = tileCopies[op.createTileCopy.id];
@@ -197,7 +196,7 @@ namespace RT64 {
                 colorTarget.copyFromChanges(renderWorker, *fbChange, fbIt->second.width, fbIt->second.height, 0, shaderLibrary);
             }
         }
-
+        
         // Copy from depth target if the last write was a depth buffer.
         if (fbIt->second.lastWriteType == Framebuffer::Type::Depth) {
             RenderTargetKey depthTargetKey(fbIt->second.addressStart, fbIt->second.width, fbIt->second.siz, Framebuffer::Type::Depth);
@@ -226,11 +225,6 @@ namespace RT64 {
         copyRegion.srcTexture = colorTarget.getResolvedTexture();
         copyRegion.dstTexture = tileCopy.texture.get();
 
-        if (tileCopy.needsDiscard) {
-            cmdListDiscards.cmdListDiscards.emplace_back(tileCopy.texture.get());
-            tileCopy.needsDiscard = false;
-        }
-
         if (colorTarget.textureCopyDescSet == nullptr) {
             colorTarget.textureCopyDescSet = std::make_unique<TextureCopyDescriptorSet>(renderWorker->device);
             colorTarget.textureCopyDescSet->setTexture(colorTarget.textureCopyDescSet->gInput, colorTarget.getResolvedTexture(), RenderTextureLayout::SHADER_READ, colorTarget.getResolvedTextureView());
@@ -243,7 +237,7 @@ namespace RT64 {
         copyRegion.pushConstants.uvScale = { float(srcRight - tileCopy.left), float(srcBottom - tileCopy.top) };
         cmdListCopies.cmdListCopyRegions.push_back(copyRegion);
     }
-
+    
     void FramebufferManager::reinterpretTileSetup(RenderWorker *renderWorker, const FramebufferOperation &op, hlslpp::float2 resolutionScale, bool usesHDR) {
         assert(tileCopies.find(op.reinterpretTile.srcId) != tileCopies.end());
 
@@ -303,12 +297,11 @@ namespace RT64 {
 
             const RenderTextureDesc textureDesc = RenderTextureDesc::Texture2D(dstTile.textureWidth, dstTile.textureHeight, 1, RenderTarget::colorBufferFormat(usesHDR), textureFlags);
             dstTile.texture = renderWorker->device->createTexture(textureDesc);
-            dstTile.needsDiscard = true;
         }
     }
 
     void FramebufferManager::reinterpretTileRecord(RenderWorker *renderWorker, const FramebufferOperation &op, TextureCache &textureCache, hlslpp::float2 resolutionScale,
-        uint64_t submissionFrame, bool usesHDR, CommandListReinterpretations &cmdListReinterpretations, CommandListDiscards &cmdListDiscards)
+        uint64_t submissionFrame, bool usesHDR, CommandListReinterpretations &cmdListReinterpretations)
     {
         assert(tileCopies.find(op.reinterpretTile.srcId) != tileCopies.end());
 
@@ -336,17 +329,12 @@ namespace RT64 {
         dispatch.srcTexture = srcTile.texture.get();
         dispatch.dstTexture = dstTile.texture.get();
 
-        if (dstTile.needsDiscard) {
-            cmdListDiscards.cmdListDiscards.emplace_back(dstTile.texture.get());
-            dstTile.needsDiscard = false;
-        }
-
         // Assert for known reinterpretation cases only that are currently supported by the shader.
         assert("Unimplemented reinterpretation logic." && (
             ((c.srcFmt == G_IM_FMT_RGBA) && (c.srcSiz == G_IM_SIZ_16b) && (c.dstSiz == G_IM_SIZ_8b) && (c.tlutFormat > 0)) ||
             ((c.srcSiz == G_IM_SIZ_8b) && ((c.dstFmt == G_IM_FMT_CI) || (c.dstFmt == G_IM_FMT_I) || (c.dstFmt == G_IM_FMT_IA)) && (c.dstSiz == G_IM_SIZ_8b) && (c.tlutFormat == 0)) ||
             ((c.srcFmt == G_IM_FMT_RGBA) && (c.srcSiz == G_IM_SIZ_16b) && (c.dstFmt == G_IM_FMT_IA) && (c.dstSiz == G_IM_SIZ_16b))
-            ));
+        ));
 
         while (descriptorReinterpretSetsCount >= descriptorReinterpretSets.size()) {
             descriptorReinterpretSets.emplace_back();
@@ -392,7 +380,7 @@ namespace RT64 {
 
         // We need to figure out the best fitting tile from the address range specified and the TMEM Regions this tile must be stored on.
         // The tile width and height parameters won't be 0 on load tile operations. They will however be 0 on load block operations.
-
+        
         // If the starting address is lower than the framebuffer address, we move a row one by one according to the stride specified of the original image width.
         uint32_t tileRowStart = 0;
         uint32_t fbStride = fb->imageRowBytes(fb->width);
@@ -400,7 +388,7 @@ namespace RT64 {
             addressStart += fbStride;
             tileRowStart++;
         }
-
+        
         // We went over the allowed address range, a tile copy is impossible.
         if (addressStart >= fb->addressEnd) {
             return false;
@@ -411,7 +399,7 @@ namespace RT64 {
         if (minEndAddress <= addressStart) {
             return false;
         }
-
+        
         // Figure out how many rows we could possibly given the current address range.
         const uint32_t fbBytes = minEndAddress - fb->addressStart;
         const uint32_t fbMinRow = (addressStart - fb->addressStart) / fbStride;
@@ -556,7 +544,7 @@ namespace RT64 {
                     resultRegions->push_back(activeRegionsTMEM.begin());
                 }
             }
-            };
+        };
 
         insertRegions(false);
 
@@ -738,12 +726,7 @@ namespace RT64 {
 
     void FramebufferManager::clearUsedTileCopies() {
         scratchChangePool.reset();
-        reinterpretTileCache.clear();
         usedTimestamp++;
-    }
-
-    uint64_t FramebufferManager::getUsedTimestamp() const {
-        return usedTimestamp;
     }
 
     uint64_t FramebufferManager::findTileCopyId(uint32_t width, uint32_t height) {
@@ -849,7 +832,7 @@ namespace RT64 {
             fbIndex++;
         }
     }
-
+    
     void FramebufferManager::resetTracking() {
         auto it = framebuffers.begin();
         while (it != framebuffers.end()) {
@@ -858,7 +841,7 @@ namespace RT64 {
             it++;
         }
     }
-
+    
     void FramebufferManager::hashTracking(const uint8_t *RDRAM) {
         auto it = framebuffers.begin();
         while (it != framebuffers.end()) {
@@ -918,10 +901,8 @@ namespace RT64 {
 
         thread_local CommandListCopies cmdListCopies;
         thread_local CommandListReinterpretations cmdListReinterpretations;
-        thread_local CommandListDiscards cmdListDiscards;
         cmdListCopies.clear();
         cmdListReinterpretations.clear();
-        cmdListDiscards.clear();
 
         for (const FramebufferOperation &op : operations) {
             switch (op.type) {
@@ -932,33 +913,17 @@ namespace RT64 {
             }
             case FramebufferOperation::Type::CreateTileCopy: {
                 assert(fbStorage != nullptr);
-                createTileCopyRecord(renderWorker, op, *fbStorage, targetManager, resolutionScale, maxFbPairIndex, cmdListCopies, cmdListDiscards, shaderLibrary);
+                createTileCopyRecord(renderWorker, op, *fbStorage, targetManager, resolutionScale, maxFbPairIndex, cmdListCopies, shaderLibrary);
                 break;
             }
             case FramebufferOperation::Type::ReinterpretTile: {
                 assert(textureCache != nullptr);
-                reinterpretTileRecord(renderWorker, op, *textureCache, resolutionScale, submissionFrame, shaderLibrary->usesHDR, cmdListReinterpretations, cmdListDiscards);
+                reinterpretTileRecord(renderWorker, op, *textureCache, resolutionScale, submissionFrame, shaderLibrary->usesHDR, cmdListReinterpretations);
                 break;
             }
             default:
                 assert(false && "Unknown operation type");
                 break;
-            }
-        }
-
-        thread_local std::vector<RenderTextureBarrier> beforeDiscardBarriers;
-        const bool discardTextures = !cmdListDiscards.cmdListDiscards.empty();
-        if (discardTextures) {
-            beforeDiscardBarriers.clear();
-
-            for (RenderTexture *texture : cmdListDiscards.cmdListDiscards) {
-                beforeDiscardBarriers.emplace_back(RenderTextureBarrier(texture, RenderTextureLayout::COLOR_WRITE));
-            }
-
-            renderWorker->commandList->barriers(RenderBarrierStage::GRAPHICS, beforeDiscardBarriers);
-
-            for (RenderTexture *texture : cmdListDiscards.cmdListDiscards) {
-                renderWorker->commandList->discardTexture(texture);
             }
         }
 
@@ -979,7 +944,7 @@ namespace RT64 {
             }
 
             renderWorker->commandList->barriers(RenderBarrierStage::GRAPHICS, tileCopyBeforeBarriers);
-
+            
             // Use the rasterization pipeline to copy the texture regions. Using the dedicated transfer commands does not behave consistently
             // enough across hardware to use it directly when it comes to synchronization due to unknown reasons found during testing (probably
             // due to transfer granularity or synchronization exceptions on legacy barriers when it comes to copy operations).

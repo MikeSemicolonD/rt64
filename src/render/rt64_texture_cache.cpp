@@ -59,6 +59,7 @@ namespace RT64 {
         replacementDirectories.clear();
         resolvedHashVersions.clear();
         fileSystemStreamResolvedPaths.clear();
+        fileSystemHashVersions.clear();
 
         usedTexturePoolSize = 0;
         cachedTexturePoolSize = 0;
@@ -465,7 +466,7 @@ namespace RT64 {
         lockCounter = 0;
 
         // Copy the command list and fence used by the methods called from the main thread.
-        loaderCommandList = copyWorker->commandQueue->createCommandList();
+        loaderCommandList = copyWorker->commandQueue->createCommandList(RenderCommandListType::COPY);
         loaderCommandFence = copyWorker->device->createCommandFence();
 
         // Create the semaphore used to synchronize the copy and the direct command queues.
@@ -744,8 +745,6 @@ namespace RT64 {
             return false;
         }
 
-        assert(ddsDescriptor.arraySize == 1 && "DDS with multiple arrays are not supported yet.");
-
         // Retrieve the block size of the format.
         uint32_t blockWidth, blockHeight;
         ddspp::get_block_size(ddsDescriptor.format, blockWidth, blockHeight);
@@ -755,7 +754,6 @@ namespace RT64 {
         desc.width = nextSizeAlignedTo(ddsDescriptor.width, blockWidth);
         desc.height = nextSizeAlignedTo(ddsDescriptor.height, blockHeight);
         desc.depth = 1;
-        desc.arraySize = 1;
         desc.mipLevels = ddsDescriptor.numMips;
         desc.format = toRenderFormat(ddsDescriptor.format);
 

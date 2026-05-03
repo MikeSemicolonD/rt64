@@ -43,10 +43,9 @@ namespace RT64 {
     }
 
     void Workload::resetDrawData() {
-        drawData.posFloats.clear();
-        drawData.velFloats.clear();
+        drawData.posShorts.clear();
+        drawData.velShorts.clear();
         drawData.tcFloats.clear();
-        drawData.tcVelFloats.clear();
         drawData.normColBytes.clear();
         drawData.viewProjIndices.clear();
         drawData.worldIndices.clear();
@@ -66,12 +65,10 @@ namespace RT64 {
         drawData.gpuTiles.clear();
         drawData.callTiles.clear();
         drawData.rspViewports.clear();
-        drawData.viewportClipRatios.clear();
         drawData.viewportOrigins.clear();
         drawData.rspFog.clear();
         drawData.rspLights.clear();
         drawData.rspLookAt.clear();
-        drawData.lerpRspLookAt.clear();
         drawData.loadOperations.clear();
         drawData.worldTransforms.clear();
         drawData.viewTransforms.clear();
@@ -95,10 +92,6 @@ namespace RT64 {
         drawData.worldTransformSegmentedAddresses.clear();
         drawData.worldTransformPhysicalAddresses.clear();
         drawData.worldTransformVertexIndices.clear();
-        drawData.viewportClipRatios.push_back(1);
-        drawData.viewportClipRatios.push_back(1);
-        drawData.viewportClipRatios.push_back(-1);
-        drawData.viewportClipRatios.push_back(-1);
 
         // Push an identity matrix into the transforms by default so rects can use them.
         drawData.rspViewports.push_back(interop::RSPViewport::identity());
@@ -117,10 +110,9 @@ namespace RT64 {
 
     void Workload::resetDrawDataRanges() {
         auto &r = drawRanges;
-        r.posFloats = { 0, 0 };
-        r.velFloats = { 0, 0 };
+        r.posShorts = { 0, 0 };
+        r.velShorts = { 0, 0 };
         r.tcFloats = { 0, 0 };
-        r.tcVelFloats = { 0, 0 };
         r.normColBytes = { 0, 0 };
         r.viewProjIndices = { 0, 0 };
         r.worldIndices = { 0, 0 };
@@ -162,10 +154,9 @@ namespace RT64 {
 
     void Workload::updateDrawDataRanges() {
         auto &r = drawRanges;
-        r.posFloats.second = drawData.posFloats.size();
-        r.velFloats.second = drawData.velFloats.size();
+        r.posShorts.second = drawData.posShorts.size();
+        r.velShorts.second = drawData.velShorts.size();
         r.tcFloats.second = drawData.tcFloats.size();
-        r.tcVelFloats.second = drawData.tcVelFloats.size();
         r.normColBytes.second = drawData.normColBytes.size();
         r.viewProjIndices.second = drawData.viewProjIndices.size();
         r.worldIndices.second = drawData.worldIndices.size();
@@ -196,10 +187,9 @@ namespace RT64 {
     void Workload::uploadDrawData(RenderWorker *worker, BufferUploader *bufferUploader) {
         const RenderBufferFlags rtInputFlag = worker->device->getCapabilities().raytracing ? RenderBufferFlag::ACCELERATION_STRUCTURE_INPUT : RenderBufferFlag::NONE;
         bufferUploader->submit(worker, {
-            { drawData.posFloats.data(), drawRanges.posFloats, sizeof(float), RenderBufferFlag::FORMATTED, { RenderFormat::R32_FLOAT }, &drawBuffers.positionBuffer },
-            { drawData.velFloats.data(), drawRanges.velFloats, sizeof(float), RenderBufferFlag::FORMATTED, { RenderFormat::R32_FLOAT }, &drawBuffers.velocityBuffer },
-            { drawData.tcFloats.data(), drawRanges.tcFloats, sizeof(float), RenderBufferFlag::FORMATTED, { RenderFormat::R32_FLOAT }, &drawBuffers.texcoordBuffer },
-            { drawData.tcVelFloats.data(), drawRanges.tcVelFloats, sizeof(float), RenderBufferFlag::FORMATTED, { RenderFormat::R32_FLOAT }, &drawBuffers.texcoordVelocityBuffer },
+            { drawData.posShorts.data(), drawRanges.posShorts, sizeof(int16_t), RenderBufferFlag::FORMATTED, { RenderFormat::R16_SINT }, &drawBuffers.positionBuffer },
+            { drawData.velShorts.data(), drawRanges.velShorts, sizeof(int16_t), RenderBufferFlag::FORMATTED, { RenderFormat::R16_SINT }, &drawBuffers.velocityBuffer },
+            { drawData.tcFloats.data(), drawRanges.tcFloats, sizeof(float), RenderBufferFlag::FORMATTED | RenderBufferFlag::VERTEX, { RenderFormat::R32_FLOAT }, &drawBuffers.texcoordBuffer },
             { drawData.normColBytes.data(), drawRanges.normColBytes, sizeof(uint8_t), RenderBufferFlag::FORMATTED | RenderBufferFlag::STORAGE, { RenderFormat::R8_UINT, RenderFormat::R8_SINT }, &drawBuffers.normalColorBuffer },
             { drawData.viewProjIndices.data(), drawRanges.viewProjIndices, sizeof(uint16_t), RenderBufferFlag::FORMATTED | RenderBufferFlag::STORAGE, { RenderFormat::R16_UINT }, &drawBuffers.viewProjIndicesBuffer },
             { drawData.worldIndices.data(), drawRanges.worldIndices, sizeof(uint16_t), RenderBufferFlag::FORMATTED | RenderBufferFlag::STORAGE, { RenderFormat::R16_UINT }, &drawBuffers.worldIndicesBuffer },
@@ -254,10 +244,9 @@ namespace RT64 {
 
     void Workload::nextDrawDataRanges() {
         auto &r = drawRanges;
-        nextDrawDataRange(r.posFloats);
-        nextDrawDataRange(r.velFloats);
+        nextDrawDataRange(r.posShorts);
+        nextDrawDataRange(r.velShorts);
         nextDrawDataRange(r.tcFloats);
-        nextDrawDataRange(r.tcVelFloats);
         nextDrawDataRange(r.normColBytes);
         nextDrawDataRange(r.viewProjIndices);
         nextDrawDataRange(r.worldIndices);

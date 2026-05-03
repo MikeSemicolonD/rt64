@@ -123,7 +123,6 @@ namespace RT64 {
         External ext;
 
         struct Extended {
-            hlslpp::float2 texcoordWrapPoint = { 8092.0f, 8092.0f };
             uint16_t refreshRate = UINT16_MAX;
             uint8_t renderToRAM = UINT8_MAX;
             bool vertexTestZActive = false;
@@ -146,8 +145,6 @@ namespace RT64 {
         void checkRDRAM();
         void fullSync();
         void fullSyncFramebufferPairTiles(Workload &workload, FramebufferPair &fbPair, uint32_t &loadOpCursor, uint32_t &rdpTileCursor);
-        void listProcessBegin();
-        void listProcessEnd();
         void updateScreen(const VI &newVI, bool fromEarlyPresent);
         void updateMultisampling();
         void inspect();
@@ -164,7 +161,6 @@ namespace RT64 {
         void setRenderToRAM(uint8_t renderToRAM);
         void setDitherNoiseStrength(float noiseStrength);
         void setExtendedRDRAM(bool isExtended);
-        void setTexcoordWrapPoint(int16_t wrapU, int16_t wrapV);
         void startSpriteCommand(uint64_t replacementHash);
         void endSpriteCommand();
         uint8_t *fromRDRAM(uint32_t rdramAddress) const;
