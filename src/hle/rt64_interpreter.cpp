@@ -29,7 +29,7 @@ namespace RT64 {
     bool g_op02Captured = false;
     // Dump after the Nth processDisplayLists call returns (0-based).
     // Frame 0 is usually just state setup; frame 3 should include real draws.
-    static constexpr int kFrameToDump = 38;  // captures state just before frame-40 stall
+    static constexpr int kFrameToDump = 100;  // post-boot capture: tasks 41+ run new DLs (0x00725EE0, 0x00728D48, 0x00729ED0)
     int g_frameCounter = 0;
 
     // Interpreter
@@ -252,6 +252,24 @@ namespace RT64 {
     }
 
     void Interpreter::processDisplayLists(uint32_t dlStartAdddress, DisplayList *dlStart) {
+        // Sidecar task log: written for every invocation regardless of whether
+        // a matching GBI was found. Lets us see whether model-bearing tasks
+        // are being submitted and skipped vs. never submitted at all.
+        // File is reset on first call of the run.
+        {
+            static bool reset = false;
+            if (!reset) { reset = true; if (FILE *fp = fopen("tasks_log.txt", "w")) { fprintf(fp, "# task#  frame  state  dlStart       firstW0     firstW1\n"); fclose(fp); } }
+        }
+        static int g_taskN = 0;
+        ++g_taskN;
+        const char *taskState = (hleGBI == nullptr) ? "SKIP_no_gbi" : "ENTER";
+        if (FILE *fp = fopen("tasks_log.txt", "a")) {
+            fprintf(fp, "%05d  %4d  %-12s  0x%08X  0x%08X  0x%08X\n",
+                g_taskN, g_frameCounter, taskState, dlStartAdddress,
+                dlStart ? dlStart->w0 : 0u, dlStart ? dlStart->w1 : 0u);
+            fclose(fp);
+        }
+
         // If GBI lookup failed (e.g. game submitted a task with an unrecognized
         // ucode — Rogue Squadron does this for some post-credits scenes), skip
         // the task instead of asserting. The interpreter's main loop reads

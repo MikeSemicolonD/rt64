@@ -136,16 +136,6 @@ namespace RT64 {
         void setColorImage_filtered(State *state, DisplayList **dl) {
             const uint32_t w0 = (*dl)->w0;
             const uint32_t w1 = (*dl)->w1;
-            // PROBE: log first N op_FF dispatches so we can compare working
-            // (8-byte) calls vs drift-causing ones for a length signal.
-            {
-                static int n = 0;
-                if (n < 60) {
-                    n++;
-                    fprintf(stderr, "[ff-probe] #%d w0=0x%08X w1=0x%08X\n", n, w0, w1);
-                    fflush(stderr);
-                }
-            }
             if (w1 == 0) {
                 return;
             }
