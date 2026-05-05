@@ -405,7 +405,7 @@ namespace RT64 {
                 {
                     static int n = 0;
                     if (++n <= 20 || (n % 200) == 0) {
-                        fprintf(stderr, "[trace] getTargetsFromPair #%d f=%u addr=0x%08X w=%u rectEmpty=%d\n",
+                        if(false) fprintf(stderr, "[trace] getTargetsFromPair #%d f=%u addr=0x%08X w=%u rectEmpty=%d\n",
                             n, f, colorImg.address, (unsigned)colorImg.width,
                             (int)fbPair.drawColorRect.isEmpty());
                         fflush(stderr);

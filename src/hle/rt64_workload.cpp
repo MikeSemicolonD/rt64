@@ -295,7 +295,7 @@ namespace RT64 {
         {
             static int n = 0;
             if (++n <= 30 || (n % 500) == 0) {
-                fprintf(stderr, "[trace] addFb #%d color=0x%08X w=%u count-after=%u idx=%u added=%d\n",
+                if(false) fprintf(stderr, "[trace] addFb #%d color=0x%08X w=%u count-after=%u idx=%u added=%d\n",
                     n, colorAddress, (unsigned)colorWidth, (unsigned)fbPairCount,
                     fbPairIndex, (int)addedPair);
                 fflush(stderr);

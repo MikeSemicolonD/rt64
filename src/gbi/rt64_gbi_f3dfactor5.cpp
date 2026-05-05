@@ -44,6 +44,13 @@ namespace RT64 {
         // TODO: identify. Payload is constant: w0=0x028001C0 w1=0x01FF0000 every call.
         // On first dispatch, dump full RDRAM + DL history so the RSP op02 handler
         // can be reverse-engineered offline against real input data.
+        //
+        // Heuristic-emit experiment (fan/strip/list against op_01-loaded verts)
+        // was tried and reverted — produced no visual change because the data
+        // at op_01's source address (0x80700000) doesn't decode as F3D vertices
+        // (x always 0, only ~38 non-zero bytes per 1KB, sentinel-looking values).
+        // op_01 in Factor5 is almost certainly a custom command, not standard
+        // G_VTX. Real fix needs RSP ucode disassembly at 0x801F3204.
         void op02_unknown(State *state, DisplayList **dl) {
             constexpr size_t kDLHistLen = 64;
             if (g_op02Captured) return;
@@ -121,7 +128,7 @@ namespace RT64 {
             // Looks like a Factor5-specific opcode reusing byte 0x06. No-op for now.
             static int n = 0;
             if (++n <= 10 || (n % 5000) == 0) {
-                fprintf(stderr, "[trace] op_06 non-standard #%d w0=0x%08X w1=0x%08X (skipped)\n",
+                if(false) fprintf(stderr, "[trace] op_06 non-standard #%d w0=0x%08X w1=0x%08X (skipped)\n",
                     n, (*dl)->w0, (*dl)->w1);
                 fflush(stderr);
             }
@@ -149,7 +156,7 @@ namespace RT64 {
             if (fmt > 4) {
                 static int n = 0;
                 if (++n <= 10 || (n % 5000) == 0) {
-                    fprintf(stderr, "[trace] setColorImage skip-bogus #%d w0=0x%08X w1=0x%08X (fmt=%u>4)\n",
+                    if(false) fprintf(stderr, "[trace] setColorImage skip-bogus #%d w0=0x%08X w1=0x%08X (fmt=%u>4)\n",
                         n, w0, w1, fmt);
                     fflush(stderr);
                 }
@@ -174,7 +181,15 @@ namespace RT64 {
             //          inherited handler extracts a vertex index from w0 bits
             //          1-11, hits std::array bounds check on the 32-entry
             //          vertex cache. Confirmed via crash-dump ring buffer.
+            //   0xB2 = F3DEX G_MODIFYVTX. Crashes after DL drifts into pixel
+            //          data on the N64 logo screen — drifted bytes match
+            //          0xB2B2B2FF (gray pixel). The inherited handler extracts
+            //          bits 1-15 of w0 as a vertex index, lands at ~0x59FF,
+            //          asserts in rt64_rsp.cpp:648.  No-op'ing it doesn't fix
+            //          the drift but does survive it long enough to keep
+            //          progressing.
             gbi->map[0xB0] = &op80_unknown;
+            gbi->map[0xB2] = &op80_unknown;
             gbi->map[0xB4] = &op_B4_consume16;
             gbi->map[0xBF] = &op_BF_consume16;
             // EXPERIMENT: was &op_B5_endDl. Runtime DL dumps show many sub-DLs

@@ -388,7 +388,7 @@ namespace RT64 {
         if (writeBufferHistoryCount == 0) {
             static int n = 0;
             if (++n <= 10 || (n % 500) == 0) {
-                fprintf(stderr, "[trace] copyToRAM skip #%d (no writeBuffer history) row=%u..%u w=%u siz=%u\n",
+                if(false) fprintf(stderr, "[trace] copyToRAM skip #%d (no writeBuffer history) row=%u..%u w=%u siz=%u\n",
                     n, rowStart, rowEnd, width, (unsigned)siz);
                 fflush(stderr);
             }

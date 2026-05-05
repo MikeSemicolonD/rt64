@@ -35,7 +35,7 @@ namespace RT64 {
             const uint16_t width = (*dl)->p0(0, 12) + 1;
             const uint32_t address = (*dl)->w1;
             { static int n=0; if (++n<=10 || (n%5000)==0) {
-                fprintf(stderr, "[trace] setTextureImage #%d addr=0x%08X w=%u fmt=%u siz=%u\n",
+                if(false) fprintf(stderr, "[trace] setTextureImage #%d addr=0x%08X w=%u fmt=%u siz=%u\n",
                     n, address, (unsigned)width, (unsigned)fmt, (unsigned)siz);
                 fflush(stderr);
             } }
@@ -61,7 +61,7 @@ namespace RT64 {
             const uint8_t shiftt = (*dl)->p1(10, 4);
             const uint8_t shifts = (*dl)->p1(0, 4);
             { static int n=0; if (++n<=10 || (n%5000)==0) {
-                fprintf(stderr, "[trace] setTile #%d tile=%u fmt=%u siz=%u line=%u tmem=%u\n",
+                if(false) fprintf(stderr, "[trace] setTile #%d tile=%u fmt=%u siz=%u line=%u tmem=%u\n",
                     n, (unsigned)tile, (unsigned)fmt, (unsigned)siz, (unsigned)line, (unsigned)tmem);
                 fflush(stderr);
             } }
@@ -93,7 +93,7 @@ namespace RT64 {
             const uint16_t lrs = (*dl)->p1(12, 12);
             const uint16_t dxt = (*dl)->p1(0, 12);
             { static int n=0; if (++n<=10 || (n%5000)==0) {
-                fprintf(stderr, "[trace] loadBlock #%d tile=%u uls=%u ult=%u lrs=%u dxt=%u\n",
+                if(false) fprintf(stderr, "[trace] loadBlock #%d tile=%u uls=%u ult=%u lrs=%u dxt=%u\n",
                     n, (unsigned)tile, (unsigned)uls, (unsigned)ult, (unsigned)lrs, (unsigned)dxt);
                 fflush(stderr);
             } }
@@ -134,6 +134,13 @@ namespace RT64 {
 
         void setFillColor(State *state, DisplayList **dl) {
             const uint32_t color = (*dl)->w1;
+            { static uint32_t lastColor = 0; static int n = 0; ++n;
+                if (color != lastColor || n <= 5 || (n % 2000) == 0) {
+                    if(false) fprintf(stderr, "[trace] setFillColor #%d color=0x%08X\n", n, color);
+                    fflush(stderr);
+                    lastColor = color;
+                }
+            }
             state->rdp->setFillColor(color);
         }
 
@@ -187,7 +194,7 @@ namespace RT64 {
 
         void texrect(State *state, DisplayList **dl) {
             { static int n=0; if (++n <= 10 || (n % 10000) == 0) {
-                fprintf(stderr, "[trace] GBI texrect handler #%d g_dlHist=%zu g_frame=%d\n",
+                if(false) fprintf(stderr, "[trace] GBI texrect handler #%d g_dlHist=%zu g_frame=%d\n",
                     n, RT64::g_dlHistCount, RT64::g_frameCounter);
                 fflush(stderr);
             } }
@@ -237,6 +244,13 @@ namespace RT64 {
             const int16_t ult = (*dl)[1].p0(0, 16);
             const int16_t dsdx = (*dl)[1].p1(16, 16);
             const int16_t dtdy = (*dl)[1].p1(0, 16);
+            { static int n = 0; ++n;
+                if (n <= 10 || (n % 1000) == 0) {
+                    if(false) fprintf(stderr, "[trace] texrectLLE #%d ul=(%d,%d) lr=(%d,%d) tile=%u\n",
+                        n, ulx>>2, uly>>2, lrx>>2, lry>>2, tile);
+                    fflush(stderr);
+                }
+            }
             state->rdp->drawTexRect(ulx, uly, lrx, lry, tile, uls, ult, dsdx, dtdy, false);
         }
 
@@ -259,6 +273,13 @@ namespace RT64 {
             const int32_t uly = (*dl)->p1(0, 12);
             const int32_t lrx = (*dl)->p0(12, 12);
             const int32_t lry = (*dl)->p0(0, 12);
+            { static int n = 0; ++n;
+                if (n <= 10 || (n % 1000) == 0) {
+                    if(false) fprintf(stderr, "[trace] fillRect #%d ul=(%d,%d) lr=(%d,%d) w=%d h=%d\n",
+                        n, ulx>>2, uly>>2, lrx>>2, lry>>2, (lrx-ulx)>>2, (lry-uly)>>2);
+                    fflush(stderr);
+                }
+            }
             state->rdp->fillRect(ulx, uly, lrx, lry);
         }
 

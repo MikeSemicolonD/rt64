@@ -245,7 +245,7 @@ namespace RT64 {
             { static int n=0; ++n;
                 bool isZero = (newAddress == 0);
                 if (isZero || n<=30 || (n%50)==0) {
-                    fprintf(stderr, "[trace] setColorImage #%d addr=0x%08X w=%u fmt=%u siz=%u%s\n",
+                    if(false) fprintf(stderr, "[trace] setColorImage #%d addr=0x%08X w=%u fmt=%u siz=%u%s\n",
                         n, newAddress, (unsigned)width, (unsigned)fmt, (unsigned)siz,
                         isZero ? " <ZERO>" : "");
                     fflush(stderr);
@@ -280,7 +280,7 @@ namespace RT64 {
         { static int n=0; ++n;
           bool isZero = (newAddr == 0);
           if (isZero || n<=10 || (n%5000)==0) {
-              fprintf(stderr, "[trace] RDP::setTextureImage #%d addr=0x%08X w=%u fmt=%u siz=%u%s\n",
+              if(false) fprintf(stderr, "[trace] RDP::setTextureImage #%d addr=0x%08X w=%u fmt=%u siz=%u%s\n",
                   n, newAddr, (unsigned)width, (unsigned)fmt, (unsigned)siz,
                   isZero ? " <ZERO>" : "");
               fflush(stderr);
@@ -307,18 +307,18 @@ namespace RT64 {
                     // Decode both cycles' alpha inputs so we can spot a
                     // permanently-zero alpha (which would explain invisible
                     // glyphs in the credits/post-credits text path).
-                    fprintf(stderr, "[trace] setCombine #%d mux=0x%016llX L=0x%08X H=0x%08X\n",
+                    if(false) fprintf(stderr, "[trace] setCombine #%d mux=0x%016llX L=0x%08X H=0x%08X\n",
                         n, (unsigned long long)combine, cc.L, cc.H);
-                    fprintf(stderr, "  cycle0 alpha A=%u B=%u C=%u D=%u\n",
+                    if(false) fprintf(stderr, "  cycle0 alpha A=%u B=%u C=%u D=%u\n",
                         cc.parseAlphaInputA(false), cc.parseAlphaInputB(false),
                         cc.parseAlphaInputC(false), cc.parseAlphaInputD(false));
-                    fprintf(stderr, "  cycle1 alpha A=%u B=%u C=%u D=%u\n",
+                    if(false) fprintf(stderr, "  cycle1 alpha A=%u B=%u C=%u D=%u\n",
                         cc.parseAlphaInputA(true), cc.parseAlphaInputB(true),
                         cc.parseAlphaInputC(true), cc.parseAlphaInputD(true));
-                    fprintf(stderr, "  cycle0 color A=%u B=%u C=%u D=%u\n",
+                    if(false) fprintf(stderr, "  cycle0 color A=%u B=%u C=%u D=%u\n",
                         cc.parseColorInputA(false), cc.parseColorInputB(false),
                         cc.parseColorInputC(false), cc.parseColorInputD(false));
-                    fprintf(stderr, "  cycle1 color A=%u B=%u C=%u D=%u\n",
+                    if(false) fprintf(stderr, "  cycle1 color A=%u B=%u C=%u D=%u\n",
                         cc.parseColorInputA(true), cc.parseColorInputB(true),
                         cc.parseColorInputC(true), cc.parseColorInputD(true));
                     fflush(stderr);
@@ -595,6 +595,21 @@ namespace RT64 {
             // Load into TMEM.
             uint8_t *TMEM8 = reinterpret_cast<uint8_t *>(TMEM);
             const uint8_t *RDRAM = state->RDRAM;
+            // Bounds-check the texture source. With a Factor5-driven game, an
+            // upstream SETTIMG sometimes carries a wildly-out-of-range address
+            // (observed: 28GB-shaped values), AVing inside loadToTMEMCommon. Skip
+            // the load entirely and log so we know we're losing TLUTs.
+            constexpr uint32_t kRDRAMSize = 8 * 1024 * 1024;
+            const uint32_t textureEnd = textureStart + (rowCount - 1) * bytesPerRow + (wordsPerRow << 3);
+            if (textureStart >= kRDRAMSize || textureEnd > kRDRAMSize || textureEnd < textureStart) {
+                static int n = 0;
+                if (++n <= 10 || (n % 500) == 0) {
+                    fprintf(stderr, "[loadTLUT] skip out-of-range #%d textureStart=0x%08X textureEnd=0x%08X\n",
+                        n, textureStart, textureEnd);
+                    fflush(stderr);
+                }
+                return;
+            }
             if (RGBA32) {
                 loadToTMEMCommon<true, false, true>(TMEM8, RDRAM, textureStart, bytesPerRow, tmemStart, tmemStride, wordsPerRow, rowCount);
             }
@@ -880,7 +895,7 @@ namespace RT64 {
           ++n;
           // ALWAYS log first 30, then every 1000th regardless of value change
           if (n <= 30 || (n % 1000) == 0) {
-              fprintf(stderr, "[trace] setPrimColor #%d color=0x%08X A=%u\n",
+              if(false) fprintf(stderr, "[trace] setPrimColor #%d color=0x%08X A=%u\n",
                   n, color, (unsigned)(color & 0xFF));
               fflush(stderr);
           }
@@ -1226,7 +1241,7 @@ namespace RT64 {
             } else {
                 static int n = 0;
                 if (++n <= 10 || (n % 1000) == 0) {
-                    fprintf(stderr, "[trace] texrect intRectNull #%d colorAddr=0x%08X scissor={%d,%d,%d,%d} draw={%d,%d,%d,%d}\n",
+                    if(false) fprintf(stderr, "[trace] texrect intRectNull #%d colorAddr=0x%08X scissor={%d,%d,%d,%d} draw={%d,%d,%d,%d}\n",
                         n, colorImage.address,
                         scissorRect.ulx, scissorRect.uly, scissorRect.lrx, scissorRect.lry,
                         drawRect.ulx, drawRect.uly, drawRect.lrx, drawRect.lry);
@@ -1237,7 +1252,7 @@ namespace RT64 {
         if (scissorIsNull) {
             static int n = 0;
             if (++n <= 10 || (n % 1000) == 0) {
-                fprintf(stderr, "[trace] texrect scissorNull #%d colorAddr=0x%08X draw={%d,%d,%d,%d}\n",
+                if(false) fprintf(stderr, "[trace] texrect scissorNull #%d colorAddr=0x%08X draw={%d,%d,%d,%d}\n",
                     n, colorImage.address,
                     drawRect.ulx, drawRect.uly, drawRect.lrx, drawRect.lry);
                 fflush(stderr);
@@ -1271,7 +1286,7 @@ namespace RT64 {
             if (glyphSized) {
                 static int n = 0; ++n;
                 if (n <= 60 || (n % 200) == 0) {
-                    fprintf(stderr, "[trace] glyph-rect #%d w=%d loadIdx=%u loadCnt=%u flushed=%d colorAddr=0x%08X\n",
+                    if(false) fprintf(stderr, "[trace] glyph-rect #%d w=%d loadIdx=%u loadCnt=%u flushed=%d colorAddr=0x%08X\n",
                         n, rectW, drawCall.loadIndex, drawCall.loadCount,
                         (int)flushedState, colorImage.address);
                     fflush(stderr);
@@ -1357,7 +1372,7 @@ namespace RT64 {
     }
     
     void RDP::drawTexRect(int32_t ulx, int32_t uly, int32_t lrx, int32_t lry, uint8_t tile, int16_t uls, int16_t ult, int16_t dsdx, int16_t dtdy, bool flip, const ExtendedAlignment &extAlignment) {
-        { static int n=0; if (++n<=10 || (n%50)==0) { fprintf(stderr, "[trace] RT64::drawTexRect #%d ulx=%d uly=%d lrx=%d lry=%d tile=%u colorAddr=0x%08X\n", n, ulx, uly, lrx, lry, tile, colorImage.address); fflush(stderr); } }
+        { static int n=0; if (++n<=10 || (n%50)==0) { if(false) fprintf(stderr, "[trace] RT64::drawTexRect #%d ulx=%d uly=%d lrx=%d lry=%d tile=%u colorAddr=0x%08X\n", n, ulx, uly, lrx, lry, tile, colorImage.address); fflush(stderr); } }
         // Per-rect load-binding probe. Confirms whether each glyph's TEXRECT
         // binds to its own loadOperations range (loadIndex/loadCount). For text
         // batches: expect loadCount=2 per glyph (LoadTLUT + LoadBlock) and
@@ -1366,7 +1381,7 @@ namespace RT64 {
         { static int n=0; ++n; if (n<=20 || (n%500)==0) {
             const int wlc = state->ext.workloadQueue->writeCursor;
             const auto &wl = state->ext.workloadQueue->workloads[wlc];
-            fprintf(stderr, "[trace] drawTexRect-bind #%d tile=%u loadOps=%zu drawRanges.loadOps.second=%zu\n",
+            if(false) fprintf(stderr, "[trace] drawTexRect-bind #%d tile=%u loadOps=%zu drawRanges.loadOps.second=%zu\n",
                 n, (unsigned)tile, wl.drawData.loadOperations.size(),
                 wl.drawRanges.loadOperations.second);
             fflush(stderr);
