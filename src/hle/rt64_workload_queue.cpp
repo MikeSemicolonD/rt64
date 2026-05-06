@@ -55,15 +55,29 @@ namespace RT64 {
 
         // Stall the thread until the barrier is lifted if we're trying to write on a workload being used by the GPU.
         bool waitForBarrier;
+        int barrierWaitIters = 0;
         do {
             const std::scoped_lock lock(cursorMutex);
             waitForBarrier = (nextWriteCursor == barrierCursor);
+            if (waitForBarrier) ++barrierWaitIters;
         } while (waitForBarrier);
 
         // Modify the cursor and notify anything waiting on the queue.
         {
             const std::scoped_lock lock(cursorMutex);
             writeCursor = nextWriteCursor;
+        }
+
+        // Workload generation counter — pairs with the RT64::Present counter
+        // so we can see ratio of generated:presented workloads.
+        {
+            static int n=0;
+            ++n;
+            if (n<=8 || (n & 31) == 0) {
+                fprintf(stderr, "[trace] WorkloadQueue::advance #%d barrierWaitIters=%d\n",
+                    n, barrierWaitIters);
+                fflush(stderr);
+            }
         }
 
         cursorCondition.notify_all();

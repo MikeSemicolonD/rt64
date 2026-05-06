@@ -451,7 +451,17 @@ namespace RT64 {
                 RenderCommandSemaphore *waitSemaphore = drawSemaphore.get();
                 presentTimestamp = Timer::current();
                 swapChainValid = ext.swapChain->present(swapChainIndex, &waitSemaphore, 1);
-                { static int n=0; if (++n<=10 || (n%50)==0) { if(false) fprintf(stderr, "[trace] RT64::Present #%d swapIdx=%u valid=%d\n", n, (unsigned)swapChainIndex, (int)swapChainValid); fflush(stderr); } }
+                {
+                    // Present-rate counter: prints first 8 + every 32nd. With
+                    // halt cadence ~17/s and cinematic_drv ~30/s, this tells us
+                    // how often actual present() lands on the swapchain.
+                    static int n=0;
+                    if (++n<=8 || (n & 31) == 0) {
+                        fprintf(stderr, "[trace] RT64::Present #%d swapIdx=%u valid=%d\n",
+                            n, (unsigned)swapChainIndex, (int)swapChainValid);
+                        fflush(stderr);
+                    }
+                }
                 presentProfiler.logAndRestart();
             }
         }

@@ -259,7 +259,20 @@ namespace RT64 {
 
                     // Failsafe cases.
                     if (tile.line == 0) {
-                        assert((drawCall.otherMode.cycleType() != G_CYC_COPY) && "Copy mode should be able to work even with tiles that aren't defined.");
+                        // Original assert here said "Copy mode should be able to work
+                        // even with tiles that aren't defined" — author's debug trap
+                        // for a known-incomplete path. Factor5 LLE (Rogue Squadron
+                        // cinematic) hits this with G_CYC_COPY blits; the graceful
+                        // skip below is what we want, but the assert was killing
+                        // the frame. Throttled trace so we still see when it fires.
+                        static std::atomic<uint64_t> s_undef_tile{0};
+                        uint64_t n = ++s_undef_tile;
+                        if (n == 1 || (n & (n - 1)) == 0) {
+                            fprintf(stderr, "[rt64] undefined tile in cycleType=%u (#%llu) — skipping\n",
+                                (unsigned)drawCall.otherMode.cycleType(),
+                                (unsigned long long)n);
+                            fflush(stderr);
+                        }
                         dstCallTile.valid = false;
                         continue;
                     }
@@ -794,12 +807,14 @@ namespace RT64 {
     
     void State::fullSync() {
         {
+            // Enabled the trace: comparing State::fullSync rate vs Factor5
+            // task halt rate tells us if RT64 is observing every FULL_SYNC.
             static int n = 0;
             ++n;
             int workloadCursor = ext.workloadQueue->writeCursor;
             Workload &wl = ext.workloadQueue->workloads[workloadCursor];
-            if (n <= 10 || (n % 50) == 0) {
-                if(false) fprintf(stderr, "[trace] State::fullSync #%d workload-fbPairCount=%u\n",
+            if (n <= 8 || (n & 31) == 0) {
+                fprintf(stderr, "[trace] State::fullSync #%d workload-fbPairCount=%u\n",
                     n, (unsigned)wl.fbPairCount);
                 fflush(stderr);
             }
@@ -1491,9 +1506,25 @@ namespace RT64 {
                 pairCursor = framebufferPairCursor;
                 while (pairCursor < maxFramebufferPair) {
                     if (getFramebufferPairs(pairCursor)) {
-                        colorFb->copyNativeToRAM(&RDRAM[colorFb->addressStart], colorWriteWidth, colorRowStart, std::min(colorRowEnd, colorFb->height));
+                        // Reject framebuffer writeback to lowmem — N64 framebuffers live in
+                        // upper RDRAM (typically 0x80100000+); anything in the first 1 MB lands
+                        // inside game code/data and corrupts it. Rogue Squadron's Factor5 LLE
+                        // pipeline emits SET_COLOR_IMAGE with addresses like 0x3CBxx, which
+                        // shredded the asset string table at MIPS 0x8003CBxx and froze the game
+                        // on the N64 logo. See project_n64_logo_freeze_audio.md.
+                        constexpr uint32_t kMinFbAddress = 0x100000;
+                        if (colorFb->addressStart >= kMinFbAddress) {
+                            colorFb->copyNativeToRAM(&RDRAM[colorFb->addressStart], colorWriteWidth, colorRowStart, std::min(colorRowEnd, colorFb->height));
+                        } else {
+                            static uint32_t last_skipped = 0;
+                            if (colorFb->addressStart != last_skipped) {
+                                last_skipped = colorFb->addressStart;
+                                fprintf(stderr, "[rt64] skip lowmem fb writeback: addr=0x%08X w=%u rows=%u..%u\n",
+                                    colorFb->addressStart, colorWriteWidth, colorRowStart, colorRowEnd);
+                            }
+                        }
 
-                        if (depthWriteWidth > 0) {
+                        if (depthWriteWidth > 0 && depthFb->addressStart >= kMinFbAddress) {
                             depthFb->copyNativeToRAM(&RDRAM[depthFb->addressStart], depthWriteWidth, depthRowStart, std::min(depthRowEnd, depthFb->height));
                         }
                     }

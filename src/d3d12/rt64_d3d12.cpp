@@ -39,6 +39,10 @@ extern "C" {
 }
 #endif
 
+// Resolved at final link from src/main/main.cpp. Used by the d3d12 descriptor-
+// heap allocator-failure tracer to print symbolicated stack traces.
+void print_stack_with_symbols(void **frames, USHORT count);
+
 namespace RT64 {
     static const uint32_t ShaderDescriptorHeapSize = 65536;
     static const uint32_t SamplerDescriptorHeapSize = 1024;
@@ -860,10 +864,30 @@ namespace RT64 {
             descriptorTypeMaxIndex = uint32_t(descriptorTypes.size()) - 1;
         }
 
+        // Throttled allocator-failure tracer. Once the descriptor heap exhausts,
+        // any caller still constructing D3D12DescriptorSet keeps failing here —
+        // a flood of identical prints hides which call site is the leak. Print
+        // a symbolicated stack trace once per N failures so we can identify the
+        // hot path. main.cpp's ::print_stack_with_symbols satisfies the extern
+        // at final link; rt64.lib has no DbgHelp dep on its own.
+        static std::atomic<uint64_t> s_view_alloc_fail_count{0};
+        static std::atomic<uint64_t> s_sampler_alloc_fail_count{0};
+        auto dumpAllocFailTrace = [](const char *which, uint64_t count) {
+            fprintf(stderr, "[d3d12] %s alloc failed (#%llu) — stack:\n",
+                which, (unsigned long long)count);
+            void *frames[24];
+            USHORT n = RtlCaptureStackBackTrace(0, 24, frames, nullptr);
+            ::print_stack_with_symbols(frames, n);
+            fflush(stderr);
+        };
+
         if (viewDescriptorCount > 0) {
             viewAllocation.offset = device->viewHeapAllocator->allocate(viewDescriptorCount);
             if (viewAllocation.offset == D3D12DescriptorHeapAllocator::INVALID_OFFSET) {
-                fprintf(stderr, "Allocator was unable to find free space for the set.");
+                uint64_t c = ++s_view_alloc_fail_count;
+                if (c == 1 || c == 8 || c == 64 || (c % 1024) == 0) {
+                    dumpAllocFailTrace("view", c);
+                }
                 return;
             }
 
@@ -873,7 +897,10 @@ namespace RT64 {
         if (samplerDescriptorCount > 0) {
             samplerAllocation.offset = device->samplerHeapAllocator->allocate(samplerDescriptorCount);
             if (samplerAllocation.offset == D3D12DescriptorHeapAllocator::INVALID_OFFSET) {
-                fprintf(stderr, "Allocator was unable to find free space for the set.");
+                uint64_t c = ++s_sampler_alloc_fail_count;
+                if (c == 1 || c == 8 || c == 64 || (c % 1024) == 0) {
+                    dumpAllocFailTrace("sampler", c);
+                }
                 return;
             }
 
@@ -1119,6 +1146,9 @@ namespace RT64 {
 
     void D3D12DescriptorSet::setSampler(uint32_t descriptorIndex, const RenderSampler *sampler) {
         if (sampler != nullptr) {
+            if (samplerAllocation.offset == D3D12DescriptorHeapAllocator::INVALID_OFFSET) {
+                return;
+            }
             const D3D12Sampler *interfaceSampler = static_cast<const D3D12Sampler *>(sampler);
             uint32_t descriptorIndexClamped = std::min(descriptorIndex, descriptorTypeMaxIndex);
             uint32_t descriptorIndexRelative = (descriptorIndex - descriptorIndexClamped);
@@ -1149,6 +1179,11 @@ namespace RT64 {
     
     void D3D12DescriptorSet::setSRV(uint32_t descriptorIndex, ID3D12Resource *resource, const D3D12_SHADER_RESOURCE_VIEW_DESC *viewDesc) {
         if ((resource != nullptr) || (viewDesc != nullptr)) {
+            // If create() couldn't allocate from the heap, viewAllocation.offset stays at INVALID_OFFSET.
+            // Silently skip — the descriptor set is broken; the corresponding fb just won't render.
+            if (viewAllocation.offset == D3D12DescriptorHeapAllocator::INVALID_OFFSET) {
+                return;
+            }
             uint32_t descriptorIndexClamped = std::min(descriptorIndex, descriptorTypeMaxIndex);
             uint32_t descriptorIndexRelative = (descriptorIndex - descriptorIndexClamped);
             uint32_t descriptorHeapIndex = descriptorHeapIndices[descriptorIndexClamped];
@@ -1160,6 +1195,9 @@ namespace RT64 {
 
     void D3D12DescriptorSet::setUAV(uint32_t descriptorIndex, ID3D12Resource *resource, const D3D12_UNORDERED_ACCESS_VIEW_DESC *viewDesc) {
         if ((resource != nullptr) || (viewDesc != nullptr)) {
+            if (viewAllocation.offset == D3D12DescriptorHeapAllocator::INVALID_OFFSET) {
+                return;
+            }
             uint32_t descriptorIndexClamped = std::min(descriptorIndex, descriptorTypeMaxIndex);
             uint32_t descriptorIndexRelative = (descriptorIndex - descriptorIndexClamped);
             uint32_t descriptorHeapIndex = descriptorHeapIndices[descriptorIndexClamped];
@@ -1171,6 +1209,9 @@ namespace RT64 {
 
     void D3D12DescriptorSet::setCBV(uint32_t descriptorIndex, ID3D12Resource *resource, uint64_t bufferSize) {
         if (resource != nullptr) {
+            if (viewAllocation.offset == D3D12DescriptorHeapAllocator::INVALID_OFFSET) {
+                return;
+            }
             D3D12_CONSTANT_BUFFER_VIEW_DESC viewDesc = {};
             viewDesc.BufferLocation = resource->GetGPUVirtualAddress();
             viewDesc.SizeInBytes = UINT(roundUp(bufferSize, D3D12_CONSTANT_BUFFER_DATA_PLACEMENT_ALIGNMENT));

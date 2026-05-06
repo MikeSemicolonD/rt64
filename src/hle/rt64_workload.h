@@ -215,6 +215,12 @@ namespace RT64 {
         std::vector<SpriteCommand> spriteCommands;
         std::vector<interop::PointLight> pointLights;
         uint32_t fbPairCount;
+        // Active fbPair the current draws target. Normally fbPairCount-1, but
+        // when addFramebufferPair finds an existing pair matching the requested
+        // address tuple it points back at that older slot — lets Factor5 LLE's
+        // (A,B,C,A,B,C,…) ping-pong reuse 3 pairs forever instead of growing
+        // the array unboundedly.
+        uint32_t currentFbPairIndex = 0;
         uint32_t fbPairSubmitted;
         uint32_t gameCallCount;
         FramebufferChangePool fbChangePool;
