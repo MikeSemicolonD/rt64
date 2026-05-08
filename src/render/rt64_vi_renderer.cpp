@@ -78,6 +78,17 @@ namespace RT64 {
         pushConstants.videoResolution = fbHdRegion;
         pushConstants.textureResolution = { float(p.textureWidth), float(p.textureHeight) };
         pushConstants.gamma = p.vi->gamma();
+        // Pack the VI status flags so the shader can apply the same
+        // post-processing the N64 hardware applies (AA / divot / dither /
+        // gamma dither). Without these the rendered output looks sharper
+        // than real hardware — e.g. Rogue Squadron sets aaMode=0 and
+        // divotEnable=1 every frame and depends on the resulting
+        // soft / blended look.
+        const uint32_t aaMode    = (uint32_t)p.vi->status.aaMode & 0x3u;
+        const uint32_t divot     = p.vi->status.divotEnable ? 1u : 0u;
+        const uint32_t dithFil   = p.vi->status.ditherFilter ? 1u : 0u;
+        const uint32_t gammaDith = p.vi->status.gammaDitherEnable ? 1u : 0u;
+        pushConstants.viFlags = aaMode | (divot << 2) | (dithFil << 3) | (gammaDith << 4);
 
         p.commandList->setPipeline(shader->pipeline.get());
         p.commandList->setGraphicsPipelineLayout(shader->pipelineLayout.get());

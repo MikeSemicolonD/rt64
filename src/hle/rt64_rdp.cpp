@@ -5,6 +5,8 @@
 #include "rt64_rdp.h"
 
 #include <cassert>
+#include <cstdlib>
+#include <unordered_set>
 
 #include "../include/rt64_extended_gbi.h"
 
@@ -265,6 +267,25 @@ namespace RT64 {
 
     void RDP::setDepthImage(uint32_t address) {
         const uint32_t newAddress = maskAddress(address);
+        // Log distinct depth buffer addresses under ROGUESQ_LOG_DPC. Tells us
+        // which of the "fbs" we found are actually Z-buffers (would render as
+        // gradient if VI ever sampled them).
+        {
+            static const bool log_z = []{
+                const char *a = std::getenv("ROGUESQ_LOG_ALL");
+                if (a && *a && *a != '0') return true;
+                const char *e = std::getenv("ROGUESQ_LOG_DPC");
+                return e && *e && *e != '0';
+            }();
+            if (log_z) {
+                static std::unordered_set<uint32_t> seen;
+                if (seen.insert(newAddress).second) {
+                    fprintf(stderr, "[zimg] new depth-image address 0x%08X (count=%zu)\n",
+                        newAddress, seen.size());
+                    fflush(stderr);
+                }
+            }
+        }
         if (depthImage.address != newAddress) {
             depthImage.address = newAddress;
             depthImage.changed = true;
@@ -277,6 +298,34 @@ namespace RT64 {
 
     void RDP::setTextureImage(uint8_t fmt, uint8_t siz, uint16_t width, uint32_t address) {
         const uint32_t newAddr = maskAddress(address);
+        // ROGUESQ_LOG_TEXBYTES — dump first 32 bytes at the texture address so
+        // we can verify whether the cinematic sprite assets are actually loaded.
+        // If the bytes are all 0x00 / 0xFF, the asset never got DMAd in →
+        // upstream loading bug. If they look like pixel data, rasterization is
+        // failing downstream.
+        {
+            static const bool log_tex = []{
+                const char *e = std::getenv("ROGUESQ_LOG_TEXBYTES");
+                if (e && *e && *e != '0') return true;
+                const char *a = std::getenv("ROGUESQ_LOG_ALL");
+                return a && *a && *a != '0';
+            }();
+            if (log_tex && newAddr != 0) {
+                static int n = 0;
+                static std::unordered_set<uint32_t> seen;
+                bool fresh = seen.insert(newAddr).second;
+                if (fresh && (++n <= 100)) {
+                    const uint8_t *p = &state->RDRAM[newAddr];
+                    fprintf(stderr, "[tex-bytes] addr=0x%08X w=%u fmt=%u siz=%u :",
+                        newAddr, (unsigned)width, (unsigned)fmt, (unsigned)siz);
+                    for (int i = 0; i < 32; ++i) {
+                        fprintf(stderr, " %02X", p[i ^ 3]);  // BE swizzle for word-aligned access
+                    }
+                    fprintf(stderr, "\n");
+                    fflush(stderr);
+                }
+            }
+        }
         { static int n=0; ++n;
           bool isZero = (newAddr == 0);
           if (isZero || n<=10 || (n%5000)==0) {
@@ -297,28 +346,288 @@ namespace RT64 {
     }
 
     void RDP::setCombine(uint64_t combine) {
+        // EXPERIMENT 2026-05-05: Substitute the SHADE combiner input.
+        // Memory-module + X-Wing 3D content uses TEXEL × SHADE combiner mode
+        // (mux 0xFFFFFFFFFC127E24); the recompiled Factor5 ucode produces
+        // SHADE values that include zeros at top vertices, making the upper
+        // model black ("top of model is gone"). User-confirmed: replacing
+        // this mode with TEXEL × PRIM_COLOR makes the model render but tints
+        // everything with PRIM (X-Wing → sunset orange). Real fix is to make
+        // the combiner output PURE TEXEL (no shade multiply, no prim tint).
+        //
+        // ROGUESQ_SHADE_FIX modes:
+        //   1 = swap to Mode A (TEXEL × PRIM) — A/B verification, tinted
+        //   2 = rewrite to DECAL (output = TEXEL only) — clean fix
+        constexpr uint64_t kModeB_TexelShade = 0xFFFFFFFFFC127E24ULL;
+        constexpr uint64_t kModeA_TexelPrim  = 0xFF2FFFFFFC119623ULL;
+        // DECAL combiner: cycle output = (A-B)*C+D = (0-0)*0 + TEXEL0 = TEXEL0
+        // Standard libultra G_CC_DECALRGB mux value (verified against gbi.h).
+        constexpr uint64_t kDecal             = 0xFFFCF278FCFFFFFFULL;
+        static const int experiment_mode = []() {
+            const char *e = std::getenv("ROGUESQ_SHADE_FIX");
+            // legacy: ROGUESQ_SWAP_SHADE=1 == ROGUESQ_SHADE_FIX=1
+            const char *legacy = std::getenv("ROGUESQ_SWAP_SHADE");
+            if (legacy && *legacy && *legacy != '0') return 1;
+            if (e && *e) return atoi(e);
+            return 0;
+        }();
+        if (experiment_mode) {
+            uint64_t old = combine;
+            const uint32_t L = static_cast<uint32_t>(combine & 0xFFFFFFFFULL);
+            // SHADE = combiner input value 4. C input is 5 bits; cycle 0
+            // C is L bits 15-19, cycle 1 C is L bits 0-4. The C input is
+            // the multiplier in (A-B)*C+D, so SHADE in C makes output dark
+            // when shade is dark. Detect either cycle.
+            const uint32_t c0 = (L >> 15) & 0x1F;
+            const uint32_t c1 = (L >> 0) & 0x1F;
+            const bool shade_in_c = (c0 == 4) || (c1 == 4);
+            const bool literal_match = (combine == kModeB_TexelShade);
+            if (experiment_mode == 1 && literal_match) {
+                combine = kModeA_TexelPrim;
+            } else if (experiment_mode == 2 && literal_match) {
+                combine = kDecal;
+            } else if (experiment_mode == 3 && shade_in_c) {
+                // Generalized: any combiner with SHADE in the multiplier
+                // slot gets rewritten to DECAL (output = pure TEXEL).
+                combine = kDecal;
+            }
+            if (combine != old) {
+                static int n = 0;
+                static std::unordered_set<uint64_t> seen;
+                bool fresh = seen.insert(old).second;
+                if (++n <= 3 || fresh) {
+                    fprintf(stderr, "[exp mode=%d] rewrote 0x%016llX -> 0x%016llX (c0=%u c1=%u) #%d\n",
+                        experiment_mode,
+                        (unsigned long long)old,
+                        (unsigned long long)combine, c0, c1, n);
+                    fflush(stderr);
+                }
+            }
+        }
+        // 2026-05-06: Cinematic-particle alpha fix. The TEXRECT particle
+        // combiner mux (lower 32 = 0xFC11FE23, color = TEXEL × PRIM) has
+        // alpha-D = 7 (ZERO) in its canonical 0xFFFFFFFF_FC11FE23 variant.
+        // With the cinematic blender configured for alpha-gated output, an
+        // alpha=0 combined value collapses the texrect into the existing
+        // framebuffer pixel — invisible particles. Surgically rewrite the
+        // alpha-D field (H bits 11-9 cycle 0, H bits 2-0 cycle 1) from 7
+        // to 1 (TEXEL0_ALPHA) so the per-pixel TLUT alpha drives blending.
+        // This preserves color combiner (TEXEL × PRIM) intact.
+        // Set ROGUESQ_PARTICLE_FIX=0 to disable.
+        //
+        // ROGUESQ_PARTICLE_DEBUG=1 adds a high-visibility override —
+        // forces alpha-D = 6 (ONE) so particles render as opaque
+        // rectangular blocks (no soft edges) regardless of texture alpha.
+        // Used to confirm whether the geometry reaches the framebuffer
+        // at all when subtle alpha rendering looks wrong.
+        static const bool particle_fix = []() {
+            const char *e = std::getenv("ROGUESQ_PARTICLE_FIX");
+            return !e || atoi(e) != 0;  // default on
+        }();
+        static const bool particle_debug = []() {
+            const char *e = std::getenv("ROGUESQ_PARTICLE_DEBUG");
+            return e && atoi(e) != 0;  // default off
+        }();
+        if (particle_fix && (combine & 0xFFFFFFFFULL) == 0xFC11FE23ULL) {
+            uint64_t old = combine;
+            uint64_t H = (combine >> 32ULL) & 0xFFFFFFFFULL;
+            const uint64_t aD0 = (H >> 9) & 0x7;
+            const uint64_t aD1 = (H >> 0) & 0x7;
+            // Diagnostic mode: force ONE for both cycles, regardless of
+            // current value. Otherwise, only rewrite when alpha-D is
+            // currently ZERO (==7) — preserving variant 0xFFFFF3F9 which
+            // already has aD0=1=TEXEL0_ALPHA.
+            const uint64_t target = particle_debug ? 6ULL : 1ULL;  // ONE vs TEXEL0_ALPHA
+            if (particle_debug || aD0 == 7) H = (H & ~(0x7ULL << 9)) | (target << 9);
+            if (particle_debug || aD1 == 7) H = (H & ~(0x7ULL << 0)) | (target << 0);
+            combine = (combine & 0xFFFFFFFFULL) | (H << 32);
+            if (combine != old) {
+                static int n = 0;
+                if (++n <= 3) {
+                    fprintf(stderr, "[particle-fix%s] rewrote 0x%016llX -> 0x%016llX #%d\n",
+                        particle_debug ? "/DEBUG" : "",
+                        (unsigned long long)old, (unsigned long long)combine, n);
+                    fflush(stderr);
+                }
+            }
+        }
+        // 2026-05-06: TEXEL × PRIM TEXRECT alpha=SHADE fix.
+        //
+        // The actual rendering mux for cinematic-particle TEXRECTs is
+        // 0xFF2FFFFF_FC119623 (color = TEXEL × PRIM, alpha = SHADE × PRIM_A).
+        // RT64's TEXRECT rasterizer doesn't populate SHADE for the fragment
+        // (TEXRECTs have no vertex-stream shade attribute), so alpha = 0
+        // regardless of PRIM_ALPHA. Confirmed by per-pixel trace: drawTexRect
+        // fires with this mux 10000+ times during cinematic, valid coords,
+        // valid colorAddr, but no visible output even with mode-2 VI override
+        // forcing the rendered fb to be the displayed one.
+        //
+        // Rewrite alpha-A cycle 0 from 4 (SHADE) to 6 (ONE) so the alpha
+        // cycle becomes (1 - 0) × PRIM_ALPHA + 0 = PRIM_ALPHA. With
+        // PRIM_ALPHA = 0xFF (game's default), particles render fully opaque.
+        // We accept the loss of soft-alpha gradient to confirm whether the
+        // TEXRECTs ever produce visible pixels.
+        // Set ROGUESQ_TEXRECT_ALPHA_FIX=0 to disable.
+        static const bool texrect_alpha_fix = []() {
+            const char *e = std::getenv("ROGUESQ_TEXRECT_ALPHA_FIX");
+            return !e || atoi(e) != 0;  // default on
+        }();
+        if (texrect_alpha_fix && (combine & 0xFFFFFFFFULL) == 0xFC119623ULL) {
+            uint64_t old = combine;
+            uint64_t L = combine & 0xFFFFFFFFULL;
+            // Alpha-A cycle 0 lives at L bits 12-14. Rewrite from 4 (SHADE)
+            // to 6 (ONE).
+            L = (L & ~(0x7ULL << 12)) | (6ULL << 12);
+            combine = ((combine >> 32ULL) << 32ULL) | L;
+            if (combine != old) {
+                static int n = 0;
+                if (++n <= 3) {
+                    fprintf(stderr, "[texrect-alpha-fix] rewrote 0x%016llX -> 0x%016llX #%d\n",
+                        (unsigned long long)old, (unsigned long long)combine, n);
+                    fflush(stderr);
+                }
+            }
+        }
+        // 2026-05-06: Cinematic pass-2 visibility debug.
+        //
+        // The cinematic pass-2 alpha-blended sprite mux is
+        // 0xFFFFF238_FC127FFF — color = TEXEL0*SHADE, alpha = TEXEL0_A,
+        // cycle1 = COMBINED passthrough. Even after particle/texrect-alpha
+        // fixes the explosion sprites are not visible. To confirm whether
+        // pipeline reaches the displayed framebuffer at all, this debug
+        // rewrites the mux to output PRIMITIVE color at alpha=ONE
+        // unconditionally:
+        //   - color cycle1 D (H bits 6-8) = 3 (PRIMITIVE)
+        //   - alpha cycle1 D (H bits 0-2) = 6 (ONE)
+        // If we then see solid PRIM-colored blobs where explosions should
+        // be, the issue is alpha-test/texture/SHADE — the geometry IS
+        // hitting the visible fb. If we still see nothing, it's
+        // fb-routing (sprites land in 0x80695C00 which VI never displays).
+        //
+        // Default off. ROGUESQ_PARTICLE_VISIBLE_DEBUG=1 to enable.
+        static const bool particle_visible_debug = []() {
+            const char *e = std::getenv("ROGUESQ_PARTICLE_VISIBLE_DEBUG");
+            return e && atoi(e) != 0;
+        }();
+        // Match any mux with low-half 0xFC127FFF — the cinematic pass-2 mux
+        // appears in multiple H-variants (0xFFFFFE3F = 1CYCLE, 0xFFFFF238 =
+        // 2CYCLE). Both produce TEXEL0*SHADE color / TEXEL0_A alpha, so the
+        // PRIM-opaque rewrite is appropriate for both.
+        // We ALSO rewrite color cycle 0 to output PRIM directly so 1CYCLE muxes
+        // (which use cycle 0 as final output) get the override too.
+        // 0xFC11E623 is the dominant cinematic mux post-texrect-alpha-fix
+        // (original 0xFC119623 → bits 12-14 SHADE→ONE → 0xFC11E623). Geo
+        // trace confirmed it accounts for ~64% of cinematic TEXRECTs.
+        if (particle_visible_debug && ((combine & 0xFFFFFFFFULL) == 0xFC127FFFULL ||
+                                       (combine & 0xFFFFFFFFULL) == 0xFC11FE23ULL ||
+                                       (combine & 0xFFFFFFFFULL) == 0xFC11E623ULL ||
+                                       (combine & 0xFFFFFFFFULL) == 0xFC119623ULL)) {
+            uint64_t old = combine;
+            uint64_t L = combine & 0xFFFFFFFFULL;
+            uint64_t H = (combine >> 32ULL) & 0xFFFFFFFFULL;
+            // color cycle 0 D = 3 (PRIMITIVE) at H bits 15-17 (per parseColorInputD)
+            H = (H & ~(0x7ULL << 15)) | (3ULL << 15);
+            // color cycle 1 D = 3 (PRIMITIVE) at H bits 6-8
+            H = (H & ~(0x7ULL << 6)) | (3ULL << 6);
+            // alpha cycle 0 D = 6 (ONE) at H bits 9-11 (alphaInputABD)
+            H = (H & ~(0x7ULL << 9)) | (6ULL << 9);
+            // alpha cycle 1 D = 6 (ONE) at H bits 0-2
+            H = (H & ~(0x7ULL << 0)) | (6ULL << 0);
+            combine = (L) | (H << 32);
+            if (combine != old) {
+                static int n = 0;
+                if (++n <= 5) {
+                    fprintf(stderr, "[particle-visible-debug] rewrote 0x%016llX -> 0x%016llX #%d\n",
+                        (unsigned long long)old, (unsigned long long)combine, n);
+                    fflush(stderr);
+                }
+            }
+        }
+        // [trace] setCombine logging — every fresh mux + every 200th setCombine.
+        // High-volume during cinematic (~60-100 lines/sec). Useful when
+        // identifying which combiner is active for a specific draw, or
+        // discovering new muxes the game uses. Default off.
+        // ROGUESQ_LOG_RDP_STATE=1 (or ROGUESQ_LOG_ALL=1).
+        static const bool log_rdp = []{
+            const char *a = std::getenv("ROGUESQ_LOG_ALL");
+            if (a && *a && *a != '0') return true;
+            const char *e = std::getenv("ROGUESQ_LOG_RDP_STATE");
+            return e && *e && *e != '0';
+        }();
         { static int n=0; static uint64_t last = ~uint64_t(0);
-            if (combine != last) {
+            static std::unordered_set<uint64_t> s_uniq;
+            if (log_rdp && combine != last) {
                 ++n;
-                if (n <= 30 || (n % 200) == 0) {
+                bool fresh = s_uniq.insert(combine).second;
+                if (fresh || n <= 30 || (n % 200) == 0) {
                     interop::ColorCombiner cc;
                     cc.L = combine & 0xFFFFFFFFULL;
                     cc.H = (combine >> 32ULL) & 0xFFFFFFFFULL;
                     // Decode both cycles' alpha inputs so we can spot a
                     // permanently-zero alpha (which would explain invisible
                     // glyphs in the credits/post-credits text path).
-                    if(false) fprintf(stderr, "[trace] setCombine #%d mux=0x%016llX L=0x%08X H=0x%08X\n",
-                        n, (unsigned long long)combine, cc.L, cc.H);
-                    if(false) fprintf(stderr, "  cycle0 alpha A=%u B=%u C=%u D=%u\n",
+                    const uint32_t cyc = (uint32_t)otherMode.cycleType();
+                    const char *cycName =
+                        (cyc == G_CYC_1CYCLE) ? "1CYCLE" :
+                        (cyc == G_CYC_2CYCLE) ? "2CYCLE" :
+                        (cyc == G_CYC_COPY) ? "COPY" :
+                        (cyc == G_CYC_FILL) ? "FILL" : "?";
+                    fprintf(stderr, "[trace] setCombine #%d mux=0x%016llX L=0x%08X H=0x%08X cycleType=%s(%u)\n",
+                        n, (unsigned long long)combine, cc.L, cc.H, cycName, cyc);
+                    // For the particle mux specifically, dump the full
+                    // otherMode + blender breakdown so we can see what
+                    // alpha/coverage semantics the game expects.
+                    //
+                    // Trigger conditions (any one):
+                    //   1. Specific muxes we've previously chased (kept for parity).
+                    //   2. Blender is in "alpha-over-fb" form — cycle1 sources are
+                    //      A = CC_ALPHA (0) and M = FB (1). Captures the cinematic
+                    //      pass-2 sprite/particle path (L bits 0xC811xxxx) and any
+                    //      future transparent-draw mux without us hard-coding it.
+                    const uint32_t L_check = otherMode.L;
+                    const uint32_t blender_check = (L_check >> 16) & 0xFFFF;
+                    const bool isAlphaOverFb =
+                        ((blender_check & 0x0300) == 0) &&            // cycle1 A = CC_ALPHA
+                        ((blender_check & 0x0030) == 0x0010);          // cycle1 M = FB
+                    if (combine == 0xFFFFFE3FFC127FFFULL ||
+                        combine == 0xFFFFF238FC127FFFULL ||
+                        isAlphaOverFb) {
+                        const uint32_t L = otherMode.L;
+                        const uint32_t H = otherMode.H;
+                        const uint32_t blenderInputs = (L >> 16) & 0xFFFF;
+                        fprintf(stderr,
+                            "  [particle-mux] otherMode H=0x%08X L=0x%08X\n"
+                            "    cvgXAlpha=%u alphaCvgSel=%u forceBlend=%u clrOnCvg=%u cvgDst=%u\n"
+                            "    blenderInputs=0x%04X (bits L[31:16])\n"
+                            "    cycle0: P=%u M=%u A=%u B=%u\n"
+                            "    cycle1: P=%u M=%u A=%u B=%u\n",
+                            H, L,
+                            (unsigned)otherMode.cvgXAlpha(),
+                            (unsigned)otherMode.alphaCvgSel(),
+                            (unsigned)otherMode.forceBlend(),
+                            (unsigned)otherMode.clrOnCvg(),
+                            (unsigned)otherMode.cvgDst(),
+                            blenderInputs,
+                            (blenderInputs >> 14) & 0x3,
+                            (blenderInputs >>  6) & 0x3,
+                            (blenderInputs >> 10) & 0x3,
+                            (blenderInputs >>  2) & 0x3,
+                            (blenderInputs >> 12) & 0x3,
+                            (blenderInputs >>  4) & 0x3,
+                            (blenderInputs >>  8) & 0x3,
+                            (blenderInputs >>  0) & 0x3);
+                        fflush(stderr);
+                    }
+                    fprintf(stderr, "  cycle0 alpha A=%u B=%u C=%u D=%u\n",
                         cc.parseAlphaInputA(false), cc.parseAlphaInputB(false),
                         cc.parseAlphaInputC(false), cc.parseAlphaInputD(false));
-                    if(false) fprintf(stderr, "  cycle1 alpha A=%u B=%u C=%u D=%u\n",
+                    fprintf(stderr, "  cycle1 alpha A=%u B=%u C=%u D=%u\n",
                         cc.parseAlphaInputA(true), cc.parseAlphaInputB(true),
                         cc.parseAlphaInputC(true), cc.parseAlphaInputD(true));
-                    if(false) fprintf(stderr, "  cycle0 color A=%u B=%u C=%u D=%u\n",
+                    fprintf(stderr, "  cycle0 color A=%u B=%u C=%u D=%u\n",
                         cc.parseColorInputA(false), cc.parseColorInputB(false),
                         cc.parseColorInputC(false), cc.parseColorInputD(false));
-                    if(false) fprintf(stderr, "  cycle1 color A=%u B=%u C=%u D=%u\n",
+                    fprintf(stderr, "  cycle1 color A=%u B=%u C=%u D=%u\n",
                         cc.parseColorInputA(true), cc.parseColorInputB(true),
                         cc.parseColorInputC(true), cc.parseColorInputD(true));
                     fflush(stderr);
@@ -516,6 +825,29 @@ namespace RT64 {
             checkFramebufferOverlap(tmemStart >> 3, tmemBytes >> 3, tmemMask, textureStart, textureEnd, lineWidth, rowCount, RGBA32, true);
         }
         else {
+            // ROGUESQ defensive end-address check. The existing pre-fullSync
+            // check rejects load ops with start address >= 8MB, but doesn't
+            // check the END address. loadToTMEMCommon reads
+            // (rowCount-1)*bytesPerRow + (wordsPerRow << 3) bytes from
+            // textureStart, and SEH-AVs if that goes past RDRAM. Skip
+            // here too rather than crash gfx_thread.
+            constexpr uint32_t kRdramSize = 0x800000;
+            if (textureEnd > kRdramSize ||
+                textureStart >= kRdramSize ||
+                rowCount == 0 || rowCount > 1024 ||
+                wordsPerRow == 0 || wordsPerRow > 4096 ||
+                bytesPerRow == 0 || bytesPerRow > 0x10000) {
+                static std::atomic<uint64_t> s_skipped{0};
+                uint64_t n = ++s_skipped;
+                if (n == 1 || (n & (n - 1)) == 0) {
+                    fprintf(stderr,
+                        "[rt64] skip loadTile OOB #%llu start=0x%X end=0x%X rows=%u words/row=%u bytes/row=%u\n",
+                        (unsigned long long)n,
+                        textureStart, textureEnd, rowCount, wordsPerRow, bytesPerRow);
+                    fflush(stderr);
+                }
+                return;
+            }
             // Load into TMEM.
             uint8_t *TMEM8 = reinterpret_cast<uint8_t *>(TMEM);
             const uint8_t *RDRAM = state->RDRAM;
@@ -974,6 +1306,35 @@ namespace RT64 {
     }
 
     void RDP::setFillColor(uint32_t color) {
+        // ROGUESQ_FILLCOLOR_DEBUG — force every FILL_COLOR write to a fixed
+        // 32-bit value. Useful for visualizing where FILL-mode draws (FILLRECT
+        // / TEXRECT-in-FILL-cycle) land in the framebuffer: any pixel whose
+        // color comes from FILL_COLOR will turn into the override.
+        //
+        //   ROGUESQ_FILLCOLOR_DEBUG=1            → red   (default 0xF801F801, 16-bit RGBA-5551 ×2)
+        //   ROGUESQ_FILLCOLOR_DEBUG=0xRRGGBBAA   → custom 32-bit value
+        //
+        // Reveal use: the cinematic uses FILL-mode draws to paint its
+        // background. Setting this to red shows the whole cutscene background
+        // as red, with model geometry rendered opaquely on top.
+        static const uint32_t fill_override = []() -> uint32_t {
+            const char *e = std::getenv("ROGUESQ_FILLCOLOR_DEBUG");
+            if (!e || !*e) return 0;
+            // strtoul handles "0x..." and decimal; "1" maps to default red.
+            uint32_t v = (uint32_t)strtoul(e, nullptr, 0);
+            if (v == 0) return 0;            // disabled
+            if (v == 1) return 0xF801F801u;  // canonical red 5551
+            return v;
+        }();
+        if (fill_override != 0) {
+            uint32_t old = color;
+            color = fill_override;
+            static int n = 0;
+            if (++n <= 5) {
+                fprintf(stderr, "[fillcolor-debug] rewrote 0x%08X -> 0x%08X #%d\n", old, color, n);
+                fflush(stderr);
+            }
+        }
         fillColorStack[fillColorStackSize - 1] = color;
         state->updateDrawStatusAttribute(DrawAttribute::FillColor);
     }
@@ -993,11 +1354,61 @@ namespace RT64 {
     }
 
     void RDP::setOtherMode(uint32_t high, uint32_t low) {
+        // Log cycle-type transitions (1CYCLE / 2CYCLE / COPY / FILL).
+        // Useful for correlating with the active combiner — in FILL mode
+        // the combiner mux is "stored but not applied", which can confuse
+        // mux-based diagnostics (see particle-fix history). One line per
+        // cycle-type change; gated to ~30 transitions then every 200th.
+        // Default off. ROGUESQ_LOG_RDP_STATE=1 (or ROGUESQ_LOG_ALL=1).
+        static const bool log_rdp = []{
+            const char *a = std::getenv("ROGUESQ_LOG_ALL");
+            if (a && *a && *a != '0') return true;
+            const char *e = std::getenv("ROGUESQ_LOG_RDP_STATE");
+            return e && *e && *e != '0';
+        }();
+        if (log_rdp) { static uint32_t lastCyc = 0xFFFFFFFFu;
+          uint32_t newCyc = (high >> G_MDSFT_CYCLETYPE) & 0x3;
+          if (newCyc != lastCyc) {
+              lastCyc = newCyc;
+              static int n = 0;
+              if (++n <= 30 || (n % 200) == 0) {
+                  const char *name = (newCyc == G_CYC_1CYCLE) ? "1CYCLE"
+                                   : (newCyc == G_CYC_2CYCLE) ? "2CYCLE"
+                                   : (newCyc == G_CYC_COPY)   ? "COPY"
+                                   : (newCyc == G_CYC_FILL)   ? "FILL" : "?";
+                  fprintf(stderr, "[trace] setOtherMode #%d cycleType=%s(%u) H=0x%08X L=0x%08X\n",
+                      n, name, newCyc, high, low);
+                  fflush(stderr);
+              }
+          }
+        }
+        // ROGUESQ_DISABLE_Z_CMP — diagnostic. Forces Z_CMP and Z_UPD bits OFF
+        // for every otherMode write. Tests the hypothesis that cinematic
+        // TEXRECTs are being depth-rejected. If the explosion appears with
+        // this knob on (but other geometry breaks), Z-test was killing the
+        // sprites.
+        static const bool disable_z = []() {
+            const char *e = std::getenv("ROGUESQ_DISABLE_Z_CMP");
+            return e && atoi(e) != 0;
+        }();
+        if (disable_z) {
+            const uint32_t Z_CMP_BIT = 0x10;
+            const uint32_t Z_UPD_BIT = 0x20;
+            uint32_t newL = low & ~(Z_CMP_BIT | Z_UPD_BIT);
+            if (newL != low) {
+                static int n = 0;
+                if (++n <= 5) {
+                    fprintf(stderr, "[disable-z] otherMode L 0x%08X -> 0x%08X #%d\n", low, newL, n);
+                    fflush(stderr);
+                }
+            }
+            low = newL;
+        }
         otherMode.H = high;
         otherMode.L = low;
         state->updateDrawStatusAttribute(DrawAttribute::OtherMode);
     }
-    
+
     void RDP::setPrimDepth(uint16_t z, uint16_t dz) {
         const float Fixed15ToFloat = 1.0f / 32767.0f;
         const float Fixed16ToFloat = 1.0f / 65535.0f;
@@ -1167,6 +1578,67 @@ namespace RT64 {
         triColorFloats.insert(triColorFloats.end(), col, col + triCount * ColFloatsPerTri);
         drawCall.triangleCount += triCount;
 
+        // ROGUESQ_LOG_PIPELINE: log raw vertex (x,y,z,w) for cinematic-mux Triangle
+        // draws. We've established these triangles reach drawInstanced but get
+        // rejected by the GPU rasterizer before the pixel shader. The z-rescue
+        // (clamp z to [0,w]) helped some but not all. Log the raw input
+        // positions so we can spot bad w (negative, NaN, very small/large)
+        // or NaN x/y that would survive z-clamp but still fail RS clip.
+        {
+            static const bool log_pipe = []{
+                const char *e = std::getenv("ROGUESQ_LOG_PIPELINE");
+                return e && *e && *e != '0';
+            }();
+            if (log_pipe) {
+                const uint32_t lo = (uint32_t)(drawCall.colorCombiner.L);
+                // 2026-05-07 — extend tri-vert capture to ALL 8 GPU-reaching
+                // muxes (cinematic family + green/cyan/yellow/F5-particle).
+                // Lets us spot whether non-magenta tris (suspect = explosions
+                // disguised as engine effects) have stuck positions vs varied.
+                const bool isCine = (lo == 0xFC11FE23u || lo == 0xFC11E623u ||
+                                     lo == 0xFC119623u || lo == 0xFC127FFFu ||
+                                     lo == 0xFC127E24u ||  // cyan — X-wing
+                                     lo == 0xFCFFFFFFu ||  // green — engine/laser
+                                     lo == 0xFC121824u ||  // yellow — untagged
+                                     lo == 0x7C6E58D9u || lo == 0xBCA318B9u ||
+                                     lo == 0xFC580253u || lo == 0xFCCDFCCDu);
+                if (isCine) {
+                    static int n = 0;
+                    if (++n <= 30 || (n % 2000) == 0) {
+                        // Compute summary stats over this batch's vertices.
+                        const uint32_t vertCount = triCount * 3;
+                        float wmin =  1e30f, wmax = -1e30f;
+                        float zmin =  1e30f, zmax = -1e30f;
+                        int nans = 0, wzero = 0, wneg = 0, zoutclip = 0;
+                        for (uint32_t v = 0; v < vertCount; ++v) {
+                            const float x = pos[v*4 + 0];
+                            const float y = pos[v*4 + 1];
+                            const float z = pos[v*4 + 2];
+                            const float w = pos[v*4 + 3];
+                            if (std::isnan(x) || std::isnan(y) || std::isnan(z) || std::isnan(w)) ++nans;
+                            if (w == 0.0f) ++wzero;
+                            else if (w < 0.0f) ++wneg;
+                            if (w > 0.0f && (z < 0.0f || z > w)) ++zoutclip;
+                            wmin = std::min(wmin, w); wmax = std::max(wmax, w);
+                            zmin = std::min(zmin, z); zmax = std::max(zmax, z);
+                        }
+                        // Show first triangle's 3 vertices in detail.
+                        const float *p = pos;
+                        fprintf(stderr,
+                            "[tri-vert] #%d L=0x%08X tris=%u verts=%u "
+                            "stats(nan=%d w0=%d w<0=%d zoutclip=%d wmin=%.3f wmax=%.3f zmin=%.3f zmax=%.3f) "
+                            "v0=(%.2f,%.2f,%.2f,%.3f) v1=(%.2f,%.2f,%.2f,%.3f) v2=(%.2f,%.2f,%.2f,%.3f)\n",
+                            n, lo, triCount, vertCount,
+                            nans, wzero, wneg, zoutclip, wmin, wmax, zmin, zmax,
+                            p[0], p[1], p[2], p[3],
+                            p[4], p[5], p[6], p[7],
+                            p[8], p[9], p[10], p[11]);
+                        fflush(stderr);
+                    }
+                }
+            }
+        }
+
         const FixedRect &scissorRect = state->rdp->scissorRectStack[scissorStackSize - 1];
         if (!scissorRect.isNull()) {
             fbPair.scissorRect.merge(scissorRect);
@@ -1239,23 +1711,42 @@ namespace RT64 {
                     fbPair.drawDepthRect.merge(intRect);
                 }
             } else {
-                static int n = 0;
-                if (++n <= 10 || (n % 1000) == 0) {
-                    if(false) fprintf(stderr, "[trace] texrect intRectNull #%d colorAddr=0x%08X scissor={%d,%d,%d,%d} draw={%d,%d,%d,%d}\n",
-                        n, colorImage.address,
-                        scissorRect.ulx, scissorRect.uly, scissorRect.lrx, scissorRect.lry,
-                        drawRect.ulx, drawRect.uly, drawRect.lrx, drawRect.lry);
-                    fflush(stderr);
+                // Scissor clipped this rect to nothing — the most common
+                // cause of "TEXRECT submitted but invisible". Gated under
+                // ROGUESQ_LOG_DPC. High-volume during cinematic if it fires.
+                static const bool log_clip = []{
+                    const char *a = std::getenv("ROGUESQ_LOG_ALL");
+                    if (a && *a && *a != '0') return true;
+                    const char *e = std::getenv("ROGUESQ_LOG_DPC");
+                    return e && *e && *e != '0';
+                }();
+                if (log_clip) {
+                    static int n = 0;
+                    if (++n <= 30 || (n % 1000) == 0) {
+                        fprintf(stderr, "[clip-rect] intRectNull #%d colorAddr=0x%08X scissor={%d,%d,%d,%d} draw={%d,%d,%d,%d}\n",
+                            n, colorImage.address,
+                            scissorRect.ulx, scissorRect.uly, scissorRect.lrx, scissorRect.lry,
+                            drawRect.ulx, drawRect.uly, drawRect.lrx, drawRect.lry);
+                        fflush(stderr);
+                    }
                 }
             }
         }
         if (scissorIsNull) {
-            static int n = 0;
-            if (++n <= 10 || (n % 1000) == 0) {
-                if(false) fprintf(stderr, "[trace] texrect scissorNull #%d colorAddr=0x%08X draw={%d,%d,%d,%d}\n",
-                    n, colorImage.address,
-                    drawRect.ulx, drawRect.uly, drawRect.lrx, drawRect.lry);
-                fflush(stderr);
+            static const bool log_clip = []{
+                const char *a = std::getenv("ROGUESQ_LOG_ALL");
+                if (a && *a && *a != '0') return true;
+                const char *e = std::getenv("ROGUESQ_LOG_DPC");
+                return e && *e && *e != '0';
+            }();
+            if (log_clip) {
+                static int n = 0;
+                if (++n <= 30 || (n % 1000) == 0) {
+                    fprintf(stderr, "[clip-rect] scissorNull #%d colorAddr=0x%08X draw={%d,%d,%d,%d}\n",
+                        n, colorImage.address,
+                        drawRect.ulx, drawRect.uly, drawRect.lrx, drawRect.lry);
+                    fflush(stderr);
+                }
             }
         }
         
@@ -1372,7 +1863,61 @@ namespace RT64 {
     }
     
     void RDP::drawTexRect(int32_t ulx, int32_t uly, int32_t lrx, int32_t lry, uint8_t tile, int16_t uls, int16_t ult, int16_t dsdx, int16_t dtdy, bool flip, const ExtendedAlignment &extAlignment) {
-        { static int n=0; if (++n<=10 || (n%50)==0) { if(false) fprintf(stderr, "[trace] RT64::drawTexRect #%d ulx=%d uly=%d lrx=%d lry=%d tile=%u colorAddr=0x%08X\n", n, ulx, uly, lrx, lry, tile, colorImage.address); fflush(stderr); } }
+        // Pipeline-stage 1 counter — drawTexRect entry. Counts every TEXRECT
+        // submitted, classified by cinematic mux family. Compare to
+        // [pipe-stage 2-pushDrawCall] to find drops between RDP submission
+        // and InstanceDrawCall building. Gated under ROGUESQ_LOG_PIPELINE.
+        {
+            static const bool log_pipe = []{
+                const char *e = std::getenv("ROGUESQ_LOG_PIPELINE");
+                return e && *e && *e != '0';
+            }();
+            if (log_pipe) {
+                const auto &cc = colorCombinerStack[colorCombinerStackSize - 1];
+                const uint32_t lo = (uint32_t)cc.L;
+                const bool isCine = (lo == 0xFC11FE23u || lo == 0xFC11E623u ||
+                                     lo == 0xFC119623u || lo == 0xFC127FFFu);
+                static int n_total = 0, n_cine = 0;
+                ++n_total;
+                if (isCine) ++n_cine;
+                if ((n_total <= 5) || (n_total % 1000) == 0) {
+                    fprintf(stderr,
+                        "[pipe-stage 1-drawTexRect] total=%d cine=%d (lastMux=0x%08X fb=0x%08X)\n",
+                        n_total, n_cine, lo, colorImage.address);
+                    fflush(stderr);
+                }
+            }
+        }
+        // Geometry trace — verify TEXRECT screen coords + target fb + active
+        // combiner mux. Cinematic-explosion debugging: confirms whether the
+        // game is submitting RECTs with sane coords or whether they're all
+        // zero-size / off-screen (rasterizer skips → no visible output).
+        // Gated under ROGUESQ_LOG_DPC. High volume during cinematic.
+        {
+            static const bool log_geo = []{
+                const char *a = std::getenv("ROGUESQ_LOG_ALL");
+                if (a && *a && *a != '0') return true;
+                const char *e = std::getenv("ROGUESQ_LOG_DPC");
+                return e && *e && *e != '0';
+            }();
+            if (log_geo) {
+                static int n=0;
+                if (++n<=20 || (n%200)==0) {
+                    const auto &cc = colorCombinerStack[colorCombinerStackSize - 1];
+                    const uint64_t mux = ((uint64_t)cc.H << 32) | (uint64_t)cc.L;
+                    const int32_t w = lrx - ulx;
+                    const int32_t h = lry - uly;
+                    fprintf(stderr,
+                        "[geo-rect] #%d ul=(%d,%d) lr=(%d,%d) wh=(%d,%d) tile=%u "
+                        "fb=0x%08X mux=0x%016llX cyc=%u\n",
+                        n, ulx, uly, lrx, lry, w, h, tile,
+                        colorImage.address,
+                        (unsigned long long)mux,
+                        (unsigned)otherMode.cycleType());
+                    fflush(stderr);
+                }
+            }
+        }
         // Per-rect load-binding probe. Confirms whether each glyph's TEXRECT
         // binds to its own loadOperations range (loadIndex/loadCount). For text
         // batches: expect loadCount=2 per glyph (LoadTLUT + LoadBlock) and

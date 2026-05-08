@@ -417,12 +417,25 @@ namespace RT64 {
                 const auto &depthImg = fbPair.depthImage;
                 fixedResScale = workloadConfig.resolutionScale;
                 {
-                    static int n = 0;
-                    if (++n <= 20 || (n % 200) == 0) {
-                        if(false) fprintf(stderr, "[trace] getTargetsFromPair #%d f=%u addr=0x%08X w=%u rectEmpty=%d\n",
-                            n, f, colorImg.address, (unsigned)colorImg.width,
-                            (int)fbPair.drawColorRect.isEmpty());
-                        fflush(stderr);
+                    static const bool log_p = []{
+                        const char *a = std::getenv("ROGUESQ_LOG_ALL");
+                        if (a && *a && *a != '0') return true;
+                        const char *e = std::getenv("ROGUESQ_LOG_PRESENT");
+                        return e && *e && *e != '0';
+                    }();
+                    if (log_p) {
+                        static int n = 0;
+                        if (++n <= 30 || (n % 200) == 0) {
+                            fprintf(stderr, "[fbpair] #%d f=%u addr=0x%08X w=%u rectEmpty=%d fillOnly=%d gcCount=%u projCount=%u drawRect={%d,%d,%d,%d}\n",
+                                n, f, colorImg.address, (unsigned)colorImg.width,
+                                (int)fbPair.drawColorRect.isEmpty(),
+                                (int)fbPair.fillRectOnly,
+                                (unsigned)fbPair.gameCallCount,
+                                (unsigned)fbPair.projectionCount,
+                                fbPair.drawColorRect.ulx, fbPair.drawColorRect.uly,
+                                fbPair.drawColorRect.lrx, fbPair.drawColorRect.lry);
+                            fflush(stderr);
+                        }
                     }
                 }
                 if (!fbPair.drawColorRect.isEmpty()) {

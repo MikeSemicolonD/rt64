@@ -643,6 +643,35 @@ namespace RT64 {
         auto loadOperation = [&](uint32_t loadOpIndex) {
             const auto &loadOp = workload.drawData.loadOperations[loadOpIndex];
 
+            // Defensive validity check: Factor5 cinematic tasks lack a
+            // FULL_SYNC marker and hit our 16384 dispatch-iter cap mid-frame.
+            // Some tile descriptors end up with only fmt/siz/line written
+            // but stale uls/ult/lrs/lrt or texture.address — walking those
+            // in loadTileOperation crashes with an OOB read (saw AV at
+            // 0x24ECE970003 on a 8MB RDRAM). Skip clearly-corrupt entries
+            // rather than crashing the gfx_thread.
+            constexpr uint32_t kRdramSize = 0x800000;
+            if (loadOp.tile.fmt > 7 ||
+                loadOp.tile.siz > 3 ||
+                loadOp.texture.fmt > 7 ||
+                loadOp.texture.siz > 3 ||
+                loadOp.texture.width > 4096 ||
+                loadOp.texture.address >= kRdramSize) {
+                static std::atomic<uint64_t> s_skipped{0};
+                uint64_t n = ++s_skipped;
+                if (n == 1 || (n & (n - 1)) == 0) {
+                    fprintf(stderr,
+                        "[rt64] skipping corrupt LoadOperation #%llu "
+                        "tile.fmt=%u siz=%u tex.fmt=%u siz=%u w=%u addr=0x%X\n",
+                        (unsigned long long)n,
+                        (unsigned)loadOp.tile.fmt, (unsigned)loadOp.tile.siz,
+                        (unsigned)loadOp.texture.fmt, (unsigned)loadOp.texture.siz,
+                        (unsigned)loadOp.texture.width, loadOp.texture.address);
+                    fflush(stderr);
+                }
+                return;
+            }
+
             // For emulating how Rice hashes textures, we need information about the load operation that was performed in the particular TMEM address.
             rdp->rice.lastLoadOpByTMEM[loadOp.tile.tmem] = loadOp;
 

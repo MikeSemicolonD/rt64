@@ -4,6 +4,9 @@
 
 #include "rt64_gbi_rdp.h"
 
+#include <cmath>
+#include <cstdlib>
+
 #include "../include/rt64_extended_gbi.h"
 
 #include "rt64_f3d.h"
@@ -147,6 +150,33 @@ namespace RT64 {
         void setOtherMode(State *state, DisplayList **dl) {
             const uint32_t high = (*dl)->p0(0, 24);
             const uint32_t low = (*dl)->w1;
+            // Diagnostic: track texture filter mode (bits 12-13 of high).
+            // 0=POINT, 2=BILERP, 3=AVERAGE. If memory module renders with
+            // POINT and ideal expects BILERP (or vice versa) we'd see it.
+            {
+                // Texture-filter change trace — was added to verify whether
+                // the game requests POINT vs BILERP filtering for a specific
+                // surface. Useful when comparing visual output against ideal
+                // screenshots. Default off. ROGUESQ_LOG_RDP_STATE=1.
+                static const bool log_tf = []{
+                    const char *a = std::getenv("ROGUESQ_LOG_ALL");
+                    if (a && *a && *a != '0') return true;
+                    const char *e = std::getenv("ROGUESQ_LOG_RDP_STATE");
+                    return e && *e && *e != '0';
+                }();
+                const uint32_t tf = (high >> 12) & 0x3;
+                static std::atomic<uint64_t> n_point{0}, n_bilerp{0}, n_avg{0}, n_other{0};
+                uint64_t v;
+                if (tf == 0) v = ++n_point;
+                else if (tf == 2) v = ++n_bilerp;
+                else if (tf == 3) v = ++n_avg;
+                else v = ++n_other;
+                if (log_tf && (v == 1 || v == 100 || v == 10000)) {
+                    fprintf(stderr, "[texfilt] tf=%u (0=POINT, 2=BILERP, 3=AVERAGE) count=%llu high=0x%06X\n",
+                        (unsigned)tf, (unsigned long long)v, high & 0xFFFFFF);
+                    fflush(stderr);
+                }
+            }
             state->rdp->setOtherMode(high, low);
         }
 
@@ -518,6 +548,204 @@ namespace RT64 {
                     colorWorkBuffer[workBufferIndex + 0] = interop::float4(0.0f, 0.0f, 0.0f, 0.0f);
                     colorWorkBuffer[workBufferIndex + 1] = interop::float4(0.0f, 0.0f, 0.0f, 0.0f);
                     colorWorkBuffer[workBufferIndex + 2] = interop::float4(0.0f, 0.0f, 0.0f, 0.0f);
+                }
+
+                // Diagnostic: track which branch fired (shaded vs no-shade).
+                {
+                    static std::atomic<uint64_t> n_shaded{0}, n_unshaded{0};
+                    uint64_t v = shaded ? ++n_shaded : ++n_unshaded;
+                    if (v == 1 || v == 1000 || v == 100000) {
+                        fprintf(stderr, "[shadefix-diag] decodeTriangles shaded=%d count=%llu\n",
+                            (int)shaded, (unsigned long long)v);
+                        fflush(stderr);
+                    }
+                }
+                // Path B (post-branch): per-vertex SHADE validity check.
+                // The recompiled Factor5 ucode produces SHADE = (0,0,0,0)
+                // either by having no shade attribute (else branch) OR by
+                // having shade attribute with all-zero values. Both cases
+                // make TEXEL × SHADE render pure black (the "top of model
+                // is gone" / "dark X-Wing" symptom). Override to full-bright
+                // white so TEXEL passes through. Env-mapped surfaces (F5
+                // logo) have non-zero gradient SHADE from LOOKAT_Y and pass
+                // through this check unmodified — preserving the metallic
+                // look.
+                {
+                    // Default ROGUESQ_SHADE_FIX=10 (SHADE = 1.0 broadcast,
+                    // TEXEL passthrough). Picked 2026-05-06: it's the only
+                    // mode that unblocks the cinematic AND looks closest to
+                    // the ideal for the memory module / static models. Side
+                    // effect: kills SHADE-driven dynamic lighting (X-wing
+                    // looks slightly blown out vs ideal). User accepted this
+                    // trade-off for now; revisit when the cinematic content
+                    // is fully visible end-to-end. Override via env var.
+                    // ROGUESQ_SHADE_FIX=0 disables the fix entirely.
+                    static const bool shade_fix_b = []() {
+                        const char *e = std::getenv("ROGUESQ_SHADE_FIX");
+                        if (!e) return true;  // default on
+                        int v = atoi(e);
+                        return v == 4 || v == 5 || v == 6 || v == 7 || v == 8 || v == 9 || v == 10 || v == 11;
+                    }();
+                    if (shade_fix_b) {
+                        // The recompiled Factor5 ucode emits SHADE values as
+                        // signed (range ~-0.5..+0.5) where standard RDP wants
+                        // unsigned (0..1). Negative clamps to 0 in the shader
+                        // → dark top / dark X-Wing.
+                        //
+                        // mode=4: abs(c). Compresses to [0..0.5] (half range).
+                        // mode=5: clamp(c + 0.5, 0, 1). Maps -0.5..+0.5 to
+                        //         0..1, full range BUT creates visible sharp
+                        //         edges at sign boundaries between adjacent
+                        //         triangles (since +c and -c map differently).
+                        // mode=6: min(1, 2 * |c|). Sign-symmetric like abs
+                        //         (so adjacent triangles match at shared
+                        //         vertices) AND full dynamic range (since
+                        //         |c|=0.5 -> 1.0 max). Combines best of 4&5.
+                        static const int shade_mode = []() {
+                            const char *e = std::getenv("ROGUESQ_SHADE_FIX");
+                            return e ? atoi(e) : 10;  // default mode 10
+                        }();
+                        auto clamp01 = [](float v) {
+                            return v < 0.0f ? 0.0f : (v > 1.0f ? 1.0f : v);
+                        };
+                        auto transform = [&](interop::float4 c) -> interop::float4 {
+                            if (shade_mode == 5) {
+                                return interop::float4(
+                                    clamp01(c.x + 0.5f), clamp01(c.y + 0.5f),
+                                    clamp01(c.z + 0.5f), clamp01(c.w + 0.5f));
+                            }
+                            if (shade_mode == 6) {
+                                return interop::float4(
+                                    clamp01(2.0f * std::abs(c.x)),
+                                    clamp01(2.0f * std::abs(c.y)),
+                                    clamp01(2.0f * std::abs(c.z)),
+                                    clamp01(2.0f * std::abs(c.w)));
+                            }
+                            if (shade_mode == 7) {
+                                // CORRECTED 2026-05-06: per ucode trace at
+                                // factor5_ucode_recompiled.c:1714-1722, the
+                                // 4 bytes at vertex+0x14 are loaded into v9
+                                // lanes 0-1 (X-axis dot, Y-axis dot) with
+                                // lane 2 set to a VMOV constant from v31[0].
+                                // After SDV to DMEM 0x290 and decode by RT64
+                                // as base color: R = lane[0] = X-dot,
+                                // G = lane[1] = Y-dot, B = lane[2] = const.
+                                //
+                                // Earlier Modes 7-9 used (c.x, c.z) which is
+                                // (R, B) — but B is the constant. Real planar
+                                // magnitude must use (c.x, c.y) = (R, G).
+                                float intensity = clamp01(
+                                    2.0f * std::sqrt(c.x * c.x + c.y * c.y));
+                                return interop::float4(
+                                    intensity, intensity, intensity, intensity);
+                            }
+                            if (shade_mode == 11) {
+                                // Mode 11 = mode 10 minus SHADE_ALPHA.
+                                //
+                                // Mode 10 broadcasts (1,1,1,1) which sets
+                                // SHADE_A = 1.0. The cinematic pass-2 sprite
+                                // blender (mux 0xFFFFF238FC127FFF, L=0xC8112231)
+                                // uses A=SHADE_A in cycle 0 to mix BLEND_COLOR
+                                // with the sprite color. SHADE_A=1 collapses
+                                // that to BL = (0,0,0,0x80) — invisible black
+                                // smudges instead of the explosion sprites.
+                                //
+                                // Setting SHADE_A=0 makes cycle-0 blender pick
+                                // CC (the sprite) instead, which then
+                                // alpha-blends over the framebuffer in cycle 1
+                                // exactly as the original ucode intended.
+                                return interop::float4(1.0f, 1.0f, 1.0f, 0.0f);
+                            }
+                            if (shade_mode == 10) {
+                                // DIAGNOSTIC: SHADE = 1.0 broadcast.
+                                // Combiner formula TEXEL × SHADE reduces to
+                                // TEXEL passthrough — output is exactly the
+                                // texture sample with no shade attenuation.
+                                //
+                                // Use to answer one question: does the source
+                                // texture itself contain pure-white pixels at
+                                // hole positions, or are they muted in the
+                                // texture data?
+                                //   - If holes look pure-white in Mode 10:
+                                //     texture has the bright pixels, our
+                                //     SHADE math is the bottleneck (no Mode
+                                //     N transform can saturate every triangle
+                                //     to 1.0 with current dot product range).
+                                //   - If holes still look off-white in Mode 10:
+                                //     texture is the bottleneck — TMEM tile
+                                //     format, palette, or texture scale is
+                                //     reducing the values before they reach
+                                //     the combiner. Need to investigate
+                                //     setTile/loadTile path, not SHADE.
+                                return interop::float4(1.0f, 1.0f, 1.0f, 1.0f);
+                            }
+                            if (shade_mode == 9) {
+                                // CORRECTED 2026-05-06: previously used (R, B)
+                                // — wrong because B is a VMOV constant. Real
+                                // env-map planar magnitude is sqrt(R² + G²).
+                                //
+                                // Logs first 5 sampled vertices so we can
+                                // verify the channel assignments match what
+                                // the ucode trace predicts. Expected:
+                                //   c.x ≈ ±0.5 (X-axis dot product)
+                                //   c.y ≈ ±0.5 (Y-axis dot product)
+                                //   c.z ≈ 0    (VMOV constant from v31)
+                                //   c.w ≈ 0    (VMOV constant or zero init)
+                                static const float falloff = []() {
+                                    const char *e = std::getenv("ROGUESQ_SHADE_FALLOFF");
+                                    return e ? (float)atof(e) : 1.0f;
+                                }();
+                                static std::atomic<uint64_t> n_log{0};
+                                uint64_t v = ++n_log;
+                                if (v <= 5) {
+                                    fprintf(stderr,
+                                        "[shadefix-9 #%llu] c=(%.4f,%.4f,%.4f,%.4f) "
+                                        "|c.xy|=%.4f |c.xz|=%.4f\n",
+                                        (unsigned long long)v,
+                                        c.x, c.y, c.z, c.w,
+                                        std::sqrt(c.x*c.x + c.y*c.y),
+                                        std::sqrt(c.x*c.x + c.z*c.z));
+                                    fflush(stderr);
+                                }
+                                float mag = std::sqrt(c.x * c.x + c.y * c.y);
+                                float intensity = clamp01(1.0f - falloff * mag);
+                                return interop::float4(
+                                    intensity, intensity, intensity, intensity);
+                            }
+                            if (shade_mode == 8) {
+                                // CORRECTED 2026-05-06: see Mode 7 comment.
+                                // Use (c.x, c.y) = (R, G) for planar magnitude.
+                                static const float ambient = []() {
+                                    const char *e = std::getenv("ROGUESQ_SHADE_AMBIENT");
+                                    return e ? (float)atof(e) : 0.5f;
+                                }();
+                                static const float slope = []() {
+                                    const char *e = std::getenv("ROGUESQ_SHADE_SLOPE");
+                                    return e ? (float)atof(e) : 2.0f;
+                                }();
+                                float mag = std::sqrt(c.x * c.x + c.y * c.y);
+                                float intensity = clamp01(ambient + slope * mag);
+                                return interop::float4(
+                                    intensity, intensity, intensity, intensity);
+                            }
+                            // default mode 4: abs
+                            return interop::float4(
+                                std::abs(c.x), std::abs(c.y),
+                                std::abs(c.z), std::abs(c.w));
+                        };
+                        colorWorkBuffer[workBufferIndex + 0] = transform(colorWorkBuffer[workBufferIndex + 0]);
+                        colorWorkBuffer[workBufferIndex + 1] = transform(colorWorkBuffer[workBufferIndex + 1]);
+                        colorWorkBuffer[workBufferIndex + 2] = transform(colorWorkBuffer[workBufferIndex + 2]);
+                        static std::atomic<uint64_t> n{0};
+                        uint64_t v = ++n;
+                        if (v <= 3 || v == 100000) {
+                            const auto &c = colorWorkBuffer[workBufferIndex + 0];
+                            fprintf(stderr, "[shadefix-B mode=%d] SHADE #%llu v0=(%.3f,%.3f,%.3f)\n",
+                                shade_mode, (unsigned long long)v, c.x, c.y, c.z);
+                            fflush(stderr);
+                        }
+                    }
+
                 }
 
                 if (textured) {

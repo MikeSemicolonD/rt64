@@ -143,8 +143,116 @@ namespace RT64 {
             // Look up the hi-res target first; fall back to VI fb / off-screen.
             Framebuffer *viFb = nullptr;
             if (!viewRDRAM) {
-                viFb = fbManager.find(0x0066A000);
-                bool hiresHit = (viFb != nullptr);
+                // 2026-05-06 cinematic VI-follow-draw override.
+                //
+                // Rogue Squadron's recompiled buffer-arbiter never updates
+                // VI_ORIGIN during cinematic (state 5→2 transition missing).
+                // Confirmed via trace: VI sticks on one fb for hundreds of
+                // frames while the game CPU keeps rendering to alternating
+                // buffers (texrects target 0x5D4000/0x62B800/0x66A000/0x695C00).
+                // Particles/explosions land in fbs that VI never scans out
+                // → invisible.
+                //
+                // Workaround: when VI's chosen fb does NOT match any of the
+                // recently-written color images, override to whichever fb
+                // the game wrote to most recently (front of
+                // colorImageAddressVector — populated latest-first at
+                // workload_queue.cpp:933). Effectively makes VI follow the
+                // game's render target whenever the recompile's VI_ORIGIN
+                // sync is broken.
+                //
+                // ROGUESQ_VI_FOLLOW_DRAW=0 disables (default on).
+                // ROGUESQ_VI_FOLLOW_DRAW modes:
+                //   0       — disabled. Original VI/0x66A000 lookup chain.
+                //   1 (def) — soft. Override only when VI's fb is NOT in the
+                //             recently-written set (VI definitely stale).
+                //   2       — aggressive. Always pick the most-recent color fb,
+                //             ignoring VI_ORIGIN. Use when mode 1 doesn't fire
+                //             but particles still missing — means VI's address
+                //             matches a tracked fb but RT64's render-target for
+                //             that fb is older than the game's latest draws.
+                static const int s_vi_follow_mode = []() {
+                    const char *e = std::getenv("ROGUESQ_VI_FOLLOW_DRAW");
+                    return e ? atoi(e) : 1;
+                }();
+                // ROGUESQ_VI_FORCE_FB — diagnostic. Forces VI to present
+                // a specific RDRAM fb address regardless of VI_ORIGIN or
+                // recently-written set. Use to test "the explosion sprites
+                // are landing in fb X but VI never shows X" hypothesis:
+                //   ROGUESQ_VI_FORCE_FB=0x80695C00
+                // Address may be the upper-half virtual or the lower physical
+                // — strip to lower 24 bits before lookup.
+                static const uint32_t s_force_fb = []() {
+                    const char *e = std::getenv("ROGUESQ_VI_FORCE_FB");
+                    if (!e || !*e) return 0u;
+                    return (uint32_t)strtoul(e, nullptr, 0) & 0x00FFFFFFu;
+                }();
+                const uint32_t viAddr = present.screenVI.fbAddress();
+                bool overrideUsed = false;
+                if (s_force_fb != 0) {
+                    Framebuffer *forceFb = fbManager.find(s_force_fb);
+                    if (forceFb == nullptr) {
+                        // Try the upper-half address too.
+                        forceFb = fbManager.find(0x80000000u | s_force_fb);
+                    }
+                    if (forceFb != nullptr) {
+                        viFb = forceFb;
+                        overrideUsed = true;
+                        static std::atomic<uint64_t> ovr{0};
+                        uint64_t v = ++ovr;
+                        if (v <= 5 || (v % 120) == 0) {
+                            fprintf(stderr, "[vi-force-fb] #%llu force present of 0x%08X (viAddr was 0x%08X)\n",
+                                (unsigned long long)v, s_force_fb, viAddr);
+                            fflush(stderr);
+                        }
+                    }
+                    else {
+                        static std::atomic<uint64_t> miss{0};
+                        uint64_t m = ++miss;
+                        if (m <= 5 || (m % 120) == 0) {
+                            fprintf(stderr, "[vi-force-fb] #%llu MISS — fb 0x%08X not in fbManager\n",
+                                (unsigned long long)m, s_force_fb);
+                            fflush(stderr);
+                        }
+                    }
+                }
+                if (!overrideUsed && s_vi_follow_mode > 0 && !ext.sharedResources->colorImageAddressVector.empty()) {
+                    bool doOverride = false;
+                    if (s_vi_follow_mode == 2) {
+                        doOverride = true;
+                    }
+                    else {
+                        // Mode 1: override only when VI is stale.
+                        bool viInRecent = false;
+                        for (uint32_t a : ext.sharedResources->colorImageAddressVector) {
+                            if (a == viAddr) { viInRecent = true; break; }
+                        }
+                        doOverride = !viInRecent;
+                    }
+                    if (doOverride) {
+                        const uint32_t recentAddr = ext.sharedResources->colorImageAddressVector.front();
+                        Framebuffer *recentFb = fbManager.find(recentAddr);
+                        if (recentFb != nullptr) {
+                            viFb = recentFb;
+                            overrideUsed = true;
+                            static std::atomic<uint64_t> ovr{0};
+                            uint64_t v = ++ovr;
+                            if (v <= 5 || (v % 60) == 0) {
+                                fprintf(stderr,
+                                    "[vi-follow-draw mode=%d] #%llu viAddr=0x%08X "
+                                    "→ override to recentAddr=0x%08X (setSize=%zu)\n",
+                                    s_vi_follow_mode, (unsigned long long)v,
+                                    viAddr, recentAddr,
+                                    ext.sharedResources->colorImageAddressVector.size());
+                                fflush(stderr);
+                            }
+                        }
+                    }
+                }
+                if (viFb == nullptr) {
+                    viFb = fbManager.find(0x0066A000);
+                }
+                bool hiresHit = (viFb != nullptr) && !overrideUsed;
                 if (viFb == nullptr) {
                     viFb = fbManager.find(present.screenVI.fbAddress());
                 }
@@ -171,9 +279,19 @@ namespace RT64 {
             }
             
             if ((presentFb != nullptr) && (viFb != nullptr)) {
-                { static int n=0; ++n;
+                // [trace] fbReg dump — every-frame snapshot of the
+                // recently-modified-color-image vector and the full fb
+                // manager state. Used during framebuffer-routing debug.
+                // High-volume; default off. ROGUESQ_LOG_PRESENT=1.
+                static const bool log_p = []{
+                    const char *a = std::getenv("ROGUESQ_LOG_ALL");
+                    if (a && *a && *a != '0') return true;
+                    const char *e = std::getenv("ROGUESQ_LOG_PRESENT");
+                    return e && *e && *e != '0';
+                }();
+                if (log_p) { static int n=0; ++n;
                     if (n <= 5 || n % 50 == 0) {
-                        if(false) fprintf(stderr, "[trace] fbReg #%d vecCount=%zu fbCount=%zu:", n,
+                        fprintf(stderr, "[trace] fbReg #%d vecCount=%zu fbCount=%zu:", n,
                             ext.sharedResources->colorImageAddressVector.size(),
                             fbManager.framebuffers.size());
                         for (uint32_t a : ext.sharedResources->colorImageAddressVector) {
@@ -392,6 +510,38 @@ namespace RT64 {
                         (void*)colorTarget, targetEmpty, (void*)renderParams.texture);
                     fflush(stderr);
                 } }
+                // Log VI post-processing state — what filters the game actually
+                // requests from the VI hardware. RT64 currently only honors
+                // gammaEnable; aaMode/divot/dither are read but unimplemented.
+                { static unsigned s_lastWord = 0xFFFFFFFFu;
+                  // VI status word change trace — useful when investigating
+                  // post-processing (gamma/dither/AA) behavior. Fires only on
+                  // status-bit changes, but those still fire 5-10 times during
+                  // boot. Gated on ROGUESQ_LOG_PRESENT.
+                  static const bool log_vs = []{
+                      const char *a = std::getenv("ROGUESQ_LOG_ALL");
+                      if (a && *a && *a != '0') return true;
+                      const char *e = std::getenv("ROGUESQ_LOG_PRESENT");
+                      return e && *e && *e != '0';
+                  }();
+                  const VI &vi = present.screenVI;
+                  if (log_vs && vi.status.word != s_lastWord) {
+                      s_lastWord = vi.status.word;
+                      const char *aaName =
+                          (vi.status.aaMode == 0) ? "RESAMP_ALWAYS_FETCH" :
+                          (vi.status.aaMode == 1) ? "RESAMP_FETCH_IF_NEEDED" :
+                          (vi.status.aaMode == 2) ? "RESAMP_ONLY" : "NONE";
+                      fprintf(stderr,
+                          "[vi-status] word=0x%08X type=%u gammaEn=%u "
+                          "gammaDithEn=%u divotEn=%u serrate=%u aaMode=%s ditherFilter=%u\n",
+                          vi.status.word, (unsigned)vi.status.type,
+                          (unsigned)vi.status.gammaEnable,
+                          (unsigned)vi.status.gammaDitherEnable,
+                          (unsigned)vi.status.divotEnable,
+                          (unsigned)vi.status.serrate, aaName,
+                          (unsigned)vi.status.ditherFilter);
+                      fflush(stderr);
+                  } }
 
                 if (renderParams.texture != nullptr) {
                     commandList->barriers(RenderBarrierStage::GRAPHICS, RenderTextureBarrier(renderParams.texture, RenderTextureLayout::SHADER_READ));
@@ -452,11 +602,18 @@ namespace RT64 {
                 presentTimestamp = Timer::current();
                 swapChainValid = ext.swapChain->present(swapChainIndex, &waitSemaphore, 1);
                 {
-                    // Present-rate counter: prints first 8 + every 32nd. With
-                    // halt cadence ~17/s and cinematic_drv ~30/s, this tells us
-                    // how often actual present() lands on the swapchain.
+                    // Present-rate counter: prints first 8 + every 32nd.
+                    // Useful for diagnosing missed-frame / VI-stuck behavior
+                    // (see project_cinematic_buffer_arb.md). Default off.
+                    // ROGUESQ_LOG_PRESENT=1 (or ROGUESQ_LOG_ALL=1).
+                    static const bool log_p = []{
+                        const char *a = std::getenv("ROGUESQ_LOG_ALL");
+                        if (a && *a && *a != '0') return true;
+                        const char *e = std::getenv("ROGUESQ_LOG_PRESENT");
+                        return e && *e && *e != '0';
+                    }();
                     static int n=0;
-                    if (++n<=8 || (n & 31) == 0) {
+                    if (log_p && (++n<=8 || (n & 31) == 0)) {
                         fprintf(stderr, "[trace] RT64::Present #%d swapIdx=%u valid=%d\n",
                             n, (unsigned)swapChainIndex, (int)swapChainValid);
                         fflush(stderr);

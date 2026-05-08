@@ -5,6 +5,7 @@
 #include "rt64_thread.h"
 
 #include <cassert>
+#include <cstdlib>
 #include <thread>
 
 #if defined(_WIN64)
@@ -41,12 +42,36 @@ namespace RT64 {
 
     void Thread::setCurrentThreadName(const std::string &str) {
 #   if defined(_WIN32)
-        printf("[RT64] Thread::setCurrentThreadName('%s') begin\n", str.c_str()); fflush(stdout);
+        // RT64 spawns ~25 worker threads (Buffer/Shader/Stream/Texture/
+        // Workload/Idle/Present), each registering its name. The trace
+        // here was added during a Win32 crash investigation (utf8→utf16
+        // conversion + COM init). Keep the catch-handlers always-on (they
+        // surface real failures), but gate the success-path noise.
+        // ROGUESQ_LOG_THREADS=1 (or ROGUESQ_LOG_ALL=1) to enable.
+        static const bool log_t = []{
+            // MSVC marks getenv deprecated under /W and our project builds
+            // with -Werror; suppress the warning since the env-var read is
+            // intentional and one-shot at startup.
+#ifdef _MSC_VER
+#  pragma warning(push)
+#  pragma warning(disable:4996)
+#endif
+            const char *a = std::getenv("ROGUESQ_LOG_ALL");
+            if (a && *a && *a != '0') return true;
+            const char *e = std::getenv("ROGUESQ_LOG_THREADS");
+#ifdef _MSC_VER
+#  pragma warning(pop)
+#endif
+            return e && *e && *e != '0';
+        }();
+        if (log_t) {
+            printf("[RT64] Thread::setCurrentThreadName('%s') begin\n", str.c_str()); fflush(stdout);
+        }
         try {
             std::wstring nameWide = win32::Utf8ToUtf16(str);
-            printf("[RT64] wstring ok len=%zu\n", nameWide.size()); fflush(stdout);
+            if (log_t) { printf("[RT64] wstring ok len=%zu\n", nameWide.size()); fflush(stdout); }
             SetThreadDescription(GetCurrentThread(), nameWide.c_str());
-            printf("[RT64] Thread::setCurrentThreadName done\n"); fflush(stdout);
+            if (log_t) { printf("[RT64] Thread::setCurrentThreadName done\n"); fflush(stdout); }
         } catch (const std::exception& e) {
             fprintf(stderr, "[RT64] setCurrentThreadName threw: %s\n", e.what()); fflush(stderr);
         } catch (...) {
