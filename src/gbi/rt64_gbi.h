@@ -22,7 +22,6 @@ namespace RT64 {
         F3DGOLDEN,
         F3DPD,
         F3DWAVE,
-        F3DFACTOR5,
         F3DEX,
         F3DEX2,
         F3DZEX2,

@@ -163,28 +163,15 @@ namespace RT64 {
         nativeCB.ditherRandomSeed = 0;
         nativeCB.usesHDR = shaderLibrary->usesHDR;
 
-        // Originally these were assert()s. For Rogue Squadron (Factor5) we hit
-        // 4-bit readback during the explosion/X-wing intro scene, which kills
-        // the game. Skip the readback for unsupported formats — visual artifacts
-        // (missing reflections/effects) are preferable to a hard crash.
-        bool unsupported_readback =
-            (nativeCB.siz == G_IM_SIZ_4b) ||
-            ((nativeCB.fmt == G_IM_FMT_RGBA) && (nativeCB.siz == G_IM_SIZ_8b)) ||
-            ((nativeCB.fmt == G_IM_FMT_IA) && (nativeCB.siz == G_IM_SIZ_8b)) ||
-            ((nativeCB.fmt == G_IM_FMT_CI) && (nativeCB.siz == G_IM_SIZ_16b)) ||
-            ((nativeCB.fmt == G_IM_FMT_IA) && (nativeCB.siz == G_IM_SIZ_16b)) ||
-            ((nativeCB.fmt == G_IM_FMT_I) && (nativeCB.siz == G_IM_SIZ_16b)) ||
-            ((nativeCB.fmt == G_IM_FMT_DEPTH) && (nativeCB.siz != G_IM_SIZ_16b)) ||
-            ((nativeCB.fmt == G_IM_FMT_CI) && (nativeCB.siz == G_IM_SIZ_32b));
-        if (unsupported_readback) {
-            static int n = 0;
-            if (++n <= 5 || (n % 200) == 0) {
-                fprintf(stderr, "[native_target] skip unsupported readback fmt=%d siz=%d (n=%d)\n",
-                    (int)nativeCB.fmt, (int)nativeCB.siz, n);
-                fflush(stderr);
-            }
-            return 0;
-        }
+        // Assert for formats that have not been implemented yet because hardware verification is pending.
+        assert((nativeCB.siz != G_IM_SIZ_4b) && "Unimplemented 4 bits Readback mode.");
+        assert(((nativeCB.fmt != G_IM_FMT_RGBA) || (nativeCB.siz != G_IM_SIZ_8b)) && "Unimplemented RGBA8 Readback mode.");
+        assert(((nativeCB.fmt != G_IM_FMT_IA) || (nativeCB.siz != G_IM_SIZ_8b)) && "Unimplemented IA8 Readback mode.");
+        assert(((nativeCB.fmt != G_IM_FMT_CI) || (nativeCB.siz != G_IM_SIZ_16b)) && "Unimplemented CI16 Readback mode.");
+        assert(((nativeCB.fmt != G_IM_FMT_IA) || (nativeCB.siz != G_IM_SIZ_16b)) && "Unimplemented IA16 Readback mode.");
+        assert(((nativeCB.fmt != G_IM_FMT_I) || (nativeCB.siz != G_IM_SIZ_16b)) && "Unimplemented I16 Readback mode.");
+        assert(((nativeCB.fmt != G_IM_FMT_DEPTH) || (nativeCB.siz == G_IM_SIZ_16b)) && "Depth format is not allowed outside of 16-bits.");
+        assert(((nativeCB.fmt != G_IM_FMT_CI) || (nativeCB.siz != G_IM_SIZ_32b)) && "Unimplemented CI32 Readback mode.");
         assert(((nativeCB.fmt != G_IM_FMT_IA) || (nativeCB.siz != G_IM_SIZ_32b)) && "Unimplemented IA32 Readback mode.");
         assert(((nativeCB.fmt != G_IM_FMT_I) || (nativeCB.siz != G_IM_SIZ_32b)) && "Unimplemented I32 Readback mode.");
 
@@ -263,26 +250,16 @@ namespace RT64 {
         nativeCB.ditherRandomSeed = ditherRandomSeed;
         nativeCB.usesHDR = shaderLibrary->usesHDR;
 
-        // Skip combinations that have not been implemented yet because hardware verification is pending.
-        bool unsupported_writeback =
-            (nativeCB.siz == G_IM_SIZ_4b) ||
-            ((nativeCB.fmt == G_IM_FMT_RGBA) && (nativeCB.siz == G_IM_SIZ_8b)) ||
-            ((nativeCB.fmt == G_IM_FMT_IA)   && (nativeCB.siz == G_IM_SIZ_8b)) ||
-            ((nativeCB.fmt == G_IM_FMT_CI)   && (nativeCB.siz == G_IM_SIZ_16b)) ||
-            ((nativeCB.fmt == G_IM_FMT_IA)   && (nativeCB.siz == G_IM_SIZ_16b)) ||
-            ((nativeCB.fmt == G_IM_FMT_I)    && (nativeCB.siz == G_IM_SIZ_16b)) ||
-            ((nativeCB.fmt == G_IM_FMT_CI)   && (nativeCB.siz == G_IM_SIZ_32b)) ||
-            ((nativeCB.fmt == G_IM_FMT_IA)   && (nativeCB.siz == G_IM_SIZ_32b)) ||
-            ((nativeCB.fmt == G_IM_FMT_I)    && (nativeCB.siz == G_IM_SIZ_32b));
-        if (unsupported_writeback) {
-            static int n = 0; ++n;
-            if (n <= 10 || (n % 50) == 0) {
-                fprintf(stderr, "[native_target] skip unsupported writeback fmt=%u siz=%u (n=%d)\n",
-                        (unsigned)nativeCB.fmt, (unsigned)nativeCB.siz, n);
-                fflush(stderr);
-            }
-            return;
-        }
+        // Assert for formats that have not been implemented yet because hardware verification is pending.
+        assert((nativeCB.siz != G_IM_SIZ_4b) && "Unimplemented 4 bits Writeback mode.");
+        assert(((nativeCB.fmt != G_IM_FMT_RGBA) || (nativeCB.siz != G_IM_SIZ_8b)) && "Unimplemented RGBA8 Writeback mode.");
+        assert(((nativeCB.fmt != G_IM_FMT_IA) || (nativeCB.siz != G_IM_SIZ_8b)) && "Unimplemented IA8 Writeback mode.");
+        assert(((nativeCB.fmt != G_IM_FMT_CI) || (nativeCB.siz != G_IM_SIZ_16b)) && "Unimplemented CI16 Writeback mode.");
+        assert(((nativeCB.fmt != G_IM_FMT_IA) || (nativeCB.siz != G_IM_SIZ_16b)) && "Unimplemented IA16 Writeback mode.");
+        assert(((nativeCB.fmt != G_IM_FMT_I) || (nativeCB.siz != G_IM_SIZ_16b)) && "Unimplemented I16 Writeback mode.");
+        assert(((nativeCB.fmt != G_IM_FMT_CI) || (nativeCB.siz != G_IM_SIZ_32b)) && "Unimplemented CI32 Writeback mode.");
+        assert(((nativeCB.fmt != G_IM_FMT_IA) || (nativeCB.siz != G_IM_SIZ_32b)) && "Unimplemented IA32 Writeback mode.");
+        assert(((nativeCB.fmt != G_IM_FMT_I) || (nativeCB.siz != G_IM_SIZ_32b)) && "Unimplemented I32 Writeback mode.");
         
         // Select shader based on the format and pixel size.
         const ShaderRecord *writeShader;
@@ -381,19 +358,7 @@ namespace RT64 {
     }
 
     void NativeTarget::copyToRAM(uint32_t rowStart, uint32_t rowEnd, uint32_t width, uint8_t siz, uint8_t *data) {
-        // Was assert(writeBufferHistoryCount > 0). Fires when copyToRAM is
-        // called without a preceding copyFromTarget — happens during the post-
-        // N64-logo path where Factor5's framebuffer dance doesn't always queue
-        // a writeback. Skip-and-log instead of aborting.
-        if (writeBufferHistoryCount == 0) {
-            static int n = 0;
-            if (++n <= 10 || (n % 500) == 0) {
-                fprintf(stderr, "[trace] copyToRAM skip #%d (no writeBuffer history) row=%u..%u w=%u siz=%u\n",
-                    n, rowStart, rowEnd, width, (unsigned)siz);
-                fflush(stderr);
-            }
-            return;
-        }
+        assert(writeBufferHistoryCount > 0);
 
         const WriteBuffer &writeBuffer = writeBufferHistory[writeBufferHistoryIndex];
         const uint32_t bufferOffset = getNativeSize(width, rowStart, siz);

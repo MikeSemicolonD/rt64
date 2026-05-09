@@ -649,20 +649,6 @@ namespace RT64 {
                 else {
                     callTile.tmemHashOrID = textureManager.uploadTexture(this, callTile.loadTile, ext.textureCache, workload.submissionFrame, callTile.sampleWidth, callTile.sampleHeight, callTile.tlut);
                 }
-                // Per-tile hash probe (fmt/siz/palette/tlut/hash). Confirms
-                // Factor5 text uses I4 intensity (fmt=4, siz=0, no TLUT) — not
-                // CI4/CI8 with palette as initially assumed. Each glyph
-                // produces a unique TMEM hash, so cache aliasing is NOT the
-                // bug. Remaining suspect: alpha-test or combine-mode pipeline
-                // (user observed letters M/N appearing only at fade edges).
-                static int n = 0; ++n;
-                if (n <= 30 || (n % 1000) == 0) {
-                    fprintf(stderr, "[trace] tile-hash #%d w=%u h=%u fmt=%u siz=%u tlut=%u hash=0x%016llX\n",
-                        n, (unsigned)callTile.sampleWidth, (unsigned)callTile.sampleHeight,
-                        (unsigned)callTile.loadTile.fmt, (unsigned)callTile.loadTile.siz,
-                        (unsigned)callTile.tlut, (unsigned long long)callTile.tmemHashOrID);
-                    fflush(stderr);
-                }
             }
             else if (callTile.reinterpretTile) {
                 struct ReinterpretHashData {
@@ -746,41 +732,10 @@ namespace RT64 {
             for (uint32_t d = 0; d < proj.gameCallCount; d++) {
                 const GameCall &gameCall = proj.gameCalls[d];
 
-                // Per-gameCall load-ordering probe (kept). Logs first 60 +
-                // every 500th rect with tile bound, plus per-load srcAddr
-                // when present. Useful for verifying TMEM contents at draw
-                // time correlate with intended glyph.
-                bool probeThisCall = false;
-                if (gameCall.callDesc.tileCount > 0) {
-                    static int n = 0; ++n;
-                    if (n <= 60 || (n % 500) == 0) probeThisCall = true;
-                    if (probeThisCall) {
-                        const auto &r = gameCall.callDesc.rect;
-                        uint32_t lastSrcAddr = 0;
-                        if (gameCall.callDesc.loadCount > 0) {
-                            const uint32_t lastIdx = gameCall.callDesc.loadIndex + gameCall.callDesc.loadCount - 1;
-                            if (lastIdx < workload.drawData.loadOperations.size()) {
-                                lastSrcAddr = workload.drawData.loadOperations[lastIdx].texture.address;
-                            }
-                        }
-                        fprintf(stderr, "[trace] glyph-rect #%d ulx=%d uly=%d lrx=%d lry=%d srcAddr=0x%08X loadCnt=%u\n",
-                            n, r.ulx, r.uly, r.lrx, r.lry,
-                            lastSrcAddr, gameCall.callDesc.loadCount);
-                        fflush(stderr);
-                    }
-                }
-
                 // Perform all load operations.
                 if (gameCall.callDesc.loadCount > 0) {
                     const uint32_t loadOpLimit = gameCall.callDesc.loadIndex + gameCall.callDesc.loadCount;
                     while (loadOpCursor < loadOpLimit) {
-                        if (probeThisCall) {
-                            const auto &lop = workload.drawData.loadOperations[loadOpCursor];
-                            fprintf(stderr, "  apply load[%u] type=%d srcAddr=0x%08X tileTmem=0x%X\n",
-                                loadOpCursor, (int)lop.type,
-                                lop.texture.address, (unsigned)lop.tile.tmem);
-                            fflush(stderr);
-                        }
                         loadOperation(loadOpCursor);
                         loadOpCursor++;
                     }
@@ -807,17 +762,6 @@ namespace RT64 {
     }
 
     void State::fullSync() {
-        {
-            static int n = 0;
-            ++n;
-            int workloadCursor = ext.workloadQueue->writeCursor;
-            Workload &wl = ext.workloadQueue->workloads[workloadCursor];
-            if (n <= 10 || (n % 50) == 0) {
-                fprintf(stderr, "[trace] State::fullSync #%d workload-fbPairCount=%u\n",
-                    n, (unsigned)wl.fbPairCount);
-                fflush(stderr);
-            }
-        }
         flush();
         submitFramebufferPair(FramebufferPair::FlushReason::ProcessDisplayListsEnd);
 
