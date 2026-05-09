@@ -16,7 +16,6 @@ namespace RT64 {
     void Workload::reset() {
         submissionFrame = 0;
         fbPairCount = 0;
-        currentFbPairIndex = 0;
         fbPairSubmitted = 0;
         gameCallCount = 0;
         viOriginalRate = 0;
@@ -282,59 +281,27 @@ namespace RT64 {
     }
 
     bool Workload::addFramebufferPair(uint32_t colorAddress, uint8_t colorFmt, uint8_t colorSiz, uint16_t colorWidth, uint32_t depthAddress) {
-        // Dedupe + hard cap on fbPairs per workload. Factor5 LLE (cinematic ucode)
-        // ping-pongs ~3 distinct (color,depth,fmt,siz,width) tuples in an
-        // (A,B,C,A,B,C,…) cycle. Without dedupe each switch creates a fresh pair
-        // and the cap (256) eats text glyphs (the user-visible symptom: "No
-        // Controller" yellow text → black squares).
-        //
-        // Strategy:
-        //   1. Empty last pair → reuse it (existing behavior, untouched).
-        //   2. Else search ALL existing pairs for a matching tuple. Found?
-        //      Make that pair "current" via currentFbPairIndex without growing
-        //      the array.
-        //   3. Else add a new pair, subject to cap.
-        constexpr uint32_t kMaxFbPairs = 256;
-        auto matches = [&](const FramebufferPair &p) {
-            return p.colorImage.address == colorAddress &&
-                   p.depthImage.address == depthAddress &&
-                   p.colorImage.fmt == colorFmt &&
-                   p.colorImage.siz == colorSiz &&
-                   p.colorImage.width == colorWidth;
-        };
-        if (fbPairCount > 0 && fbPairs[fbPairCount - 1].isEmpty()) {
-            uint32_t idx = fbPairCount - 1;
-            currentFbPairIndex = idx;
-            auto &fbPair = fbPairs[idx];
-            fbPair.reset();
-            fbPair.colorImage.address = colorAddress;
-            fbPair.colorImage.fmt = colorFmt;
-            fbPair.colorImage.siz = colorSiz;
-            fbPair.colorImage.width = colorWidth;
-            fbPair.depthImage.address = depthAddress;
-            return false;
+        uint32_t fbPairIndex;
+        bool addedPair = false;
+        if ((fbPairCount == 0) || !fbPairs[fbPairCount - 1].isEmpty()) {
+            fbPairIndex = fbPairCount++;
+            adjustVector(fbPairs, fbPairCount);
+            addedPair = true;
         }
-        for (uint32_t i = 0; i < fbPairCount; i++) {
-            if (matches(fbPairs[i])) {
-                currentFbPairIndex = i;
-                return false;
-            }
+        else {
+            fbPairIndex = fbPairCount - 1;
+            addedPair = false;
         }
-        if (fbPairCount >= kMaxFbPairs) {
-            static uint32_t s_dropped = 0;
-            ++s_dropped;
-            if ((s_dropped & (s_dropped - 1)) == 0) {
-                fprintf(stderr, "[rt64] addFramebufferPair: fbPairCount=%u at cap %u; reusing last slot (dropped #%u, color=0x%08X)\n",
-                    (unsigned)fbPairCount, (unsigned)kMaxFbPairs,
-                    (unsigned)s_dropped, (unsigned)colorAddress);
+        {
+            static int n = 0;
+            if (++n <= 30 || (n % 500) == 0) {
+                if(false) fprintf(stderr, "[trace] addFb #%d color=0x%08X w=%u count-after=%u idx=%u added=%d\n",
+                    n, colorAddress, (unsigned)colorWidth, (unsigned)fbPairCount,
+                    fbPairIndex, (int)addedPair);
                 fflush(stderr);
             }
-            currentFbPairIndex = fbPairCount - 1;
-            return false;
         }
-        uint32_t fbPairIndex = fbPairCount++;
-        adjustVector(fbPairs, fbPairCount);
-        currentFbPairIndex = fbPairIndex;
+
         auto &fbPair = fbPairs[fbPairIndex];
         fbPair.reset();
         fbPair.colorImage.address = colorAddress;
@@ -343,12 +310,12 @@ namespace RT64 {
         fbPair.colorImage.width = colorWidth;
         fbPair.depthImage.address = depthAddress;
 
-        return true;
+        return addedPair;
     }
 
     int Workload::currentFramebufferPairIndex() const {
         if (fbPairCount > 0) {
-            return static_cast<int>(currentFbPairIndex);
+            return fbPairCount - 1;
         }
         else {
             return 0;

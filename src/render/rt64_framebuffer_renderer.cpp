@@ -1253,12 +1253,6 @@ namespace RT64 {
     }
 
     void FramebufferRenderer::recordFramebuffer(RenderWorker *worker, uint32_t framebufferIndex) {
-        // Caller iterates over fbPairCount, but addFramebuffer caps vector growth at
-        // kMaxFramebufferEntries — past the cap, the fbPair has no corresponding entry
-        // here. Skip recording so we don't index past size().
-        if (framebufferIndex >= framebufferVector.size()) {
-            return;
-        }
         // Submit all transition barriers first.
         thread_local std::vector<RenderTextureBarrier> startBarriers;
         startBarriers.clear();
@@ -1348,7 +1342,7 @@ namespace RT64 {
 
     void FramebufferRenderer::addFramebuffer(const DrawParams &p) {
         assert(p.fbStorage != nullptr);
-
+        
         // Setup framebuffer pair data and descriptor set.
         const FramebufferPair &fbPair = p.curWorkload->fbPairs[p.fbPairIndex];
         interop::FramebufferParams fbParams;
@@ -1356,22 +1350,6 @@ namespace RT64 {
         fbParams.resolutionScale = p.resolutionScale;
         fbParams.horizontalMisalignment = p.horizontalMisalignment;
         framebufferCount++;
-
-        // Cap vector growth. Each new entry costs 6 descriptors in the view heap (2 sets × 3 each),
-        // and Factor5 LLE can produce huge fbPair counts. Workload::addFramebufferPair already
-        // caps fbPairs at 256 for the same reason — match here so the secondary safety net kicks
-        // in too if the upstream cap is ever bypassed. Excess fbPairs collapse onto the last slot.
-        constexpr uint32_t kMaxFramebufferEntries = 256;
-        if (framebufferCount > kMaxFramebufferEntries) {
-            static uint32_t lastReportedCount = 0;
-            if (framebufferCount - lastReportedCount >= 1024 || lastReportedCount == 0) {
-                lastReportedCount = framebufferCount;
-                fprintf(stderr, "[rt64] addFramebuffer count=%u clamped to %u (vector size=%zu)\n",
-                    framebufferCount, kMaxFramebufferEntries, framebufferVector.size());
-                fflush(stderr);
-            }
-            framebufferCount = kMaxFramebufferEntries;
-        }
 
         while (framebufferCount > framebufferVector.size()) {
             framebufferVector.emplace_back();
