@@ -63,14 +63,6 @@ namespace RT64 {
     uint32_t NativeTarget::copyFromRAM(RenderWorker *worker, FramebufferChange &emptyFbChange, uint32_t width, uint32_t height, uint32_t rowStart, uint8_t siz, uint8_t fmt, const uint8_t *data, bool invalidateTargets, const ShaderLibrary *shaderLibrary) {
         assert(worker != nullptr);
 
-        // Defensive: a zero-size copy has no data to upload. Trying to create
-        // a D3D12 buffer of size 0 trips an assertion in D3D12MA. Factor5 hits
-        // this with width=1 + siz=4b (getNativeSize -> (1<<0)>>1 = 0), and with
-        // width=0 / height=0 from partially-initialized fb changes.
-        if ((width == 0) || (height == 0) || (getNativeSize(width, height, siz) == 0)) {
-            return 0;
-        }
-
         // Create the buffers for change count readback if they've not been created yet.
         if ((changeCountBuffer == nullptr) || (changeReadbackBuffer == nullptr)) {
             changeCountBuffer = worker->device->createBuffer(RenderBufferDesc::DefaultBuffer(sizeof(uint32_t), RenderBufferFlag::STORAGE | RenderBufferFlag::UNORDERED_ACCESS));

@@ -244,7 +244,7 @@ namespace RT64 {
             fclose(fp);
         }
 
-        mqdiag_dump("logs/mqdiag/mqdiag_frame.txt");
+        mqdiag_dump("mqdiag_frame.txt");
 
         fprintf(stderr, "[frame %d] captured RDRAM + %zu DL commands + mqdiag\n",
                 kFrameToDump, g_dlHistCount);

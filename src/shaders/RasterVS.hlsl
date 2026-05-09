@@ -33,39 +33,6 @@ LIBRARY_EXPORT void RasterVS(const RenderParams rp, in float4 iPosition, in floa
         ndcPos.z = instanceRDPParams[instanceIndex].primDepth.x * ndcPos.w;
     }
 
-    // ROGUESQ rescue: cinematic-mux NON-rect Triangle draws had vertex output
-    // that the RS rejected (whole-screen forced-position test confirmed this:
-    // overriding the position made every cinematic-mux triangle paint via PS).
-    // Keep the original screen x/y so primitives land where the game intended,
-    // but rescue z and w so RS doesn't depth-clip or NaN-discard:
-    //   * if w is ~0, replace with 1.0 to avoid NaN after perspective divide
-    //   * clamp z into [0, w] so depth-clip lets the triangle through
-    // The intent is: explosion content appears at its true screen position
-    // instead of being rejected. PS magenta override (RasterPS.hlsl) will
-    // paint those fragments magenta so we can verify the screen-space layout.
-    // To disable: change #if 1 to #if 0 and rebuild.
-#if 1
-    if (!renderFlagRect(rp.flags) &&
-        (rp.ccL == 0xFC11FE23u || rp.ccL == 0xFC127FFFu ||
-         rp.ccL == 0xFC11E623u || rp.ccL == 0xFC119623u ||
-         rp.ccL == 0x7C6E58D9u || rp.ccL == 0xBCA318B9u ||
-         rp.ccL == 0xFC580253u || rp.ccL == 0xFCCDFCCDu))
-    {
-        if (abs(ndcPos.w) < 0.0001f) {
-            ndcPos.w = 1.0f;
-            ndcPos.z = 0.5f;
-        }
-        // Clamp z to [0, w] so we satisfy D3D's depth-clip rule.
-        if (ndcPos.w > 0.0f) {
-            ndcPos.z = clamp(ndcPos.z, 0.0f, ndcPos.w);
-        } else {
-            // Negative w — flip so it's positive then clamp.
-            ndcPos.w = abs(ndcPos.w);
-            ndcPos.z = clamp(abs(ndcPos.z), 0.0f, ndcPos.w);
-        }
-    }
-#endif
-
     oPosition = ndcPos;
     oUV = iUV;
     oSmoothColor = iColor;

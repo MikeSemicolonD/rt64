@@ -4,9 +4,6 @@
 
 #include "rt64_framebuffer_renderer.h"
 
-#include <cstring>
-#include <unordered_set>
-
 #include "../include/rt64_extended_gbi.h"
 
 #include "common/rt64_elapsed_timer.h"
@@ -524,67 +521,6 @@ namespace RT64 {
         };
 
         auto drawCallTriangles = [&](const InstanceDrawCall &drawCall) {
-            // Pipeline-stage 4 counter — GPU draw dispatch. Counts cinematic
-            // mux family separately so we can confirm whether explosion rects
-            // reach the GPU at all. Gated under ROGUESQ_LOG_PIPELINE.
-            {
-                static const bool log_pipe = []{
-                    const char *e = std::getenv("ROGUESQ_LOG_PIPELINE");
-                    return e && *e && *e != '0';
-                }();
-                if (log_pipe) {
-                    const uint32_t lo = (uint32_t)(drawCall.triangles.shaderDesc.colorCombiner.L);
-                    const bool isCine = (lo == 0xFC11FE23u || lo == 0xFC11E623u ||
-                                         lo == 0xFC119623u || lo == 0xFC127FFFu);
-                    static int n_total = 0, n_cine = 0, n_rect = 0, n_cine_rect = 0;
-                    ++n_total;
-                    if (drawCall.type == InstanceDrawCall::Type::RegularRect) ++n_rect;
-                    if (isCine) {
-                        ++n_cine;
-                        if (drawCall.type == InstanceDrawCall::Type::RegularRect) ++n_cine_rect;
-                    }
-                    // Mux-survey: log the first occurrence of every unique
-                    // (L, type) combination that reaches GPU dispatch. Reveals
-                    // which muxes are firing for non-text content (i.e., cine
-                    // explosions / 3D triangles) without throttling cinematic-
-                    // family logs out of the picture.
-                    {
-                        static std::unordered_set<uint64_t> s_uniq;
-                        const uint64_t key = (uint64_t(lo) << 8) | uint8_t(drawCall.type);
-                        if (s_uniq.insert(key).second) {
-                            const uint32_t rtAddr = fbStorage->framebufferKey.colorTargetKey.address;
-                            const auto &om = drawCall.triangles.shaderDesc.otherMode;
-                            fprintf(stderr,
-                                "[pipe-mux-fresh] uniq#%zu L=0x%08X type=%d rt=0x%08X H=0x%08X L=0x%08X cyc=%u forceBl=%u alpCvg=%u faces=%u\n",
-                                s_uniq.size(), lo, (int)drawCall.type, rtAddr,
-                                (unsigned)om.H, (unsigned)om.L,
-                                (unsigned)om.cycleType(),
-                                (unsigned)om.forceBlend(),
-                                (unsigned)om.alphaCvgSel(),
-                                (unsigned)drawCall.triangles.faceCount);
-                            fflush(stderr);
-                        }
-                    }
-                    if ((n_total <= 5) || (n_total % 1000) == 0) {
-                        const uint32_t rtAddr = fbStorage->framebufferKey.colorTargetKey.address;
-                        const auto &om = drawCall.triangles.shaderDesc.otherMode;
-                        // otherMode bits: H[16]=fogEn? actually fog is via combiner;
-                        // H[20-21]=cycleType, L[14]=forceBlend, L[13]=alphaCvgSel,
-                        // L[12]=cvgXAlpha, L[1:0]=alphaCompare. Log raw H/L plus
-                        // decoded fields so we can spot per-draw shader state.
-                        fprintf(stderr,
-                            "[pipe-stage gpu] total=%d rect=%d cine=%d cine-rect=%d (L=0x%08X type=%d rt=0x%08X H=0x%08X L=0x%08X cyc=%u forceBl=%u alpCvg=%u cvgXa=%u aCmp=%u)\n",
-                            n_total, n_rect, n_cine, n_cine_rect, lo, (int)drawCall.type, rtAddr,
-                            (unsigned)om.H, (unsigned)om.L,
-                            (unsigned)om.cycleType(),
-                            (unsigned)om.forceBlend(),
-                            (unsigned)om.alphaCvgSel(),
-                            (unsigned)om.cvgXAlpha(),
-                            (unsigned)om.alphaCompare());
-                        fflush(stderr);
-                    }
-                }
-            }
             if (drawCall.type == InstanceDrawCall::Type::IndexedTriangles) {
                 worker->commandList->drawIndexedInstanced(drawCall.triangles.faceCount * 3, 1, drawCall.triangles.indexStart, 0, 0);
             }
@@ -597,79 +533,13 @@ namespace RT64 {
             switchToGraphicsPipeline();
         }
         
-        // Pipeline-stage 2.5 — count how many rasterScene instance indices
-        // actually reach this for-loop. If the count is much lower than
-        // [pipe-stage 2-pushDrawCall], then drawCalls are being pushed to
-        // rasterScenes that never get submitRasterScene'd.
-        {
-            static const bool log_pipe = []{
-                const char *e = std::getenv("ROGUESQ_LOG_PIPELINE");
-                return e && *e && *e != '0';
-            }();
-            if (log_pipe) {
-                static int n_call = 0;
-                static uint64_t n_inst = 0;
-                ++n_call;
-                n_inst += rasterScene.instanceIndices.size();
-                if ((n_call <= 5) || (n_call % 200) == 0) {
-                    fprintf(stderr,
-                        "[pipe-stage 2.5-rasterIter] submits=%d total-instances=%llu (this submit=%zu)\n",
-                        n_call, (unsigned long long)n_inst,
-                        rasterScene.instanceIndices.size());
-                    fflush(stderr);
-                }
-            }
-        }
         for (uint32_t i : rasterScene.instanceIndices) {
             const InstanceDrawCall &drawCall = instanceDrawCallVector[i];
-            // Pipeline-stage 2.6 — for each instance entering the for-loop,
-            // classify by cinematic mux + type. Compare against Stage 2 push
-            // counts to find drops between push and submission.
-            {
-                static const bool log_pipe = []{
-                    const char *e = std::getenv("ROGUESQ_LOG_PIPELINE");
-                    return e && *e && *e != '0';
-                }();
-                if (log_pipe && drawCall.type != InstanceDrawCall::Type::FillRect) {
-                    const uint32_t lo = (uint32_t)(drawCall.triangles.shaderDesc.colorCombiner.L);
-                    const bool isCine = (lo == 0xFC11FE23u || lo == 0xFC11E623u ||
-                                         lo == 0xFC119623u || lo == 0xFC127FFFu);
-                    static int n_total = 0, n_cine = 0, n_cine_rect = 0, n_cine_tri = 0;
-                    ++n_total;
-                    if (isCine) {
-                        ++n_cine;
-                        if (drawCall.type == InstanceDrawCall::Type::RegularRect) ++n_cine_rect;
-                        else if (drawCall.type == InstanceDrawCall::Type::RawTriangles ||
-                                 drawCall.type == InstanceDrawCall::Type::IndexedTriangles) ++n_cine_tri;
-                    }
-                    if ((n_total <= 5) || (n_total % 1000) == 0) {
-                        fprintf(stderr,
-                            "[pipe-stage 2.6-iter] total=%d cine=%d cine-rect=%d cine-tri=%d (lastMux=0x%08X type=%d)\n",
-                            n_total, n_cine, n_cine_rect, n_cine_tri, lo, (int)drawCall.type);
-                        fflush(stderr);
-                    }
-                }
-            }
             switch (drawCall.type) {
-            case InstanceDrawCall::Type::IndexedTriangles:
+            case InstanceDrawCall::Type::IndexedTriangles: 
             case InstanceDrawCall::Type::RawTriangles:
             case InstanceDrawCall::Type::RegularRect: {
-                // ROGUESQ: skip draws with null colorTarget rather than abort.
-                // The original assert kills the game; some fbPairs apparently
-                // get into the rasterScene without a valid colorTarget. Skip
-                // them so we can see what renders downstream (explosions,
-                // post-F5-logo cinematic content).
-                if (fbStorage->colorTarget == nullptr) {
-                    static int n = 0;
-                    if (++n <= 5) {
-                        fprintf(stderr,
-                            "[skip-null-rt] type=%d L=0x%08X (skipped #%d)\n",
-                            (int)drawCall.type,
-                            (unsigned)(drawCall.triangles.shaderDesc.colorCombiner.L), n);
-                        fflush(stderr);
-                    }
-                    break;
-                }
+                assert(fbStorage->colorTarget != nullptr);
 
                 const bool typeDifferent = (drawCall.type != previousCallType);
                 const bool testZDifferent = (drawCall.type == InstanceDrawCall::Type::IndexedTriangles) && (drawCall.triangles.vertexTestZ != previousVertexTestZ);
@@ -698,30 +568,6 @@ namespace RT64 {
 
                 // Draw calls can sometimes end up with empty viewports or scissors and cause validation errors. We just skip them.
                 if (triangles.viewport.isEmpty() || triangles.scissor.isEmpty()) {
-                    // Pipeline-stage 3 counter — empty viewport/scissor
-                    // dropping draws BEFORE GPU dispatch. If cinematic-mux
-                    // draws hit this branch, that's the filter killing them.
-                    static const bool log_pipe = []{
-                        const char *e = std::getenv("ROGUESQ_LOG_PIPELINE");
-                        return e && *e && *e != '0';
-                    }();
-                    if (log_pipe) {
-                        const uint32_t lo = (uint32_t)(drawCall.triangles.shaderDesc.colorCombiner.L);
-                        const bool isCine = (lo == 0xFC11FE23u || lo == 0xFC11E623u ||
-                                             lo == 0xFC119623u || lo == 0xFC127FFFu);
-                        static int n_total = 0, n_cine = 0;
-                        ++n_total;
-                        if (isCine) ++n_cine;
-                        if ((n_total <= 5) || (n_total % 500) == 0) {
-                            fprintf(stderr,
-                                "[pipe-stage 3-vpSkip] total=%d cine=%d (lastMux=0x%08X vpEmpty=%d scEmpty=%d type=%d)\n",
-                                n_total, n_cine, lo,
-                                (int)triangles.viewport.isEmpty(),
-                                (int)triangles.scissor.isEmpty(),
-                                (int)drawCall.type);
-                            fflush(stderr);
-                        }
-                    }
                     continue;
                 }
 
@@ -752,46 +598,6 @@ namespace RT64 {
                     previousPipeline = triangles.pipeline;
                 }
                 
-                // ROGUESQ_LOG_PIPELINE — log GPU viewport/scissor for cinematic
-                // draws. Now extended to ALL types (RegularRect + Triangles) so
-                // we can compare the working rect path vs. the failing triangle
-                // path. Logs pipeline pointer and faceCount so we can tell
-                // whether cinematic-mux Triangle draws share PSO with rect draws
-                // (same RS state) or differ.
-                {
-                    static const bool log_pipe = []{
-                        const char *e = std::getenv("ROGUESQ_LOG_PIPELINE");
-                        return e && *e && *e != '0';
-                    }();
-                    if (log_pipe) {
-                        const uint32_t lo = (uint32_t)(drawCall.triangles.shaderDesc.colorCombiner.L);
-                        const bool isCine = (lo == 0xFC11FE23u || lo == 0xFC11E623u ||
-                                             lo == 0xFC119623u || lo == 0xFC127FFFu);
-                        if (isCine) {
-                            const char *typeName =
-                                (drawCall.type == InstanceDrawCall::Type::RegularRect)        ? "RECT" :
-                                (drawCall.type == InstanceDrawCall::Type::IndexedTriangles)   ? "ITRI" :
-                                (drawCall.type == InstanceDrawCall::Type::RawTriangles)       ? "RTRI" :
-                                (drawCall.type == InstanceDrawCall::Type::FillRect)           ? "FILL" : "?";
-                            static int nRect = 0, nTri = 0;
-                            const bool isTri = (drawCall.type == InstanceDrawCall::Type::IndexedTriangles ||
-                                                drawCall.type == InstanceDrawCall::Type::RawTriangles);
-                            int *cnt = isTri ? &nTri : &nRect;
-                            if (++(*cnt) <= 10 || (*cnt % 5000) == 0) {
-                                fprintf(stderr,
-                                    "[viewport-cine %s] #%d L=0x%08X faces=%u idxStart=%u pipe=%p vp=(%.1f,%.1f %.1fx%.1f) sc=(%d,%d %d,%d)\n",
-                                    typeName, *cnt, lo,
-                                    (unsigned)triangles.faceCount, (unsigned)triangles.indexStart,
-                                    (const void *)triangles.pipeline,
-                                    triangles.viewport.x, triangles.viewport.y,
-                                    triangles.viewport.width, triangles.viewport.height,
-                                    triangles.scissor.left, triangles.scissor.top,
-                                    triangles.scissor.right, triangles.scissor.bottom);
-                                fflush(stderr);
-                            }
-                        }
-                    }
-                }
                 rasterParams.renderIndex = i;
                 worker->commandList->setGraphicsPushConstants(0, &rasterParams);
                 drawCallTriangles(drawCall);
@@ -820,68 +626,8 @@ namespace RT64 {
                 bool rectCoversWholeTarget = (clearRect.rect.left == 0) && (clearRect.rect.top == 0) && (uint32_t(clearRect.rect.right) == chosenTarget->width) && (uint32_t(clearRect.rect.bottom) == chosenTarget->height);
                 const RenderRect *clearRects = rectCoversWholeTarget ? nullptr : &clearRect.rect;
                 uint32_t clearRectCount = rectCoversWholeTarget ? 0 : 1;
-
-                // ROGUESQ FillRect logger and debug color override.
-                // FillRect bypasses the pixel shader entirely (uses clearColor),
-                // so the per-mux magenta gate in RasterPS.hlsl can't catch it.
-                // Log target / rect / color so we can see whether the "white
-                // squares blocking the N64 logo" are actually FillRect
-                // operations and what color the game requested.
-                // ROGUESQ_FILLRECT_DEBUG=1 forces every FillRect to magenta
-                // for visual identification.
                 if (fbStorage->colorTarget != nullptr) {
-                    static const bool log_fillrect = []{
-                        const char *e = std::getenv("ROGUESQ_LOG_PIPELINE");
-                        return e && *e && *e != '0';
-                    }();
-                    static const bool fillrect_debug = []{
-                        const char *e = std::getenv("ROGUESQ_FILLRECT_DEBUG");
-                        return e && *e && *e != '0';
-                    }();
-                    if (log_fillrect) {
-                        static int n = 0;
-                        if (++n <= 10 || (n % 1000) == 0) {
-                            const uint32_t rtAddr = fbStorage->framebufferKey.colorTargetKey.address;
-                            fprintf(stderr,
-                                "[fill-rect] #%d rt=0x%08X covers=%d rect=(%d,%d %d,%d) color=(%.3f,%.3f,%.3f,%.3f)\n",
-                                n, rtAddr, (int)rectCoversWholeTarget,
-                                clearRect.rect.left, clearRect.rect.top,
-                                clearRect.rect.right, clearRect.rect.bottom,
-                                clearRect.color.r, clearRect.color.g,
-                                clearRect.color.b, clearRect.color.a);
-                            fflush(stderr);
-                        }
-                    }
-                    // ROGUESQ_NO_FULLSCREEN_FILLRECT modes:
-                    //   "1" / "all"      — skip every full-screen FillRect (causes ghosting on attribution)
-                    //   "cinematic"      — skip only when target is cinematic color fb (0x0062B800 / 0x00695C00)
-                    //                      preserves Memory Pak attribution clears, exposes cinematic content
-                    static const int no_fullscreen_fill_mode = []{
-                        const char *e = std::getenv("ROGUESQ_NO_FULLSCREEN_FILLRECT");
-                        if (!e || !*e || *e == '0') return 0;
-                        if (!strcmp(e, "cinematic")) return 2;
-                        return 1; // "1" / "all" / anything else truthy
-                    }();
-                    if (no_fullscreen_fill_mode != 0 && rectCoversWholeTarget) {
-                        const uint32_t rtAddr = fbStorage->framebufferKey.colorTargetKey.address;
-                        const bool isCinematicFb = (rtAddr == 0x0062B800u) || (rtAddr == 0x00695C00u);
-                        if (no_fullscreen_fill_mode == 1 || (no_fullscreen_fill_mode == 2 && isCinematicFb)) {
-                            break;
-                        }
-                    }
-                    if (fillrect_debug) {
-                        // Yellow distinguishes FillRects from the magenta PS
-                        // override on cinematic-mux triangles. Lets us see
-                        // whether magenta triangles render BEFORE or AFTER
-                        // FillRects in the same frame:
-                        //   * yellow background + magenta blobs   = triangles drawn after fills (visible)
-                        //   * fully yellow, no magenta            = triangles drawn before fills (overwritten)
-                        //   * yellow + still no magenta blobs     = triangles never produce visible pixels (PSO blend issue)
-                        RenderColor yellow(1.0f, 1.0f, 0.0f, 1.0f);
-                        worker->commandList->clearColor(0, yellow, clearRects, clearRectCount);
-                    } else {
-                        worker->commandList->clearColor(0, clearRect.color, clearRects, clearRectCount);
-                    }
+                    worker->commandList->clearColor(0, clearRect.color, clearRects, clearRectCount);
                 }
                 else {
                     worker->commandList->clearDepth(true, clearRect.depth, clearRects, clearRectCount);
@@ -2034,32 +1780,6 @@ namespace RT64 {
                     rasterScene.instanceIndices.push_back(instanceIndex);
                 }
 
-                // Pipeline-stage 2 counter — InstanceDrawCall pushed to
-                // instanceDrawCallVector. Compare to [pipe-stage 1-drawTexRect]
-                // to detect drops between RDP submission and instance building.
-                {
-                    static const bool log_pipe = []{
-                        const char *e = std::getenv("ROGUESQ_LOG_PIPELINE");
-                        return e && *e && *e != '0';
-                    }();
-                    if (log_pipe) {
-                        const uint32_t lo = (uint32_t)call.callDesc.colorCombiner.L;
-                        const bool isCine = (lo == 0xFC11FE23u || lo == 0xFC11E623u ||
-                                             lo == 0xFC119623u || lo == 0xFC127FFFu);
-                        static int n_total = 0, n_cine = 0, n_cine_rect = 0;
-                        ++n_total;
-                        if (isCine) {
-                            ++n_cine;
-                            if (instanceDrawCall.type == InstanceDrawCall::Type::RegularRect) ++n_cine_rect;
-                        }
-                        if ((n_total <= 5) || (n_total % 1000) == 0) {
-                            fprintf(stderr,
-                                "[pipe-stage 2-pushDrawCall] total=%d cine=%d cine-rect=%d (lastMux=0x%08X type=%d)\n",
-                                n_total, n_cine, n_cine_rect, lo, (int)instanceDrawCall.type);
-                            fflush(stderr);
-                        }
-                    }
-                }
                 instanceDrawCallVector.push_back(instanceDrawCall);
                 globalCallIndex++;
             }

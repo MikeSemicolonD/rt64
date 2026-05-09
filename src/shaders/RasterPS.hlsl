@@ -49,65 +49,15 @@ LIBRARY_EXPORT bool RasterPS(const RenderParams rp, float4 vertexPosition, float
     bool isFrontFace, out float4 resultColor, out float4 resultAlpha) 
 {
     const OtherMode otherMode = { rp.omL, rp.omH };
-
-    // ROGUESQ diagnostic: per-mux color-code override. Color-key every distinct
-    // mux observed during the run so we can match scene elements to muxes by
-    // visual inspection.
-    //   magenta  (1,0,1)   = 0xFC11FE23 / 0xFC127FFF / 0xFC11E623 / 0xFC119623
-    //                         (cinematic mux family — text glyphs + N64 logo)
-    //   red      (1,0,0)   = 0xFC11A7FF
-    //   yellow   (1,1,0)   = 0xFC121824
-    //   cyan     (0,1,1)   = 0xFC127E24
-    //   green    (0,1,0)   = 0xFCFFFFFF
-    //   orange   (1,0.5,0) = 0x7C6E58D9   (NEW: appears at end of F5 logo)
-    //   purple   (0.5,0,1) = 0xBCA318B9   (NEW)
-    //   blue     (0,0,1)   = 0xFC580253   (NEW)
-    //   pink     (1,0.5,0.7) = 0xFCCDFCCD (NEW)
-    // The 4 new muxes appear at setCombine #6885-#6898, right at the end of
-    // F5 logo — likely the explosion-content muxes. If they render visibly
-    // in their assigned color, we've found the explosion path.
-#if 0
-    {
-        float3 tag = float3(0.0f, 0.0f, 0.0f);
-        bool tagged = false;
-        if (rp.ccL == 0xFC11FE23u || rp.ccL == 0xFC127FFFu ||
-            rp.ccL == 0xFC11E623u || rp.ccL == 0xFC119623u) {
-            tag = float3(1.0f, 0.0f, 1.0f); tagged = true;
-        } else if (rp.ccL == 0xFC11A7FFu) {
-            tag = float3(1.0f, 0.0f, 0.0f); tagged = true;
-        } else if (rp.ccL == 0xFC121824u) {
-            tag = float3(1.0f, 1.0f, 0.0f); tagged = true;
-        } else if (rp.ccL == 0xFC127E24u) {
-            tag = float3(0.0f, 1.0f, 1.0f); tagged = true;
-        } else if (rp.ccL == 0xFCFFFFFFu) {
-            tag = float3(0.0f, 1.0f, 0.0f); tagged = true;
-        } else if (rp.ccL == 0x7C6E58D9u) {
-            tag = float3(1.0f, 0.5f, 0.0f); tagged = true;
-        } else if (rp.ccL == 0xBCA318B9u) {
-            tag = float3(0.5f, 0.0f, 1.0f); tagged = true;
-        } else if (rp.ccL == 0xFC580253u) {
-            tag = float3(0.0f, 0.0f, 1.0f); tagged = true;
-        } else if (rp.ccL == 0xFCCDFCCDu) {
-            tag = float3(1.0f, 0.5f, 0.7f); tagged = true;
-        }
-        if (tagged) {
-            resultColor = float4(tag, 1.0f);
-            resultAlpha = float4(tag, 1.0f);
-            return true;
-        }
-    }
-#endif
-
 #if defined(DYNAMIC_RENDER_PARAMS)
     if ((otherMode.cycleType() != G_CYC_COPY) && renderFlagCulling(rp.flags) && isFrontFace) {
         return false;
     }
 #endif
-
+    
     const uint instanceIndex = instanceRenderIndices[gConstants.renderIndex].instanceIndex;
     const float4 vertexColor = renderFlagSmoothShade(rp.flags) ? vertexSmoothColor : float4(vertexFlatColor.rgb, vertexSmoothColor.a);
     const ColorCombiner colorCombiner = { rp.ccL, rp.ccH };
-
     const bool depthClampNear = renderFlagNoN(rp.flags);
     const bool depthDecal = (otherMode.zMode() == ZMODE_DEC);
     const bool zSourcePrim = (otherMode.zSource() == G_ZS_PRIM);
@@ -224,22 +174,7 @@ LIBRARY_EXPORT bool RasterPS(const RenderParams rp, float4 vertexPosition, float
     ccInputs.K4 = (instanceRDPParams[instanceIndex].convertK[4] / 255.0f);
     ccInputs.K5 = (instanceRDPParams[instanceIndex].convertK[5] / 255.0f);
     colorCombiner.run(ccInputs, combinerColor, alphaCompareValue);
-
-    // Honor alphaCvgSel (G_ALPHA_CVG_SEL): on real N64 hardware, when this
-    // bit is set, the combiner's alpha output is REPLACED by the coverage
-    // value before going to either the alpha test or the blender. Used for
-    // AA + transparency (smoke, explosion particles, lights).
-    // RT64 doesn't track partial coverage at triangle edges, so coverage is
-    // approximated as 1.0 for any pixel surviving rasterization. The
-    // substitution must precede the alpha compare; otherwise particle
-    // pixels whose combiner alpha happens to be 0 get discarded against a
-    // non-zero blendColor.a threshold and never reach the blender.
-    if (otherMode.alphaCvgSel()) {
-        const float cvgAlpha = otherMode.cvgXAlpha() ? combinerColor.a : 1.0f;
-        combinerColor.a = cvgAlpha;
-        alphaCompareValue = cvgAlpha;
-    }
-
+    
 #if 0
     // Alpha dither.
     // TODO: To avoid increasing the alpha values here, the only viable choice would be to drop the precision down to 5-bit.
@@ -273,13 +208,13 @@ LIBRARY_EXPORT bool RasterPS(const RenderParams rp, float4 vertexPosition, float
     const bool usesHDR = renderFlagUsesHDR(rp.flags);
     const float cvgRange = usesHDR ? 65535.0f : 255.0f;
     float resultCvg = (8.0f / cvgRange) * (otherMode.cvgXAlpha() ? combinerColor.a : 1.0f);
-
+    
     // Discard all pixels without coverage.
     const float CoverageThreshold = 1.0f / cvgRange;
     if (resultCvg < CoverageThreshold) {
         return false;
     }
-
+    
     // Add the blender if it can be replicated with simple emulation.
     Blender::Inputs blInputs;
     blInputs.blendColor = instanceRDPParams[instanceIndex].blendColor;
