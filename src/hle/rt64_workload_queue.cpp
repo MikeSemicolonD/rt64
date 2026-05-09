@@ -8,6 +8,40 @@
 
 #include "rt64_present_queue.h"
 
+#include <atomic>
+#include <chrono>
+#include <cstdlib>
+#include <cstdio>
+
+namespace {
+    static int rt64_alloc_log_enabled() {
+        static int s = -1;
+        if (s < 0) {
+#ifdef _MSC_VER
+#  pragma warning(push)
+#  pragma warning(disable:4996)
+#endif
+#if defined(__clang__)
+#  pragma clang diagnostic push
+#  pragma clang diagnostic ignored "-Wdeprecated-declarations"
+#endif
+            const char *e = std::getenv("ROGUESQ_LOG_RT64_ALLOC");
+#if defined(__clang__)
+#  pragma clang diagnostic pop
+#endif
+#ifdef _MSC_VER
+#  pragma warning(pop)
+#endif
+            s = (e && e[0] == '1') ? 1 : 0;
+        }
+        return s;
+    }
+    static uint64_t rt64_alloc_now_ms() {
+        using namespace std::chrono;
+        return (uint64_t)duration_cast<milliseconds>(steady_clock::now().time_since_epoch()).count();
+    }
+}
+
 #define ENABLE_HIGH_RESOLUTION_RENDERER 1
 
 namespace RT64 {
@@ -661,7 +695,7 @@ namespace RT64 {
                     drawParams.maxGameCall = std::min(gameCallCountMax - gameCallCursor, fbPair.gameCallCount);
                     framebufferRenderer->addFramebuffer(drawParams);
                 }
-                
+
                 gameCallCursor += fbPair.gameCallCount;
             }
 
@@ -950,6 +984,22 @@ namespace RT64 {
                             continue;
                         }
 
+                        // ROGUESQ: skip fillOnly fbpairs from VI-follow candidate
+                        // list. The cinematic emits dedicated clear-only pairs
+                        // (180 fillRects on 0x00695C00) that come AFTER sprite-
+                        // rendering pairs in the workload. With reverse iteration
+                        // they end up at the front of colorImageAddressVector,
+                        // making mode-2 VI-follow pick the cleared fb. Skip them
+                        // so VI-follow targets fbs with actual content. Disable
+                        // by setting ROGUESQ_VI_FOLLOW_INCLUDE_FILLS=1.
+                        static const bool include_fills = []{
+                            const char *e = std::getenv("ROGUESQ_VI_FOLLOW_INCLUDE_FILLS");
+                            return e && *e && *e != '0';
+                        }();
+                        if (!include_fills && fbPair.fillRectOnly) {
+                            continue;
+                        }
+
                         const auto &colorImg = fbPair.colorImage;
                         if (colorSet.find(colorImg.address) != colorSet.end()) {
                             continue;
@@ -1058,6 +1108,12 @@ namespace RT64 {
                     interpolatedTargets.resize(requiredFrames);
                     for (uint32_t i = previousSize; i < requiredFrames; i++) {
                         interpolatedTargets[i] = std::make_unique<RenderTarget>(interpolationTargetKey.address, Framebuffer::Type::Color, RenderMultisampling(), usesHDR);
+                    }
+                    if (rt64_alloc_log_enabled()) {
+                        fprintf(stderr, "[rt64-alloc] interpolatedColorTargets: prevSize=%u newSize=%u displayFrames=%u msaa=%d hdr=%d addr=0x%08X ms=%llu\n",
+                            previousSize, requiredFrames, displayFrames, (int)usingMSAA, (int)usesHDR,
+                            (unsigned)interpolationTargetKey.address, (unsigned long long)rt64_alloc_now_ms());
+                        fflush(stderr);
                     }
                 }
                 

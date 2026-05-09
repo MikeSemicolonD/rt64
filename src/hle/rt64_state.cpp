@@ -689,6 +689,14 @@ namespace RT64 {
         };
 
         auto uploadTile = [&](uint32_t rdpTileIndex, FramebufferPair &fbPair, const DrawCall &drawCall) {
+            if (rdpTileIndex >= workload.drawData.callTiles.size()) {
+                static int s_oob_log = 0;
+                if (s_oob_log++ < 8) {
+                    fprintf(stderr, "[rt64] uploadTile OOB skip: rdpTileIndex=%u callTiles.size=%zu\n",
+                        rdpTileIndex, workload.drawData.callTiles.size());
+                }
+                return;
+            }
             auto &callTile = workload.drawData.callTiles[rdpTileIndex];
             if (!callTile.valid) {
                 return;
@@ -1085,7 +1093,32 @@ namespace RT64 {
 
                     // Specialize shaders based on their tile parameters.
                     flags.canDecodeTMEM = false;
+                    // ROGUESQ defensive bounds check. Late in cinematic
+                    // (after Factor5 LLE submits malformed state), some
+                    // callDescs end up with tileIndex+tileCount >
+                    // callTiles.size() — accessing OOB triggers STL bounds
+                    // check abort via vector(1931). Skip the entire tile
+                    // block when OOB; flags stay at initialized defaults.
+                    bool tilesOOB = false;
                     if (callDesc.tileCount > 0) {
+                        const auto &callTiles = workload.drawData.callTiles;
+                        const auto &rdpTiles = workload.drawData.rdpTiles;
+                        const size_t needed = size_t(callDesc.tileIndex) + size_t(callDesc.tileCount);
+                        if (needed > callTiles.size() || needed > rdpTiles.size()) {
+                            tilesOOB = true;
+                            static std::atomic<uint64_t> s_oob{0};
+                            uint64_t n = ++s_oob;
+                            if (n == 1 || (n & (n - 1)) == 0) {
+                                fprintf(stderr,
+                                    "[rt64] tile OOB skip #%llu tileIndex=%u tileCount=%u callTiles=%zu rdpTiles=%zu\n",
+                                    (unsigned long long)n,
+                                    (unsigned)callDesc.tileIndex, (unsigned)callDesc.tileCount,
+                                    callTiles.size(), rdpTiles.size());
+                                fflush(stderr);
+                            }
+                        }
+                    }
+                    if (callDesc.tileCount > 0 && !tilesOOB) {
                         auto &callTiles = workload.drawData.callTiles;
                         const bool canDoNativeSamplers = (callDesc.tileCount <= 2);
                         for (uint32_t t = 0; t < callDesc.tileCount; t++) {
@@ -1377,6 +1410,25 @@ namespace RT64 {
 
                 // Create all GPU tile mappings and upload them.
                 bool uploadGPUTiles = (gpuTileCursor < rdpTileCursor);
+                // PATCH (2026-05-08): bounds-clamp rdpTileCursor against callTiles.size().
+                // Cinematic-path uploadTile OOB events have been observed (rdpTileIndex>callTiles.size).
+                // Without this clamp, createGPUTiles reads past the vector end and AVs.
+                {
+                    const size_t callTilesSize = workload.drawData.callTiles.size();
+                    const size_t gpuTilesSize = workload.drawData.gpuTiles.size();
+                    const size_t maxSize = std::min(callTilesSize, gpuTilesSize);
+                    if (rdpTileCursor > maxSize) {
+                        static int s_warned = 0;
+                        if (s_warned++ < 5) {
+                            fprintf(stderr, "[rt64] createGPUTiles OOB clamp: rdpTileCursor=%zu callTiles=%zu gpuTiles=%zu -> %zu\n",
+                                    (size_t)rdpTileCursor, callTilesSize, gpuTilesSize, maxSize);
+                            fflush(stderr);
+                        }
+                        rdpTileCursor = maxSize;
+                    }
+                    if (gpuTileCursor > maxSize) gpuTileCursor = maxSize;
+                    uploadGPUTiles = (gpuTileCursor < rdpTileCursor);
+                }
                 if (uploadGPUTiles) {
                     std::pair<size_t, size_t> gpuTileRange;
                     gpuTileRange.first = gpuTileCursor;

@@ -411,6 +411,15 @@ namespace RT64 {
         // This will be the same size for 4 and 8 byte formats.
         const uint32_t pixelSize = 1 << fb->siz >> 1;
 
+        // ROGUESQ guard: if fb->siz == G_IM_SIZ_4b, pixelSize evaluates to 0,
+        // which makes the modulo on the next line a hardware divide-by-zero
+        // exception. Factor5 LLE occasionally registers fbs with siz=4b
+        // during cinematic. A 4b fb is not supported as a tile copy source
+        // anyway, so just bail.
+        if (pixelSize == 0) {
+            return false;
+        }
+
         // The offset is not aligned to the pixel size. It's not possible to make a direct copy.
         if ((offset % pixelSize) != 0) {
             return false;
@@ -418,6 +427,10 @@ namespace RT64 {
 
         // Figure out where the upper left coordinate of the tile is inside the framebuffer.
         const uint32_t rowBytes = fb->imageRowBytes(fb->width);
+        // ROGUESQ guard: zero-width fb (Factor5 LLE may register one) → div-by-0.
+        if (rowBytes == 0) {
+            return false;
+        }
         const uint32_t row = offset / rowBytes;
         const uint32_t rowOffset = offset % rowBytes;
         const uint32_t pixelShift = (fb->siz == G_IM_SIZ_4b) ? 1 : 0;

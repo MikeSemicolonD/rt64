@@ -259,8 +259,56 @@ namespace RT64 {
                 if (viFb == nullptr) {
                     viFb = fbManager.find(0x007DD000);
                 }
+
+                // ROGUESQ_VI_FOLLOW_DRAW=3 — freshness mode. Override viFb to
+                // whichever Framebuffer in the manager has the highest
+                // lastWriteTimestamp. Decoupled from colorImageAddressVector
+                // (which is populated only for "interpolation candidate"
+                // pairs, so it's empty when the cinematic emits non-candidate
+                // pairs). Use this when modes 1/2 don't keep VI on a fresh fb.
+                //
+                // ROGUESQ_LOG_VI_FRESH=1 — log present-time fb selection +
+                // freshness comparison (chosen vs freshest). Use to confirm
+                // whether VI is presenting a stale fb. Throttled.
+                static const bool s_log_fresh = []{
+                    const char *e = std::getenv("ROGUESQ_LOG_VI_FRESH");
+                    return e && *e && *e != '0';
+                }();
+                Framebuffer *freshestFb = nullptr;
+                uint64_t freshestTs = 0;
+                if (s_vi_follow_mode == 3 || s_log_fresh) {
+                    for (auto &kv : fbManager.framebuffers) {
+                        Framebuffer &fb = kv.second;
+                        if (fb.lastWriteType != Framebuffer::Type::Color) continue;
+                        if (fb.lastWriteTimestamp > freshestTs) {
+                            freshestTs = fb.lastWriteTimestamp;
+                            freshestFb = &fb;
+                        }
+                    }
+                }
+                if (s_vi_follow_mode == 3 && freshestFb != nullptr && !overrideUsed) {
+                    viFb = freshestFb;
+                    overrideUsed = true;
+                }
+
                 static int n = 0;
                 ++n;
+                if (s_log_fresh && (n <= 20 || (n % 60) == 0)) {
+                    uint32_t chosenAddr = (viFb != nullptr) ? viFb->addressStart : 0u;
+                    uint64_t chosenTs = (viFb != nullptr) ? viFb->lastWriteTimestamp : 0ull;
+                    uint32_t freshestAddr = (freshestFb != nullptr) ? freshestFb->addressStart : 0u;
+                    int64_t lag = (int64_t)freshestTs - (int64_t)chosenTs;
+                    fprintf(stderr,
+                        "[vi-fresh] #%d mode=%d viAddr=0x%08X chosen=0x%08X ts=%llu | "
+                        "freshest=0x%08X ts=%llu lag=%lld | colorVec=%zu\n",
+                        n, s_vi_follow_mode,
+                        (uint32_t)present.screenVI.fbAddress(),
+                        chosenAddr, (unsigned long long)chosenTs,
+                        freshestAddr, (unsigned long long)freshestTs,
+                        (long long)lag,
+                        ext.sharedResources->colorImageAddressVector.size());
+                    fflush(stderr);
+                }
                 if (n <= 10 || (n % 50) == 0) {
                     if(false) fprintf(stderr, "[trace] Present::lookup #%d hires=%d viFb=0x%08X final-hit=%d\n",
                         n, (int)hiresHit, (uint32_t)present.screenVI.fbAddress(), viFb != nullptr);

@@ -1423,10 +1423,21 @@ namespace RT64 {
         assert(device != nullptr);
 
         this->device = device;
-        
+
         if (desc.colorAttachmentsCount > 0) {
             for (uint32_t i = 0; i < desc.colorAttachmentsCount; i++) {
                 const D3D12Texture *interfaceTexture = static_cast<const D3D12Texture *>(desc.colorAttachments[i]);
+                // Guard: callers occasionally pass a null colorAttachment
+                // (corrupt RenderTarget state during cinematic). Skip rather
+                // than NULL-deref on `interfaceTexture->desc.flags`.
+                if (interfaceTexture == nullptr) {
+                    static int s_log = 0;
+                    if (s_log++ < 4) {
+                        fprintf(stderr, "[rt64] D3D12Framebuffer ctor skip: NULL colorAttachment[%u]\n", i);
+                        fflush(stderr);
+                    }
+                    continue;
+                }
                 assert((interfaceTexture->desc.flags & RenderTextureFlag::RENDER_TARGET) && "Color attachment must be a render target.");
                 colorTargets.emplace_back(interfaceTexture);
                 colorHandles.emplace_back(device->colorTargetHeapAllocator->getHostCPUHandleAt(interfaceTexture->targetAllocatorOffset));
@@ -1585,6 +1596,15 @@ namespace RT64 {
         for (uint32_t i = 0; i < textureBarriersCount; i++) {
             const RenderTextureBarrier &textureBarrier = textureBarriers[i];
             D3D12Texture *interfaceTexture = static_cast<D3D12Texture *>(textureBarrier.texture);
+            // PATCH (2026-05-08): guard null texture in barrier
+            if (interfaceTexture == nullptr) {
+                static int s_warned = 0;
+                if (s_warned++ < 5) {
+                    fprintf(stderr, "[rt64] barriers: null texture[%u] — skip\n", i);
+                    fflush(stderr);
+                }
+                continue;
+            }
             D3D12_RESOURCE_STATES stateBefore = interfaceTexture->resourceStates;
             D3D12_RESOURCE_STATES stateAfter = toTextureState(stages, textureBarrier.layout, interfaceTexture->desc.flags);
             bool madeBarrier = makeBarrier(interfaceTexture->d3d, stateBefore, stateAfter, interfaceTexture->desc.flags & RenderTextureFlag::UNORDERED_ACCESS, resourceBarrier);
@@ -2305,6 +2325,16 @@ namespace RT64 {
     }
 
     void *D3D12Buffer::map(uint32_t subresource, const RenderRange *readRange) {
+        // PATCH (2026-05-08): guard null d3d resource — has been observed to be null
+        // when the buffer was never created (e.g. due to upstream allocation failure).
+        if (d3d == nullptr) {
+            static int s_warned = 0;
+            if (s_warned++ < 5) {
+                fprintf(stderr, "[rt64] D3D12Buffer::map skip: d3d=nullptr\n");
+                fflush(stderr);
+            }
+            return nullptr;
+        }
         D3D12_RANGE range;
         if (readRange != nullptr) {
             range.Begin = readRange->begin;

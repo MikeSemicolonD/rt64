@@ -4,10 +4,48 @@
 
 #include "rt64_framebuffer_renderer.h"
 
+#include <atomic>
 #include <cstring>
+#include <mutex>
+#include <unordered_map>
 #include <unordered_set>
 
 #include "../include/rt64_extended_gbi.h"
+
+// ROGUESQ pair-relative-offset clear-only filter (PHASE 21).
+//
+// Cross-workload map of fb addresses that have been sprite-drawn (any
+// non-FillRect drawCall) → "freshness counter" at the time of drawing.
+// Used by both addFramebuffer and submitRasterScene to decide whether a
+// full-screen FillRect on a particular fb should be dropped (because that
+// fill would erase visible content the cinematic just drew).
+//
+// Recency window (kSpriteDrawnFreshness): entries older than this many
+// addFramebuffer ticks are considered stale and ignored. Self-resetting
+// across phase transitions (attribution → N64 logo → cinematic) without
+// needing explicit phase detection — when a phase ends, its addresses
+// stop being re-drawn and quickly age out, so the next phase's clears
+// execute normally instead of being suppressed.
+//
+// Address-agnostic: works for any cutscene that exhibits the
+// sprite-then-clear pattern, regardless of which RDRAM addresses the
+// engine allocates.
+std::unordered_map<uint32_t, uint64_t> g_rt64SpriteDrawnAddrs;
+std::mutex g_rt64SpriteDrawnAddrsMutex;
+
+// Engine-aware filter signal — defined in src/rsp/dpc_bridge.cpp. Returns
+// true iff the fb at `addr` was last targeted by a SET_COLOR_IMAGE emitted
+// inside an active cinematic effect-slot dispatch. C linkage so the C++
+// translation units link cleanly with the dpc_bridge symbol.
+extern "C" bool rt64_cine_fb_is_slot_owned(uint32_t addr);
+std::atomic<uint64_t> g_rt64SpriteDrawnTick{0};
+constexpr uint64_t kSpriteDrawnFreshness = 3;
+static inline bool spriteDrawnIsFresh(uint32_t addr) {
+    auto it = g_rt64SpriteDrawnAddrs.find(addr);
+    if (it == g_rt64SpriteDrawnAddrs.end()) return false;
+    const uint64_t now = g_rt64SpriteDrawnTick.load(std::memory_order_relaxed);
+    return (now - it->second) < kSpriteDrawnFreshness;
+}
 
 #include "common/rt64_elapsed_timer.h"
 #include "common/rt64_math.h"
@@ -622,6 +660,14 @@ namespace RT64 {
         }
         for (uint32_t i : rasterScene.instanceIndices) {
             const InstanceDrawCall &drawCall = instanceDrawCallVector[i];
+            // ROGUESQ pair-relative-offset clear-only filter (PHASE 21):
+            // any sprite drawCall (non-FillRect) executed on a real color
+            // target adds its fb address to the cross-workload set. Used by
+            // the FillRect handler to detect "fill on a fb that has been
+            // sprite-drawn this run" and skip such fills.
+            // (Per-drawCall sprite-tracker removed — addFramebuffer's
+            // per-pair tracker is sufficient for the pair-level dropFills
+            // filter, and the per-drawCall fill-skip path was retracted.)
             // Pipeline-stage 2.6 — for each instance entering the for-loop,
             // classify by cinematic mux + type. Compare against Stage 2 push
             // counts to find drops between push and submission.
@@ -862,10 +908,39 @@ namespace RT64 {
                         if (!strcmp(e, "cinematic")) return 2;
                         return 1; // "1" / "all" / anything else truthy
                     }();
-                    if (no_fullscreen_fill_mode != 0 && rectCoversWholeTarget) {
+                    if (no_fullscreen_fill_mode == 1 && rectCoversWholeTarget) {
+                        // Mode 1 ("all"): sledgehammer that skips every
+                        // full-screen FillRect, regardless of context.
+                        static std::atomic<uint64_t> s_skipped{0};
+                        uint64_t n = ++s_skipped;
+                        if (log_fillrect && (n <= 5 || (n % 1000) == 0)) {
+                            const uint32_t rtAddr = fbStorage->framebufferKey.colorTargetKey.address;
+                            fprintf(stderr,
+                                "[fill-rect] SKIP #%llu rt=0x%08X (mode=1 all-fullscreen)\n",
+                                (unsigned long long)n, rtAddr);
+                            fflush(stderr);
+                        }
+                        break;
+                    }
+                    // Mode 2 ("cinematic"): engine-aware filter. The dpc_bridge
+                    // tags every SET_COLOR_IMAGE with the active cinematic
+                    // effect slot (or -1 for non-cinematic phases). A fb is
+                    // "slot-owned" iff its most recent SET_COLOR_IMAGE was
+                    // emitted inside a slot dispatch. Suppress full-screen
+                    // fills only on slot-owned fbs — that catches the
+                    // cinematic erasure pattern without ever touching
+                    // attribution / N64-logo / fade clears (which are slot=-1).
+                    if (rectCoversWholeTarget) {
                         const uint32_t rtAddr = fbStorage->framebufferKey.colorTargetKey.address;
-                        const bool isCinematicFb = (rtAddr == 0x0062B800u) || (rtAddr == 0x00695C00u);
-                        if (no_fullscreen_fill_mode == 1 || (no_fullscreen_fill_mode == 2 && isCinematicFb)) {
+                        if (rt64_cine_fb_is_slot_owned(rtAddr)) {
+                            static std::atomic<uint64_t> s_skipped{0};
+                            uint64_t n = ++s_skipped;
+                            if (log_fillrect && (n <= 5 || (n % 1000) == 0)) {
+                                fprintf(stderr,
+                                    "[fill-rect] SKIP #%llu rt=0x%08X (slot-owned)\n",
+                                    (unsigned long long)n, rtAddr);
+                                fflush(stderr);
+                            }
                             break;
                         }
                     }
@@ -1639,6 +1714,59 @@ namespace RT64 {
         memcpy(paramBufferBytes, &fbParams, sizeof(interop::FramebufferParams));
         framebuffer.paramsBuffer->unmap();
 
+        // ROGUESQ pair-relative-offset clear-only filter (PHASE 21).
+        //
+        // The cinematic alternates workloads: workload N draws sprite content
+        // to fb X (e.g. 0x695C00). Workload N+1 is a fillRectOnly clear pair on
+        // either the same X or its depth-pair address X+0x100000 (e.g. 0x795C00,
+        // which the engine reuses as a temp color fb during transitions). The
+        // clear erases visible content before VI can scan it out.
+        //
+        // Detection (address-agnostic — no hardcoded RDRAM addresses):
+        // - Cross-workload set tracks fb addresses ever sprite-drawn.
+        // - For each fillRectOnly pair, set dropFills if its address (or its
+        //   address - 0x100000, the +1MB depth-pair offset) is in that set.
+        //
+        // Filter is gated on ROGUESQ_NO_FULLSCREEN_FILLRECT=cinematic (mode 2).
+        // Mode "all"/"1" still skips every fullscreen FillRect unconditionally
+        // in the FillRect handler below (sledgehammer).
+        framebuffer.dropFills = false;
+        {
+            static const int s_clear_filter_mode = []{
+                const char *e = std::getenv("ROGUESQ_NO_FULLSCREEN_FILLRECT");
+                if (!e || !*e || *e == '0') return 0;
+                if (!strcmp(e, "cinematic")) return 2;
+                return 0;
+            }();
+            if (s_clear_filter_mode == 2 && p.fbStorage->colorTarget != nullptr) {
+                const uint32_t addr = p.fbStorage->framebufferKey.colorTargetKey.address;
+                std::lock_guard<std::mutex> lk(g_rt64SpriteDrawnAddrsMutex);
+                if (!fbPair.fillRectOnly && fbPair.gameCallCount > 0) {
+                    const uint64_t now = g_rt64SpriteDrawnTick.fetch_add(1, std::memory_order_relaxed) + 1;
+                    g_rt64SpriteDrawnAddrs[addr] = now;
+                }
+                else if (fbPair.fillRectOnly && fbPair.gameCallCount > 0) {
+                    const uint32_t depthPairAddr = (addr >= 0x00100000u) ? (addr - 0x00100000u) : 0u;
+                    if (spriteDrawnIsFresh(addr) ||
+                        (depthPairAddr != 0u && spriteDrawnIsFresh(depthPairAddr))) {
+                        framebuffer.dropFills = true;
+                        static std::atomic<uint64_t> s_dropped{0};
+                        uint64_t n = ++s_dropped;
+                        static const bool log_drop = []{
+                            const char *e = std::getenv("ROGUESQ_LOG_PRESENT");
+                            return e && *e && *e != '0';
+                        }();
+                        if (log_drop && (n <= 5 || (n % 200) == 0)) {
+                            fprintf(stderr,
+                                "[fbpair-drop] #%llu addr=0x%08X gcCount=%u (clear-only on sprite-drawn fb / +1MB pair)\n",
+                                (unsigned long long)n, addr, fbPair.gameCallCount);
+                            fflush(stderr);
+                        }
+                    }
+                }
+            }
+        }
+
         RenderTexture *backgroundColorTexture = (p.fbStorage->colorTarget != nullptr) ? p.fbStorage->colorTarget->getResolvedTexture() : dummyColorTarget.get();
         RenderTextureView *backgroundColorTextureView = (p.fbStorage->colorTarget != nullptr) ? p.fbStorage->colorTarget->getResolvedTextureView() : dummyColorTargetView.get();
         framebuffer.descRealFbSet->setBuffer(framebuffer.descRealFbSet->FbParams, framebuffer.paramsBuffer.get(), sizeof(interop::FramebufferParams));
@@ -1928,8 +2056,25 @@ namespace RT64 {
                             fixedRect = fixRect(call.callDesc.rect, fbPair.scissorRect, p.fixRectLR);
 
                             bool tileCopiesUsed = false;
-                            for (uint32_t t = 0; (t < call.callDesc.tileCount) && !tileCopiesUsed; t++) {
-                                tileCopiesUsed = drawData.callTiles[call.callDesc.tileIndex + t].tileCopyUsed;
+                            // ROGUESQ defensive bounds check (mirror of rt64_state.cpp:1102).
+                            // Late in cinematic, callDesc.tileIndex+tileCount can exceed callTiles.size(),
+                            // crashing in operator[] via STL bounds check.
+                            const size_t _ftbrNeeded = size_t(call.callDesc.tileIndex) + size_t(call.callDesc.tileCount);
+                            if (_ftbrNeeded > drawData.callTiles.size()) {
+                                static std::atomic<uint64_t> s_ftbrOob{0};
+                                uint64_t _n = ++s_ftbrOob;
+                                if (_n == 1 || (_n & (_n - 1)) == 0) {
+                                    fprintf(stderr,
+                                        "[rt64] addFb tile OOB skip #%llu tileIndex=%u tileCount=%u callTiles=%zu\n",
+                                        (unsigned long long)_n,
+                                        (unsigned)call.callDesc.tileIndex, (unsigned)call.callDesc.tileCount,
+                                        drawData.callTiles.size());
+                                    fflush(stderr);
+                                }
+                            } else {
+                                for (uint32_t t = 0; (t < call.callDesc.tileCount) && !tileCopiesUsed; t++) {
+                                    tileCopiesUsed = drawData.callTiles[call.callDesc.tileIndex + t].tileCopyUsed;
+                                }
                             }
 
                             // The call's scissor spans the whole width of the framebuffer pair scissor. The rect must not be using extended origins.

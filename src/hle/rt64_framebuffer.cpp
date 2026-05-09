@@ -6,8 +6,40 @@
 
 #include <algorithm>
 #include <cassert>
+#include <chrono>
+#include <cstdio>
+#include <cstdlib>
 #include <memory.h>
 #include <stdlib.h>
+
+namespace {
+    static int rt64_alloc_log_enabled() {
+        static int s = -1;
+        if (s < 0) {
+#ifdef _MSC_VER
+#  pragma warning(push)
+#  pragma warning(disable:4996)
+#endif
+#if defined(__clang__)
+#  pragma clang diagnostic push
+#  pragma clang diagnostic ignored "-Wdeprecated-declarations"
+#endif
+            const char *e = std::getenv("ROGUESQ_LOG_RT64_ALLOC");
+#if defined(__clang__)
+#  pragma clang diagnostic pop
+#endif
+#ifdef _MSC_VER
+#  pragma warning(pop)
+#endif
+            s = (e && e[0] == '1') ? 1 : 0;
+        }
+        return s;
+    }
+    static uint64_t rt64_alloc_now_ms() {
+        using namespace std::chrono;
+        return (uint64_t)duration_cast<milliseconds>(steady_clock::now().time_since_epoch()).count();
+    }
+}
 
 #include "xxHash/xxh3.h"
 
@@ -78,7 +110,15 @@ namespace RT64 {
         // Swap the endianness from the source.
         const uint32_t nativeSize = NativeTarget::getNativeSize(width, rowCount, siz);
         if (nativeSwappedRAM.size() < nativeSize) {
+            const size_t prevSize = nativeSwappedRAM.size();
             nativeSwappedRAM.resize(nativeSize);
+            if (rt64_alloc_log_enabled() && (nativeSize - prevSize) >= (1u << 20)) {
+                fprintf(stderr, "[rt64-alloc] nativeSwappedRAM: prev=%zu new=%u dN=%u addr=0x%08X w=%u rowCount=%u siz=%u ms=%llu\n",
+                    prevSize, (unsigned)nativeSize, (unsigned)(nativeSize - prevSize),
+                    (unsigned)addressStart, (unsigned)width, (unsigned)rowCount, (unsigned)siz,
+                    (unsigned long long)rt64_alloc_now_ms());
+                fflush(stderr);
+            }
         }
 
         const uint32_t *srcWords = reinterpret_cast<const uint32_t *>(src);

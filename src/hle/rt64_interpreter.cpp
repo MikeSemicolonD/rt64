@@ -10,6 +10,10 @@
 #include <crtdbg.h>
 #include <stdlib.h>
 #include <cwchar>
+#define WIN32_LEAN_AND_MEAN
+#include <windows.h>
+#include <DbgHelp.h>
+#pragma comment(lib, "DbgHelp.lib")
 #endif
 
 extern "C" void mqdiag_dump(const char *path);
@@ -65,6 +69,49 @@ namespace RT64 {
             fprintf(stderr, "[crash-dump] CRT hook: %s\n", msg);
         }
         dump_dl_history_tail("crt-report");
+        // Capture stack trace so we can identify which call site triggered
+        // the bounds-check (vector(1931) vector subscript out of range etc).
+        // Symbolicate via DbgHelp.
+        {
+            static bool symInit = false;
+            if (!symInit) {
+                SymSetOptions(SYMOPT_LOAD_LINES | SYMOPT_DEFERRED_LOADS);
+                SymInitialize(GetCurrentProcess(), NULL, TRUE);
+                symInit = true;
+            }
+            void *frames[48];
+            USHORT count = RtlCaptureStackBackTrace(0, 48, frames, nullptr);
+            HMODULE base = GetModuleHandleW(nullptr);
+            fprintf(stderr, "[crash-dump] stack (%u frames):\n", (unsigned)count);
+            HANDLE proc = GetCurrentProcess();
+            constexpr DWORD kNameMax = 512;
+            char buf[sizeof(SYMBOL_INFO) + kNameMax];
+            SYMBOL_INFO *sym = reinterpret_cast<SYMBOL_INFO *>(buf);
+            for (USHORT i = 0; i < count; i++) {
+                DWORD64 addr = (DWORD64)(uintptr_t)frames[i];
+                uintptr_t rva = (uintptr_t)frames[i] - (uintptr_t)base;
+                sym->SizeOfStruct = sizeof(SYMBOL_INFO);
+                sym->MaxNameLen = kNameMax - 1;
+                DWORD64 disp = 0;
+                const char *name = "?";
+                if (SymFromAddr(proc, addr, &disp, sym)) {
+                    name = sym->Name;
+                }
+                IMAGEHLP_LINE64 line{};
+                line.SizeOfStruct = sizeof(line);
+                DWORD lineDisp = 0;
+                if (SymGetLineFromAddr64(proc, addr, &lineDisp, &line)) {
+                    fprintf(stderr, "  [%2u] rva 0x%llX  %s+0x%llX  (%s:%lu)\n",
+                        (unsigned)i, (unsigned long long)rva,
+                        name, (unsigned long long)disp, line.FileName, (unsigned long)line.LineNumber);
+                } else {
+                    fprintf(stderr, "  [%2u] rva 0x%llX  %s+0x%llX\n",
+                        (unsigned)i, (unsigned long long)rva,
+                        name, (unsigned long long)disp);
+                }
+            }
+            fflush(stderr);
+        }
         return 0;  // 0 = continue normal handling (assert dialog → abort)
     }
 #endif

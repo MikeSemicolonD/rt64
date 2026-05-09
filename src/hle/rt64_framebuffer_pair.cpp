@@ -84,6 +84,14 @@ namespace RT64 {
                 const GameCall &call = proj.gameCalls[0];
                 if (proj.type == Projection::Type::Rectangle) {
                     // The rect call covers the entire dimensions of the scissor.
+                    // ROGUESQ guard: Factor5 LLE may emit Rectangle projections
+                    // whose scissorRect/rect are still in their reset state
+                    // (isNull()), which trips the asserts inside fullyInside().
+                    // A pair with no real rect cannot be an early-present
+                    // candidate, so bail out for that projection.
+                    if (call.callDesc.scissorRect.isNull() || call.callDesc.rect.isNull()) {
+                        continue;
+                    }
                     bool fullScreenRect = call.callDesc.scissorRect.fullyInside(call.callDesc.rect);
 
                     // VISCVG: Some games will dump coverage by using a special blender that basically outputs coverage only.
