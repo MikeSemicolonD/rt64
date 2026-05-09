@@ -50,6 +50,54 @@ LIBRARY_EXPORT bool RasterPS(const RenderParams rp, float4 vertexPosition, float
 {
     const OtherMode otherMode = { rp.omL, rp.omH };
 
+    // ROGUESQ diagnostic: per-mux color-code override. Color-key every distinct
+    // mux observed during the run so we can match scene elements to muxes by
+    // visual inspection.
+    //   magenta  (1,0,1)   = 0xFC11FE23 / 0xFC127FFF / 0xFC11E623 / 0xFC119623
+    //                         (cinematic mux family — text glyphs + N64 logo)
+    //   red      (1,0,0)   = 0xFC11A7FF
+    //   yellow   (1,1,0)   = 0xFC121824
+    //   cyan     (0,1,1)   = 0xFC127E24
+    //   green    (0,1,0)   = 0xFCFFFFFF
+    //   orange   (1,0.5,0) = 0x7C6E58D9   (NEW: appears at end of F5 logo)
+    //   purple   (0.5,0,1) = 0xBCA318B9   (NEW)
+    //   blue     (0,0,1)   = 0xFC580253   (NEW)
+    //   pink     (1,0.5,0.7) = 0xFCCDFCCD (NEW)
+    // The 4 new muxes appear at setCombine #6885-#6898, right at the end of
+    // F5 logo — likely the explosion-content muxes. If they render visibly
+    // in their assigned color, we've found the explosion path.
+#if 0
+    {
+        float3 tag = float3(0.0f, 0.0f, 0.0f);
+        bool tagged = false;
+        if (rp.ccL == 0xFC11FE23u || rp.ccL == 0xFC127FFFu ||
+            rp.ccL == 0xFC11E623u || rp.ccL == 0xFC119623u) {
+            tag = float3(1.0f, 0.0f, 1.0f); tagged = true;
+        } else if (rp.ccL == 0xFC11A7FFu) {
+            tag = float3(1.0f, 0.0f, 0.0f); tagged = true;
+        } else if (rp.ccL == 0xFC121824u) {
+            tag = float3(1.0f, 1.0f, 0.0f); tagged = true;
+        } else if (rp.ccL == 0xFC127E24u) {
+            tag = float3(0.0f, 1.0f, 1.0f); tagged = true;
+        } else if (rp.ccL == 0xFCFFFFFFu) {
+            tag = float3(0.0f, 1.0f, 0.0f); tagged = true;
+        } else if (rp.ccL == 0x7C6E58D9u) {
+            tag = float3(1.0f, 0.5f, 0.0f); tagged = true;
+        } else if (rp.ccL == 0xBCA318B9u) {
+            tag = float3(0.5f, 0.0f, 1.0f); tagged = true;
+        } else if (rp.ccL == 0xFC580253u) {
+            tag = float3(0.0f, 0.0f, 1.0f); tagged = true;
+        } else if (rp.ccL == 0xFCCDFCCDu) {
+            tag = float3(1.0f, 0.5f, 0.7f); tagged = true;
+        }
+        if (tagged) {
+            resultColor = float4(tag, 1.0f);
+            resultAlpha = float4(tag, 1.0f);
+            return true;
+        }
+    }
+#endif
+
 #if defined(DYNAMIC_RENDER_PARAMS)
     if ((otherMode.cycleType() != G_CYC_COPY) && renderFlagCulling(rp.flags) && isFrontFace) {
         return false;
