@@ -117,12 +117,6 @@ namespace RT64 {
             std::unique_ptr<FramebufferRendererDescriptorFramebufferSet> descDummyFbSet;
             std::set<RenderTarget *> transitionRenderTargetSet;
             RenderTargetDrawCall renderTargetDrawCall;
-            // ROGUESQ pair-relative-offset clear-only filter (PHASE 21).
-            // When true, FillRect drawCalls in this framebuffer's scenes
-            // are no-op'd. Set by addFramebuffer when the parent fbPair is
-            // a fillRectOnly clear of an fb that another workload pair has
-            // sprite-drawn (or its +1MB depth-pair address).
-            bool dropFills = false;
         };
 
         std::vector<Framebuffer> framebufferVector;

@@ -37,12 +37,6 @@ namespace RT64 {
     }
 
     static void checkResultForError(IDxcOperationResult *result) {
-        // PATCH (2026-05-08): some Compile/Link calls can leave result==nullptr
-        // on hard failure (e.g., out-of-memory in DXC, invalid library blobs).
-        // Treat as compilation error rather than null-deref crash.
-        if (result == nullptr) {
-            throw std::runtime_error("Shader compilation produced no result (DXC Link/Compile returned null)");
-        }
         HRESULT resultCode;
         result->GetStatus(&resultCode);
         if (FAILED(resultCode)) {
@@ -124,13 +118,6 @@ namespace RT64 {
 
         IDxcOperationResult *result = nullptr;
         dxcLinker->Link(entryName.c_str(), profile.c_str(), libraryBlobNames, libraryBlobCount, nullptr, 0, &result);
-        // PATCH: guard against null result (would AV in checkResultForError).
-        if (result == nullptr) {
-            fprintf(stderr, "[shader] Link returned null result — skipping shader\n");
-            fflush(stderr);
-            dxcLinker->Release();
-            return;
-        }
         checkResultForError(result);
         result->GetResult(shaderBlob);
         dxcLinker->Release();

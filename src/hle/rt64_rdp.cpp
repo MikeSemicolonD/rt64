@@ -239,39 +239,6 @@ namespace RT64 {
         // Make sure the new color image is actually different. Some games will set the color image
         // multiple times despite setting the exact same parameters.
         const uint32_t newAddress = maskAddress(address);
-        // ROGUESQ defensive guard: reject obviously-bogus color addresses.
-        // Same rationale as setDepthImage above — out-of-RAM addresses propagate
-        // and cause crashes in fbManager / RT vector accesses.
-        constexpr uint32_t kRdramSize = 0x800000;
-        if (newAddress >= kRdramSize) {
-            static std::atomic<uint64_t> s_rejected{0};
-            uint64_t n = ++s_rejected;
-            if (n == 1 || (n & (n - 1)) == 0) {
-                fprintf(stderr,
-                    "[rt64] reject setColorImage OOB addr=0x%08X w=%u (#%llu) — keeping prev=0x%08X\n",
-                    newAddress, (unsigned)width, (unsigned long long)n, colorImage.address);
-                fflush(stderr);
-            }
-            return;
-        }
-        // ROGUESQ defensive guard (2026-05-08): reject absurd widths.
-        // N64 framebuffer max is 640 (hi-res). Widths > 1024 originate from the
-        // recompiled cinematic ucode emitting garbage. Each garbage-width CIMG
-        // creates a multi-MB GPU render target via FramebufferManager → 600 MB
-        // memory spike at iter ~810 (see project_cimg_width_leak.md memory).
-        constexpr uint16_t kMaxColorImageWidth = 1024;
-        if (width > kMaxColorImageWidth) {
-            static std::atomic<uint64_t> s_wrejected{0};
-            uint64_t n = ++s_wrejected;
-            if (n == 1 || (n & (n - 1)) == 0) {
-                fprintf(stderr,
-                    "[rt64] reject setColorImage WIDTH addr=0x%08X w=%u fmt=%u siz=%u (#%llu) — keeping prev w=%u\n",
-                    newAddress, (unsigned)width, (unsigned)fmt, (unsigned)siz,
-                    (unsigned long long)n, (unsigned)colorImage.width);
-                fflush(stderr);
-            }
-            return;
-        }
         if ((colorImage.fmt != fmt) ||
             (colorImage.siz != siz) ||
             (colorImage.width != width) ||
@@ -300,24 +267,6 @@ namespace RT64 {
 
     void RDP::setDepthImage(uint32_t address) {
         const uint32_t newAddress = maskAddress(address);
-        // ROGUESQ defensive guard: reject obviously-bogus depth addresses.
-        // RDRAM is 8MB max with Expansion Pak. Late in cinematic the game
-        // sometimes writes addresses like 0x00EA0000 (15MB) — beyond physical
-        // RAM. These propagate into fbManager and trigger crashes downstream
-        // (vector subscript OOB). Skip the update so depthImage stays at last
-        // valid value.
-        constexpr uint32_t kRdramSize = 0x800000;
-        if (newAddress >= kRdramSize) {
-            static std::atomic<uint64_t> s_rejected{0};
-            uint64_t n = ++s_rejected;
-            if (n == 1 || (n & (n - 1)) == 0) {
-                fprintf(stderr,
-                    "[rt64] reject setDepthImage OOB addr=0x%08X (#%llu) — keeping prev=0x%08X\n",
-                    newAddress, (unsigned long long)n, depthImage.address);
-                fflush(stderr);
-            }
-            return;
-        }
         // Log distinct depth buffer addresses under ROGUESQ_LOG_DPC. Tells us
         // which of the "fbs" we found are actually Z-buffers (would render as
         // gradient if VI ever sampled them).
@@ -711,34 +660,6 @@ namespace RT64 {
         RT64_LOG_PRINTF("RDP::setTile(tile %u, fmt %u, siz %u, line %u, tmem %u, palette %u, cmt %u, cms %u, maskt %u, masks %u, shiftt %u, shifts %u)", tile, fmt, siz, line, tmem, palette, cmt, cms, maskt, masks, shiftt, shifts);
 #endif
 
-        // PHASE 16: trace every SET_TILE event so we can see which tile indices
-        // Factor5 actually sets up. The hypothesis is that TILE_1 is referenced
-        // in 2CYCLE draws but never set up via SET_TILE — log shows which tiles
-        // get configured per session. Throttled at every 200th event.
-        {
-            static const bool log_settile = []{
-                const char *a = std::getenv("ROGUESQ_LOG_ALL");
-                if (a && *a && *a != '0') return true;
-                const char *e = std::getenv("ROGUESQ_LOG_DPC");
-                return e && *e && *e != '0';
-            }();
-            if (log_settile) {
-                static int n = 0; static uint32_t per_tile_count[RDP_TILES] = {0};
-                ++n; ++per_tile_count[tile & (RDP_TILES - 1)];
-                // Log throttled samples + ALWAYS log rarely-set tiles (1-6)
-                bool rare_tile = (tile >= 1 && tile <= 6);
-                if (n <= 30 || (n % 200) == 0 || rare_tile) {
-                    fprintf(stderr,
-                        "[settile] #%d tile=%u line=%u fmt=%u siz=%u tmem=0x%X%s | counts t0=%u t1=%u t2=%u t3=%u t4=%u t5=%u t6=%u t7=%u\n",
-                        n, (unsigned)tile, (unsigned)line, (unsigned)fmt, (unsigned)siz, (unsigned)tmem,
-                        rare_tile ? " RARE" : "",
-                        per_tile_count[0], per_tile_count[1], per_tile_count[2], per_tile_count[3],
-                        per_tile_count[4], per_tile_count[5], per_tile_count[6], per_tile_count[7]);
-                    fflush(stderr);
-                }
-            }
-        }
-
         assert(tile < RDP_TILES);
 
         auto &t = tiles[tile];
@@ -911,12 +832,7 @@ namespace RT64 {
             // textureStart, and SEH-AVs if that goes past RDRAM. Skip
             // here too rather than crash gfx_thread.
             constexpr uint32_t kRdramSize = 0x800000;
-            // Compute the actual end address in 64-bit so a wrapping uint32_t
-            // multiplication doesn't pass the bounds check.
-            const uint64_t textureEnd64 = uint64_t(textureStart) +
-                uint64_t(rowCount > 0 ? rowCount - 1 : 0) * uint64_t(bytesPerRow) +
-                uint64_t(wordsPerRow) * 8ull;
-            if (textureEnd64 > uint64_t(kRdramSize) ||
+            if (textureEnd > kRdramSize ||
                 textureStart >= kRdramSize ||
                 rowCount == 0 || rowCount > 1024 ||
                 wordsPerRow == 0 || wordsPerRow > 4096 ||
@@ -925,10 +841,9 @@ namespace RT64 {
                 uint64_t n = ++s_skipped;
                 if (n == 1 || (n & (n - 1)) == 0) {
                     fprintf(stderr,
-                        "[rt64] skip loadTile OOB #%llu start=0x%X end=0x%llX rows=%u words/row=%u bytes/row=%u\n",
+                        "[rt64] skip loadTile OOB #%llu start=0x%X end=0x%X rows=%u words/row=%u bytes/row=%u\n",
                         (unsigned long long)n,
-                        textureStart, (unsigned long long)textureEnd64,
-                        rowCount, wordsPerRow, bytesPerRow);
+                        textureStart, textureEnd, rowCount, wordsPerRow, bytesPerRow);
                     fflush(stderr);
                 }
                 return;
@@ -969,25 +884,6 @@ namespace RT64 {
             checkFramebufferOverlap(tmemStart >> 3, tmemBytes >> 3, tmemMask, textureStart, textureEnd, 0, 0, RGBA32, true);
         }
         else {
-            // ROGUESQ defensive bounds check (mirror loadTileOperation/loadTLUTOperation).
-            // Factor5 LLE may emit SETTIMG with wild addresses. wordCount comes from
-            // (lrs - uls) >> shift; with bogus tile coords this can be huge.
-            constexpr uint32_t kRDRAMSize = 8 * 1024 * 1024;
-            const uint64_t textureEndBlock64 = uint64_t(textureStart) + uint64_t(wordCount) * 8ull;
-            if (textureStart >= kRDRAMSize ||
-                textureEndBlock64 > uint64_t(kRDRAMSize) ||
-                wordCount == 0 || wordCount > 0x40000) {
-                static std::atomic<uint64_t> s_skipped{0};
-                uint64_t n = ++s_skipped;
-                if (n == 1 || (n & (n - 1)) == 0) {
-                    fprintf(stderr,
-                        "[loadBlock] skip OOB #%llu start=0x%08X end=0x%llX words=%u\n",
-                        (unsigned long long)n,
-                        textureStart, (unsigned long long)textureEndBlock64, wordCount);
-                    fflush(stderr);
-                }
-                return;
-            }
             // Load into TMEM.
             uint8_t *TMEM8 = reinterpret_cast<uint8_t *>(TMEM);
             const uint8_t *RDRAM = state->RDRAM;
@@ -1031,29 +927,17 @@ namespace RT64 {
             // Load into TMEM.
             uint8_t *TMEM8 = reinterpret_cast<uint8_t *>(TMEM);
             const uint8_t *RDRAM = state->RDRAM;
-            // Bounds-check the texture source AND row/word counts. With Factor5
-            // LLE, an upstream SETTIMG / SET_TILE may carry wild values
-            // (28GB-shaped textureStart, 0xFFFF-row counts). Compute textureEnd
-            // in 64-bit so a wrapping multiplication doesn't pass a uint32_t
-            // bounds check, and cap rowCount/wordsPerRow/bytesPerRow as in
-            // loadTileOperation.
+            // Bounds-check the texture source. With a Factor5-driven game, an
+            // upstream SETTIMG sometimes carries a wildly-out-of-range address
+            // (observed: 28GB-shaped values), AVing inside loadToTMEMCommon. Skip
+            // the load entirely and log so we know we're losing TLUTs.
             constexpr uint32_t kRDRAMSize = 8 * 1024 * 1024;
-            const uint64_t textureEnd64 = uint64_t(textureStart) +
-                uint64_t(rowCount > 0 ? rowCount - 1 : 0) * uint64_t(bytesPerRow) +
-                uint64_t(wordsPerRow) * 8ull;
-            if (textureStart >= kRDRAMSize ||
-                textureEnd64 > uint64_t(kRDRAMSize) ||
-                rowCount == 0 || rowCount > 1024 ||
-                wordsPerRow == 0 || wordsPerRow > 4096 ||
-                bytesPerRow > 0x10000) {
-                static std::atomic<uint64_t> s_skipped{0};
-                uint64_t n = ++s_skipped;
-                if (n == 1 || (n & (n - 1)) == 0) {
-                    fprintf(stderr,
-                        "[loadTLUT] skip OOB #%llu start=0x%08X end=0x%llX rows=%u words/row=%u bytes/row=%u\n",
-                        (unsigned long long)n,
-                        textureStart, (unsigned long long)textureEnd64,
-                        rowCount, wordsPerRow, bytesPerRow);
+            const uint32_t textureEnd = textureStart + (rowCount - 1) * bytesPerRow + (wordsPerRow << 3);
+            if (textureStart >= kRDRAMSize || textureEnd > kRDRAMSize || textureEnd < textureStart) {
+                static int n = 0;
+                if (++n <= 10 || (n % 500) == 0) {
+                    fprintf(stderr, "[loadTLUT] skip out-of-range #%d textureStart=0x%08X textureEnd=0x%08X\n",
+                        n, textureStart, textureEnd);
                     fflush(stderr);
                 }
                 return;
@@ -2074,20 +1958,8 @@ namespace RT64 {
     void RDP::updateCallTexcoords(float u, float v) {
         const int workloadCursor = state->ext.workloadQueue->writeCursor;
         Workload &workload = state->ext.workloadQueue->workloads[workloadCursor];
-        // PATCH (2026-05-08): bounds-check tileIndex+t against callTiles.size().
-        // Cinematic-path can submit tile indices past the vector end.
-        const size_t callTilesSize = workload.drawData.callTiles.size();
         for (uint32_t t = 0; t < state->drawCall.tileCount; t++) {
-            const size_t idx = (size_t)state->drawCall.tileIndex + t;
-            if (idx >= callTilesSize) {
-                static int s_warned = 0;
-                if (s_warned++ < 5) {
-                    fprintf(stderr, "[rt64] updateCallTexcoords OOB skip: idx=%zu size=%zu\n", idx, callTilesSize);
-                    fflush(stderr);
-                }
-                break;
-            }
-            DrawCallTile &callTile = workload.drawData.callTiles[idx];
+            DrawCallTile &callTile = workload.drawData.callTiles[state->drawCall.tileIndex + t];
             callTile.minTexcoord.x = std::min(callTile.minTexcoord.x, int(u));
             callTile.minTexcoord.y = std::min(callTile.minTexcoord.y, int(v));
             callTile.maxTexcoord.x = std::max(callTile.maxTexcoord.x, int(ceilf(u)));

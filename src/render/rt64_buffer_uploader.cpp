@@ -3,43 +3,11 @@
 //
 
 #include <algorithm>
-#include <chrono>
-#include <cstdio>
-#include <cstdlib>
 #include <cstring>
 
 #include "common/rt64_thread.h"
 
 #include "rt64_buffer_uploader.h"
-
-namespace {
-    static int rt64_alloc_log_enabled() {
-        static int s = -1;
-        if (s < 0) {
-#ifdef _MSC_VER
-#  pragma warning(push)
-#  pragma warning(disable:4996)
-#endif
-#if defined(__clang__)
-#  pragma clang diagnostic push
-#  pragma clang diagnostic ignored "-Wdeprecated-declarations"
-#endif
-            const char *e = std::getenv("ROGUESQ_LOG_RT64_ALLOC");
-#if defined(__clang__)
-#  pragma clang diagnostic pop
-#endif
-#ifdef _MSC_VER
-#  pragma warning(pop)
-#endif
-            s = (e && e[0] == '1') ? 1 : 0;
-        }
-        return s;
-    }
-    static uint64_t rt64_alloc_now_ms() {
-        using namespace std::chrono;
-        return (uint64_t)duration_cast<milliseconds>(steady_clock::now().time_since_epoch()).count();
-    }
-}
 
 namespace RT64 {
     // Common functions.
@@ -121,22 +89,13 @@ namespace RT64 {
             }
 
             bufferPair.defaultViews.clear();
-
+            
             // Recreate the buffer pair.
             const uint64_t BlockAlignment = 256;
-            const uint64_t prevAllocatedSize = bufferPair.allocatedSize;
             bufferPair.allocatedSize = std::max(uint64_t((requiredSize * 3) / 2), BlockAlignment);
             bufferPair.allocatedSize = roundUp(bufferPair.allocatedSize, BlockAlignment);
             bufferPair.uploadBuffer = worker->device->createBuffer(RenderBufferDesc::UploadBuffer(bufferPair.allocatedSize));
             bufferPair.defaultBuffer = worker->device->createBuffer(RenderBufferDesc::DefaultBuffer(bufferPair.allocatedSize, u.bufferFlags));
-            if (rt64_alloc_log_enabled() && (bufferPair.allocatedSize - prevAllocatedSize) >= (1ull << 20)) {
-                fprintf(stderr, "[rt64-alloc] BufferPair: prevAlloc=%llu newAlloc=%llu dN=%llu reqSize=%zu stride=%u indexEnd=%u ms=%llu\n",
-                    (unsigned long long)prevAllocatedSize, (unsigned long long)bufferPair.allocatedSize,
-                    (unsigned long long)(bufferPair.allocatedSize - prevAllocatedSize),
-                    requiredSize, (unsigned)u.srcDataStride, (unsigned)u.srcDataIndexRange.second,
-                    (unsigned long long)rt64_alloc_now_ms());
-                fflush(stderr);
-            }
 
             bufferPair.defaultViews.reserve(u.formatViews.size());
             for (RenderFormat format : u.formatViews) {

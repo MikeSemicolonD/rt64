@@ -5,9 +5,6 @@
 #include "rt64_render_target.h"
 
 #include <algorithm>
-#include <chrono>
-#include <cstdio>
-#include <cstdlib>
 
 #include "gbi/rt64_f3d.h"
 #include "shared/rt64_fb_common.h"
@@ -17,40 +14,6 @@
 #include "rt64_raster_shader.h"
 
 #define PRINT_CONSTRUCTOR_DESTRUCTOR 0
-
-namespace {
-    static int rt64_alloc_log_enabled() {
-        static int s = -1;
-        if (s < 0) {
-#ifdef _MSC_VER
-#  pragma warning(push)
-#  pragma warning(disable:4996)
-#endif
-#if defined(__clang__)
-#  pragma clang diagnostic push
-#  pragma clang diagnostic ignored "-Wdeprecated-declarations"
-#endif
-            const char *e = std::getenv("ROGUESQ_LOG_RT64_ALLOC");
-#if defined(__clang__)
-#  pragma clang diagnostic pop
-#endif
-#ifdef _MSC_VER
-#  pragma warning(pop)
-#endif
-            s = (e && e[0] == '1') ? 1 : 0;
-        }
-        return s;
-    }
-    static uint64_t rt64_alloc_now_ms() {
-        using namespace std::chrono;
-        return (uint64_t)duration_cast<milliseconds>(steady_clock::now().time_since_epoch()).count();
-    }
-    // Rough size estimate (bytes) for a render target texture, ignoring driver overhead.
-    static uint64_t rt64_est_target_bytes(uint32_t w, uint32_t h, bool depth, uint32_t samples, bool hdr) {
-        uint32_t bpp = depth ? 4 : (hdr ? 8 : 4);
-        return (uint64_t)w * (uint64_t)h * (uint64_t)bpp * (uint64_t)(samples > 0 ? samples : 1);
-    }
-}
 
 namespace RT64 {
     // RenderTarget
@@ -133,17 +96,6 @@ namespace RT64 {
             resolvedTextureView = resolvedTexture->createTextureView(RenderTextureViewDesc::Texture2D(format));
             resolvedTexture->setName("Render Target Color Resolved #" + std::to_string(addressForName));
         }
-
-        if (rt64_alloc_log_enabled()) {
-            uint64_t bytes = rt64_est_target_bytes(width, height, false, multisampling.sampleCount, usesHDR);
-            if (multisampling.sampleCount > 1) bytes += rt64_est_target_bytes(width, height, false, 1, usesHDR);
-            if (bytes >= (1ull << 20)) {
-                fprintf(stderr, "[rt64-alloc] RT::setupColor: w=%u h=%u msaa=%u hdr=%d est=%llu addr=0x%08X ms=%llu\n",
-                    (unsigned)width, (unsigned)height, (unsigned)multisampling.sampleCount, (int)usesHDR,
-                    (unsigned long long)bytes, (unsigned)addressForName, (unsigned long long)rt64_alloc_now_ms());
-                fflush(stderr);
-            }
-        }
     }
 
     void RenderTarget::setupDepth(RenderWorker *worker, uint32_t width, uint32_t height) {
@@ -162,16 +114,6 @@ namespace RT64 {
         textureView = texture->createTextureView(RenderTextureViewDesc::Texture2D(format));
         texture->setName("Render Target Depth #" + std::to_string(addressForName));
         textureRevision++;
-
-        if (rt64_alloc_log_enabled()) {
-            uint64_t bytes = rt64_est_target_bytes(width, height, true, multisampling.sampleCount, false);
-            if (bytes >= (1ull << 20)) {
-                fprintf(stderr, "[rt64-alloc] RT::setupDepth: w=%u h=%u msaa=%u est=%llu addr=0x%08X ms=%llu\n",
-                    (unsigned)width, (unsigned)height, (unsigned)multisampling.sampleCount,
-                    (unsigned long long)bytes, (unsigned)addressForName, (unsigned long long)rt64_alloc_now_ms());
-                fflush(stderr);
-            }
-        }
     }
 
     void RenderTarget::setupDummy(RenderWorker *worker) {
@@ -188,19 +130,6 @@ namespace RT64 {
 
         if (textureFramebuffer == nullptr) {
             const RenderTexture *colorTexture = texture.get();
-            // Guard: callers can reach this path with `texture` not yet
-            // allocated (e.g. createTileCopyRecord → clearColorTarget on a
-            // freshly-created RenderTarget during fullSync). Passing NULL into
-            // RenderFramebufferDesc results in a NULL+0x78 AV inside D3D12's
-            // framebuffer constructor.
-            if (colorTexture == nullptr) {
-                static int s_log = 0;
-                if (s_log++ < 4) {
-                    fprintf(stderr, "[rt64] setupColorFramebuffer skip: texture not allocated\n");
-                    fflush(stderr);
-                }
-                return;
-            }
             textureFramebuffer = worker->device->createFramebuffer(RenderFramebufferDesc(&colorTexture, 1));
         }
     }

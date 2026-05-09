@@ -142,16 +142,7 @@ namespace RT64 {
             readBuffer.readDescSet->setBuffer(readBuffer.readDescSet->gCurInput, previousReadBuffer->nativeBuffer.get(), previousReadBuffer->nativeBufferSize, previousBufferView);
         }
 
-        // PATCH (2026-05-08): guard null map (uploadBuffer->d3d may be null).
         void *dstData = readBuffer.nativeUploadBuffer->map();
-        if (dstData == nullptr) {
-            static int s_warned = 0;
-            if (s_warned++ < 5) {
-                fprintf(stderr, "[rt64] copyFromRAM map() returned null — skipping memcpy\n");
-                fflush(stderr);
-            }
-            return readBufferHistoryCount - 1;
-        }
         memcpy(dstData, data, bufferSize);
         readBuffer.nativeUploadBuffer->unmap();
 
@@ -190,9 +181,7 @@ namespace RT64 {
             ((nativeCB.fmt == G_IM_FMT_IA) && (nativeCB.siz == G_IM_SIZ_8b)) ||
             ((nativeCB.fmt == G_IM_FMT_CI) && (nativeCB.siz == G_IM_SIZ_16b)) ||
             ((nativeCB.fmt == G_IM_FMT_IA) && (nativeCB.siz == G_IM_SIZ_16b)) ||
-            ((nativeCB.fmt == G_IM_FMT_IA) && (nativeCB.siz == G_IM_SIZ_32b)) ||
             ((nativeCB.fmt == G_IM_FMT_I) && (nativeCB.siz == G_IM_SIZ_16b)) ||
-            ((nativeCB.fmt == G_IM_FMT_I) && (nativeCB.siz == G_IM_SIZ_32b)) ||
             ((nativeCB.fmt == G_IM_FMT_DEPTH) && (nativeCB.siz != G_IM_SIZ_16b)) ||
             ((nativeCB.fmt == G_IM_FMT_CI) && (nativeCB.siz == G_IM_SIZ_32b));
         if (unsupported_readback) {
@@ -204,6 +193,8 @@ namespace RT64 {
             }
             return 0;
         }
+        assert(((nativeCB.fmt != G_IM_FMT_IA) || (nativeCB.siz != G_IM_SIZ_32b)) && "Unimplemented IA32 Readback mode.");
+        assert(((nativeCB.fmt != G_IM_FMT_I) || (nativeCB.siz != G_IM_SIZ_32b)) && "Unimplemented I32 Readback mode.");
 
         // Run the compute shader that generates the texture with the differences.
         const uint32_t BlockSize = FB_COMMON_WORKGROUP_SIZE;
@@ -290,11 +281,7 @@ namespace RT64 {
             ((nativeCB.fmt == G_IM_FMT_I)    && (nativeCB.siz == G_IM_SIZ_16b)) ||
             ((nativeCB.fmt == G_IM_FMT_CI)   && (nativeCB.siz == G_IM_SIZ_32b)) ||
             ((nativeCB.fmt == G_IM_FMT_IA)   && (nativeCB.siz == G_IM_SIZ_32b)) ||
-            ((nativeCB.fmt == G_IM_FMT_I)    && (nativeCB.siz == G_IM_SIZ_32b)) ||
-            // PHASE 21: depth must be 16b. Factor5 LLE may register depth fbs
-            // with wider sizes (asserts at line ~305 below). Mirror the
-            // readback-side filter we landed in PHASE 20.
-            ((nativeCB.fmt == G_IM_FMT_DEPTH) && (nativeCB.siz != G_IM_SIZ_16b));
+            ((nativeCB.fmt == G_IM_FMT_I)    && (nativeCB.siz == G_IM_SIZ_32b));
         if (unsupported_writeback) {
             static int n = 0; ++n;
             if (n <= 10 || (n % 50) == 0) {

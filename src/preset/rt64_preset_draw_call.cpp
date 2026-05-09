@@ -61,16 +61,7 @@ namespace RT64 {
         key.geometryMode = call.geometryMode;
         
         for (uint32_t t = 0; t < call.tileCount; t++) {
-            const uint32_t tileIdx = call.tileIndex + t;
-            if (tileIdx >= drawData.callTiles.size()) {
-                static int s_oob_log = 0;
-                if (s_oob_log++ < 8) {
-                    fprintf(stderr, "[rt64] DrawCallKey::fromDrawCall OOB skip: tileIdx=%u callTiles.size=%zu (call.tileIndex=%u call.tileCount=%u)\n",
-                        tileIdx, drawData.callTiles.size(), call.tileIndex, call.tileCount);
-                }
-                continue;
-            }
-            const auto &callTile = drawData.callTiles[tileIdx];
+            const auto &callTile = drawData.callTiles[call.tileIndex + t];
             const uint64_t tmemHash = callTile.tmemHashOrID;
             if (!callTile.tileCopyUsed && (tmemHash > 0)) {
                 key.tmemHashes[t] = tmemHash;
