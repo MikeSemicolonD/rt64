@@ -95,7 +95,7 @@ namespace RT64 {
               const uint32_t targetAddr = state->rsp->fromSegmentedMasked((*dl)->w1);
               const uint8_t branch = (uint8_t)((*dl)->p0(16, 1));
               if (++n <= 20 || (n % 5000) == 0) {
-                  if(false) fprintf(stderr, "[trace] G_DL #%d -> 0x%08X branch=%u\n",
+                  fprintf(stderr, "[trace] G_DL #%d -> 0x%08X branch=%u\n",
                       n, targetAddr, (unsigned)branch);
                   fflush(stderr);
               }
@@ -111,7 +111,7 @@ namespace RT64 {
             if (rdramAddress == 0 || rdramAddress >= 0x00800000) {
                 static int n = 0;
                 if (++n <= 10) {
-                    if(false) fprintf(stderr, "[trace] G_DL skip-invalid #%d target=0x%08X (raw w1=0x%08X)\n",
+                    fprintf(stderr, "[trace] G_DL skip-invalid #%d target=0x%08X (raw w1=0x%08X)\n",
                         n, rdramAddress, (*dl)->w1);
                     fflush(stderr);
                 }
@@ -126,7 +126,7 @@ namespace RT64 {
         void endDl(State *state, DisplayList **dl) {
             { static int n = 0;
               if (++n <= 20 || (n % 5000) == 0) {
-                  if(false) fprintf(stderr, "[trace] G_ENDDL #%d\n", n);
+                  fprintf(stderr, "[trace] G_ENDDL #%d\n", n);
                   fflush(stderr);
               }
             }

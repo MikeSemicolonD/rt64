@@ -277,7 +277,7 @@ namespace RT64 {
         if (hleGBI == nullptr) {
             static int n = 0;
             if (++n <= 10 || (n % 200) == 0) {
-                if(false) fprintf(stderr, "[trace] processDisplayLists SKIP #%d (no hleGBI) dlStart=0x%08X\n",
+                fprintf(stderr, "[trace] processDisplayLists SKIP #%d (no hleGBI) dlStart=0x%08X\n",
                     n, dlStartAdddress);
                 fflush(stderr);
             }
@@ -287,7 +287,7 @@ namespace RT64 {
         {
             static int n = 0;
             ++n;
-            if(false) fprintf(stderr, "[trace] processDisplayLists ENTER #%d dlStart=0x%08X\n",
+            fprintf(stderr, "[trace] processDisplayLists ENTER #%d dlStart=0x%08X\n",
                 n, dlStartAdddress);
             fflush(stderr);
 
@@ -300,7 +300,7 @@ namespace RT64 {
             }
             if (!already && seen_n < 16) {
                 seen[seen_n++] = dlStartAdddress;
-                if(false) fprintf(stderr, "[trace] NEW DL @ 0x%08X first 30 cmds:\n", dlStartAdddress);
+                fprintf(stderr, "[trace] NEW DL @ 0x%08X first 30 cmds:\n", dlStartAdddress);
                 DisplayList *p = dlStart;
                 for (int i = 0; i < 30; i++) {
                     fprintf(stderr, "  %03d  op=0x%02X  w0=0x%08X  w1=0x%08X  addr=0x%08X\n",
@@ -342,7 +342,7 @@ namespace RT64 {
                 static int n = 0;
                 if (++n <= 5) {
                     uint32_t curAddr = dlStartAdddress + uint32_t((uintptr_t)dl - (uintptr_t)dlStart);
-                    if(false) fprintf(stderr, "[trace] DL safety-exit #%d (loopIters=%zu, dlStart=0x%08X, cur=0x%08X)\n",
+                    fprintf(stderr, "[trace] DL safety-exit #%d (loopIters=%zu, dlStart=0x%08X, cur=0x%08X)\n",
                         n, loopIters, dlStartAdddress, curAddr);
                     fflush(stderr);
                 }
@@ -359,7 +359,7 @@ namespace RT64 {
                 if (curOff >= 0x00800000) {
                     static int n = 0;
                     if (++n <= 10) {
-                        if(false) fprintf(stderr, "[trace] DL rdram-exit #%d (loopIters=%zu, dlStart=0x%08X, cur=0x%08X)\n",
+                        fprintf(stderr, "[trace] DL rdram-exit #%d (loopIters=%zu, dlStart=0x%08X, cur=0x%08X)\n",
                             n, loopIters, dlStartAdddress, curOff);
                         fflush(stderr);
                     }
@@ -428,7 +428,7 @@ namespace RT64 {
                 totalDumpThreshold *= 4;
             }
             if (loopIters == opFreqDumpThreshold) {
-                if(false) fprintf(stderr, "[trace] opFreq dump @ iter=%zu:", loopIters);
+                fprintf(stderr, "[trace] opFreq dump @ iter=%zu:", loopIters);
                 for (int i = 0; i < 256; i++) {
                     if (opFreq[i] > 0) {
                         fprintf(stderr, " 0x%02X=%llu", i, (unsigned long long)opFreq[i]);
@@ -443,7 +443,7 @@ namespace RT64 {
             // through the same chunk addresses, this will reveal the cycle.
             if ((loopIters % 100000) == 0) {
                 uint32_t curAddr = dlStartAdddress + uint32_t((uintptr_t)dl - (uintptr_t)dlStart);
-                if(false) fprintf(stderr, "[trace] dlAddr probe iter=%zu cur=0x%08X recent=",
+                fprintf(stderr, "[trace] dlAddr probe iter=%zu cur=0x%08X recent=",
                     loopIters, curAddr);
                 for (int back = 0; back < 8; back++) {
                     if (g_dlHistCount < (size_t)(back + 1)) break;
@@ -474,7 +474,7 @@ namespace RT64 {
                 if (hleGBI == nullptr) {
                     static int n = 0;
                     if (++n <= 5) {
-                        if(false) fprintf(stderr, "[trace] interpreter abort: hleGBI became null mid-task (n=%d, loopIters=%zu)\n",
+                        fprintf(stderr, "[trace] interpreter abort: hleGBI became null mid-task (n=%d, loopIters=%zu)\n",
                             n, loopIters);
                         fflush(stderr);
                     }
@@ -501,7 +501,7 @@ namespace RT64 {
                         // Bounds check: only dump if target is within reasonable RDRAM range
                         if (target >= 0x00000000 && target < 0x00800000) {
                             DisplayList *p = (DisplayList*)(state->RDRAM + target);
-                            if(false) fprintf(stderr, "[trace] NEW sub-DL @ 0x%08X (called from 0x%08X) first 35 cmds:\n",
+                            fprintf(stderr, "[trace] NEW sub-DL @ 0x%08X (called from 0x%08X) first 35 cmds:\n",
                                 target, dlStartAdddress + (uint32_t)((uintptr_t)dl - (uintptr_t)dlStart));
                             for (int i = 0; i < 35; i++) {
                                 uint32_t w0 = (p + i)->w0;
@@ -539,7 +539,7 @@ namespace RT64 {
                 if (wl.fbPairCount >= 64) {
                     static int n = 0;
                     if (++n <= 5 || (n % 50) == 0) {
-                        if(false) fprintf(stderr, "[trace] inter-cmd fullSync #%d (fbPairCount=%u, loopIters=%zu)\n",
+                        fprintf(stderr, "[trace] inter-cmd fullSync #%d (fbPairCount=%u, loopIters=%zu)\n",
                             n, (unsigned)wl.fbPairCount, loopIters);
                         fflush(stderr);
                     }
@@ -558,7 +558,7 @@ namespace RT64 {
             Workload &wl = state->ext.workloadQueue->workloads[workloadCursor];
             static int n = 0;
             if (++n <= 5 || (n % 50) == 0) {
-                if(false) fprintf(stderr, "[trace] DL-end #%d loopIters=%zu fbPairCount=%u\n",
+                fprintf(stderr, "[trace] DL-end #%d loopIters=%zu fbPairCount=%u\n",
                     n, loopIters, (unsigned)wl.fbPairCount);
                 fflush(stderr);
             }
