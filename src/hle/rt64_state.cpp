@@ -1448,9 +1448,24 @@ namespace RT64 {
                 pairCursor = framebufferPairCursor;
                 while (pairCursor < maxFramebufferPair) {
                     if (getFramebufferPairs(pairCursor)) {
-                        colorFb->copyNativeToRAM(&RDRAM[colorFb->addressStart], colorWriteWidth, colorRowStart, std::min(colorRowEnd, colorFb->height));
+                        // ROGUE-SQUADRON-RECOMP fix (load-bearing — see
+                        // memory/project_n64_logo_freeze_audio.md and
+                        // memory/project_slash_literal_corruption.md): gate
+                        // RDRAM writeback on addressStart >= 0x100000.
+                        // Factor 5 LLE ucode emits SET_COLOR_IMAGE with addrs
+                        // in the .text/.rodata region (~0x470, ~0x3CBxx) which
+                        // RT64 then dutifully scribbles framebuffer pixels
+                        // into, corrupting the game's static data and the "/"
+                        // string literal that find_manifest_entry depends on.
+                        // The proper long-term fix is in the LLE source so
+                        // RT64 sees the real fb address; until then this
+                        // 1MB gate is safe (real N64 framebuffers are always
+                        // at >=0x80100000) and unblocks Factor 5 boot.
+                        if (colorFb->addressStart >= 0x100000) {
+                            colorFb->copyNativeToRAM(&RDRAM[colorFb->addressStart], colorWriteWidth, colorRowStart, std::min(colorRowEnd, colorFb->height));
+                        }
 
-                        if (depthWriteWidth > 0) {
+                        if (depthWriteWidth > 0 && depthFb->addressStart >= 0x100000) {
                             depthFb->copyNativeToRAM(&RDRAM[depthFb->addressStart], depthWriteWidth, depthRowStart, std::min(depthRowEnd, depthFb->height));
                         }
                     }

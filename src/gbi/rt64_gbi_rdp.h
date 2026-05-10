@@ -31,6 +31,11 @@ namespace RT64 {
         void setKeyGB(State *state, DisplayList **dl);
         void texrect(State * state, DisplayList * *dl);
         void texrectFlip(State * state, DisplayList * *dl);
+        // LLE variants (16-byte TEXRECT). Already used internally for raw RDP
+        // dispatch; exposed so per-ucode GBI modules (e.g. Factor 5) can map
+        // 0xE4/0xE5 directly when the ucode emits LLE-format TEXRECTs.
+        void texrectLLE(State *state, DisplayList **dl);
+        void texrectFlipLLE(State *state, DisplayList **dl);
         void fillRect(State * state, DisplayList * *dl);
         void loadSync(State *state, DisplayList **dl);
         void pipeSync(State *state, DisplayList **dl);
