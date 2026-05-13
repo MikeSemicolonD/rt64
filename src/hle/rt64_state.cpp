@@ -1771,10 +1771,31 @@ namespace RT64 {
         
         // Submit a presentation event instantly if applicable.
         const bool presentEarly = !ext.presentQueue->viewRDRAM && (ext.enhancementConfig->presentation.mode == EnhancementConfiguration::Presentation::Mode::PresentEarly);
+
+        // Scoped diagnostic (ROGUESQ_LOG_PRESENT_EARLY=1). One-shot env read; throttled to first 4 entries + every 64th.
+        // Tells us why pq.wc stays at 0: which workload colorImg fields fail to match any viHistory entry.
+        static const bool s_rs64_log_pe = [](){
+            const char *v = std::getenv("ROGUESQ_LOG_PRESENT_EARLY");
+            return v && v[0] && v[0] != '0';
+        }();
+        if (s_rs64_log_pe) {
+            static int s_rs64_pe_count = 0;
+            int n = ++s_rs64_pe_count;
+            if (n <= 4 || (n & 63) == 0) {
+                std::fprintf(stderr,
+                    "[present-early #%d] enabled=%d fbPairCount=%u viewRDRAM=%d viHistory.size=%zu\n",
+                    n, presentEarly ? 1 : 0,
+                    workload.fbPairCount,
+                    ext.presentQueue->viewRDRAM ? 1 : 0,
+                    viHistory.history.size());
+                std::fflush(stderr);
+            }
+        }
+
         if (presentEarly && (workload.fbPairCount > 0)) {
             thread_local std::unordered_set<uint32_t> colorImageAddressSet;
             colorImageAddressSet.clear();
-            
+
             bool viPresented = false;
             for (int32_t f = workload.fbPairCount - 1; (f >= 0) && !viPresented; f--) {
                 const FramebufferPair &fbPair = workload.fbPairs[f];
@@ -1786,7 +1807,18 @@ namespace RT64 {
                     colorImageAddressSet.insert(colorImg.address);
                 }
 
-                if (!fbPair.earlyPresentCandidate()) {
+                const bool isCandidate = fbPair.earlyPresentCandidate();
+                if (s_rs64_log_pe) {
+                    static int s_rs64_fbp_count = 0;
+                    int m = ++s_rs64_fbp_count;
+                    if (m <= 8 || (m & 127) == 0) {
+                        std::fprintf(stderr,
+                            "  [pe fbPair #%d] f=%d addr=0x%08X width=%u siz=%u candidate=%d\n",
+                            m, f, colorImg.address, colorImg.width, (unsigned)colorImg.siz, isCandidate ? 1 : 0);
+                    }
+                }
+
+                if (!isCandidate) {
                     continue;
                 }
 
@@ -1799,9 +1831,28 @@ namespace RT64 {
                         (colorImg.width == fbSize.x) &&
                         (colorImg.siz == fbSiz))
                     {
+                        if (s_rs64_log_pe) {
+                            std::fprintf(stderr,
+                                "  [pe MATCH] fbPair.addr=0x%08X w=%u siz=%u <- viHist[%zu]\n",
+                                colorImg.address, colorImg.width, (unsigned)colorImg.siz, h);
+                            std::fflush(stderr);
+                        }
                         updateScreen(entry.vi, true);
                         viPresented = true;
                     }
+                    else if (s_rs64_log_pe) {
+                        static int s_rs64_miss_count = 0;
+                        int k = ++s_rs64_miss_count;
+                        if (k <= 16 || (k & 255) == 0) {
+                            std::fprintf(stderr,
+                                "  [pe miss #%d] fbPair{a=0x%08X w=%u s=%u} != viHist[%zu]{a=0x%08X w=%u s=%u}\n",
+                                k, colorImg.address, colorImg.width, (unsigned)colorImg.siz,
+                                h, fbAddress, (unsigned)fbSize.x, (unsigned)fbSiz);
+                        }
+                    }
+                }
+                if (s_rs64_log_pe && !viPresented) {
+                    std::fflush(stderr);
                 }
             }
         }
@@ -1864,8 +1915,41 @@ namespace RT64 {
             viDifferent = (newVI != lastScreenVI);
             lastScreenVI = newVI;
 
+            // Diagnostic (ROGUESQ_LOG_PRESENT_EARLY=1) — track why viHistory stays empty.
+            // We reuse the same env flag the present-early matcher uses.
+            static const bool s_us_log_pe = [](){
+                const char *v = std::getenv("ROGUESQ_LOG_PRESENT_EARLY");
+                return v && v[0] && v[0] != '0';
+            }();
+            if (s_us_log_pe) {
+                static int s_us_count = 0;
+                int n = ++s_us_count;
+                if (n <= 8 || (n & 127) == 0) {
+                    std::fprintf(stderr,
+                        "  [pe updateScreen #%d] viDifferent=%d viVisible=%d addr=0x%08X siz=%u status.type=%u hStart=%u (fromEarly=%d)\n",
+                        n, viDifferent ? 1 : 0, viVisible ? 1 : 0,
+                        screenFbAddress, (unsigned)screenFbSiz,
+                        (unsigned)newVI.status.type, (unsigned)newVI.hRegion.hStart,
+                        fromEarlyPresent ? 1 : 0);
+                    std::fflush(stderr);
+                }
+            }
+
+            // RS64 fix: the game calls osViBlack(1) twice during boot and never osViBlack(0).
+            // ultramodern's VI_STATE_BLACK stays set forever → hStart forced to 0 →
+            // VI::visible() returns false (hRegion.hStart > 0 fails) → viHistory never populated →
+            // PresentEarly matcher never finds a match → black screen.
+            // Override: ROGUESQ_PRESENT_EARLY_FORCE=1 ignores viVisible for the history-push gate.
+            // We still require a real fb address so we don't pollute history with zeros.
+            static const bool s_us_force = [](){
+                const char *v = std::getenv("ROGUESQ_PRESENT_EARLY_FORCE");
+                return v && v[0] && v[0] != '0';
+            }();
+            const bool pushGate = (viDifferent && viVisible) ||
+                                  (s_us_force && viDifferent && screenFbAddress != 0 && screenFbSiz != 0);
+
             // Push to VI history if it's different.
-            if (viDifferent && viVisible) {
+            if (pushGate) {
                 viChangedProfiler.logAndRestart();
                 viHistory.pushVI(newVI, screenFbSize.x);
                 viHistory.pushFactor(lastScreenFactorCounter + 1);
@@ -1884,8 +1968,16 @@ namespace RT64 {
         screenCpuProfiler.start();
         bool fbChangesMade = false;
         bool screenChangesMade = false;
-        if (newVI.visible()) {
-            // See if there's an existing framebuffer that lines up with the VI. If there is, we support reading 
+        // RS64 fix (part 2): same osViBlack-stuck-on issue blocks the fb upload too.
+        // Permit upload when force flag is set and the VI carries a real fb address.
+        static const bool s_us_force_render = [](){
+            const char *v = std::getenv("ROGUESQ_PRESENT_EARLY_FORCE");
+            return v && v[0] && v[0] != '0';
+        }();
+        const bool renderGate = newVI.visible() ||
+                                (s_us_force_render && screenFbAddress != 0 && screenFbSiz != 0);
+        if (renderGate) {
+            // See if there's an existing framebuffer that lines up with the VI. If there is, we support reading
             // CPU changes directly to it and recreating them in the render thread at low resolution.
             RenderWorker *worker = ext.framebufferGraphicsWorker;
             Framebuffer *screenFb = framebufferManager.find(screenFbAddress);
@@ -1934,8 +2026,38 @@ namespace RT64 {
             }
         }
         
+        // RS64 fix (part 4): osViBlack-stuck-on keeps the menu's hash from changing because the
+        // game CPU writes the menu fb in-place at 0x00790400 but width/siz are stable → viDifferent=0,
+        // RT64 has no Framebuffer for that addr → fbChangesMade=0. With force flag set and renderGate
+        // open, present.storage now has the RAM content; advance the present so the consumer pushes
+        // it to the swapchain.
+        static const bool s_us_force_advance = [](){
+            const char *v = std::getenv("ROGUESQ_PRESENT_EARLY_FORCE");
+            return v && v[0] && v[0] != '0';
+        }();
+        const bool forceAdvance = s_us_force_advance && renderGate && !fromEarlyPresent
+                                  && screenFbAddress != 0 && screenFbSiz >= G_IM_SIZ_16b;
+
+        // Diagnostic for the force-advance path so we can confirm it's firing.
+        if (forceAdvance && !(viDifferent || fbChangesMade || screenChangesMade)) {
+            static const bool s_log = [](){
+                const char *v = std::getenv("ROGUESQ_LOG_PRESENT_EARLY");
+                return v && v[0] && v[0] != '0';
+            }();
+            if (s_log) {
+                static int s_n = 0;
+                int n = ++s_n;
+                if (n <= 8 || (n & 127) == 0) {
+                    std::fprintf(stderr,
+                        "  [pe forceAdvance #%d] addr=0x%08X w=%u siz=%u (vi/fb/screen=000)\n",
+                        n, screenFbAddress, (unsigned)screenFbSize.x, (unsigned)screenFbSiz);
+                    std::fflush(stderr);
+                }
+            }
+        }
+
         // We only push a new present event to the timeline when it's necessary.
-        if (fromEarlyPresent || viDifferent || fbChangesMade || screenChangesMade) {
+        if (fromEarlyPresent || viDifferent || fbChangesMade || screenChangesMade || forceAdvance) {
             // Push a new renderer event to the timeline for presenting this VI.
             present.screenVI = newVI;
             advancePresent(present, false);

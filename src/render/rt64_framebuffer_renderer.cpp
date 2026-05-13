@@ -4,6 +4,11 @@
 
 #include "rt64_framebuffer_renderer.h"
 
+#include <atomic>
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
+
 #include "../include/rt64_extended_gbi.h"
 
 #include "common/rt64_elapsed_timer.h"
@@ -512,13 +517,97 @@ namespace RT64 {
             switchToGraphicsPipeline();
         }
         
+        // ROGUESQ_LOG_PIPELINE (stage 2.5) — count rasterScene submissions
+        // and total instances reaching this for-loop. If instance count is
+        // way lower than [pipe-stage 2-pushDrawCall] (added on the queue
+        // side), drawCalls are being pushed to rasterScenes that never get
+        // submitRasterScene'd.
+        {
+            static const bool log_pipe = []{
+                const char *e = std::getenv("ROGUESQ_LOG_PIPELINE");
+                return e && *e && *e != '0';
+            }();
+            if (log_pipe) {
+                static std::atomic<int> n_call{0};
+                static std::atomic<uint64_t> n_inst{0};
+                int n = ++n_call;
+                n_inst.fetch_add(rasterScene.instanceIndices.size(),
+                                 std::memory_order_relaxed);
+                if (n <= 5 || (n % 200) == 0) {
+                    std::fprintf(stderr,
+                        "[pipe-stage 2.5-rasterIter] submits=%d total-instances=%llu (this submit=%zu)\n",
+                        n, (unsigned long long)n_inst.load(),
+                        rasterScene.instanceIndices.size());
+                    std::fflush(stderr);
+                }
+            }
+        }
+
         for (uint32_t i : rasterScene.instanceIndices) {
             const InstanceDrawCall &drawCall = instanceDrawCallVector[i];
+
+            // ROGUESQ_LOG_PIPELINE (stage 2.6) — per-instance classification,
+            // per-frame counted. Reset on g_pipe_frame_idx advance.
+            {
+                static const bool log_pipe = []{
+                    const char *e = std::getenv("ROGUESQ_LOG_PIPELINE");
+                    return e && *e && *e != '0';
+                }();
+                if (log_pipe && drawCall.type != InstanceDrawCall::Type::FillRect) {
+                    extern std::atomic<uint64_t> g_pipe_frame_idx;
+                    static std::atomic<uint64_t> last_frame{(uint64_t)-1};
+                    static std::atomic<int> n_in_frame{0};
+                    static std::atomic<int> n_total{0};
+                    uint64_t cur = g_pipe_frame_idx.load(std::memory_order_relaxed);
+                    uint64_t prev = last_frame.exchange(cur, std::memory_order_relaxed);
+                    if (prev != cur) {
+                        int finalCount = n_in_frame.exchange(0, std::memory_order_relaxed);
+                        if (finalCount > 0) {
+                            std::fprintf(stderr,
+                                "[pipe-stage 2.6-iter] frame=%llu FINAL=%d\n",
+                                (unsigned long long)prev, finalCount);
+                            std::fflush(stderr);
+                        }
+                    }
+                    int nf = ++n_in_frame;
+                    int nt = ++n_total;
+                    if (nf == 1 || (nf % 50) == 0 || nt <= 5) {
+                        const uint32_t lo = (uint32_t)(drawCall.triangles.shaderDesc.colorCombiner.L);
+                        std::fprintf(stderr,
+                            "[pipe-stage 2.6-iter] frame=%llu nf=%d total=%d type=%d L=0x%08X\n",
+                            (unsigned long long)cur, nf, nt, (int)drawCall.type, lo);
+                        std::fflush(stderr);
+                    }
+                }
+            }
+
             switch (drawCall.type) {
-            case InstanceDrawCall::Type::IndexedTriangles: 
+            case InstanceDrawCall::Type::IndexedTriangles:
             case InstanceDrawCall::Type::RawTriangles:
             case InstanceDrawCall::Type::RegularRect: {
-                assert(fbStorage->colorTarget != nullptr);
+                // ROGUESQ: skip draws with null colorTarget instead of
+                // asserting. Some workloads route instances through a
+                // rasterScene whose fbStorage has no allocated colorTarget
+                // (the original assert killed the game on these).
+                if (fbStorage->colorTarget == nullptr) {
+                    static const bool log_pipe = []{
+                        const char *e = std::getenv("ROGUESQ_LOG_PIPELINE");
+                        return e && *e && *e != '0';
+                    }();
+                    if (log_pipe) {
+                        static std::atomic<int> n_skip{0};
+                        int n = ++n_skip;
+                        if (n <= 5 || (n % 200) == 0) {
+                            std::fprintf(stderr,
+                                "[skip-null-rt] type=%d L=0x%08X (skipped #%d)\n",
+                                (int)drawCall.type,
+                                (unsigned)(drawCall.triangles.shaderDesc.colorCombiner.L),
+                                n);
+                            std::fflush(stderr);
+                        }
+                    }
+                    break;
+                }
 
                 const bool typeDifferent = (drawCall.type != previousCallType);
                 const bool testZDifferent = (drawCall.type == InstanceDrawCall::Type::IndexedTriangles) && (drawCall.triangles.vertexTestZ != previousVertexTestZ);
@@ -547,6 +636,24 @@ namespace RT64 {
 
                 // Draw calls can sometimes end up with empty scissors and cause validation errors. We just skip them.
                 if (triangles.scissor.isEmpty()) {
+                    // ROGUESQ_LOG_PIPELINE (stage 3) — empty-scissor drops.
+                    // If this is where most attribution-period draws die,
+                    // the cull is in scissor computation upstream.
+                    static const bool log_pipe = []{
+                        const char *e = std::getenv("ROGUESQ_LOG_PIPELINE");
+                        return e && *e && *e != '0';
+                    }();
+                    if (log_pipe) {
+                        static std::atomic<int> n_skip{0};
+                        int n = ++n_skip;
+                        if (n <= 5 || (n % 500) == 0) {
+                            const uint32_t lo = (uint32_t)(drawCall.triangles.shaderDesc.colorCombiner.L);
+                            std::fprintf(stderr,
+                                "[pipe-stage 3-scissorSkip] skipped=%d L=0x%08X type=%d\n",
+                                n, lo, (int)drawCall.type);
+                            std::fflush(stderr);
+                        }
+                    }
                     continue;
                 }
 
@@ -600,6 +707,34 @@ namespace RT64 {
                 const auto &clearRect = drawCall.clearRect;
                 RenderTarget *chosenTarget = (fbStorage->colorTarget != nullptr) ? fbStorage->colorTarget : fbStorage->depthTarget;
                 bool rectCoversWholeTarget = (clearRect.rect.left == 0) && (clearRect.rect.top == 0) && (uint32_t(clearRect.rect.right) == chosenTarget->width) && (uint32_t(clearRect.rect.bottom) == chosenTarget->height);
+
+                // ROGUESQ_NO_FULLSCREEN_FILLRECT — ported from reverted commit
+                // b656c1a (2026-05-13). Rogue Squadron's attribution/fade
+                // transitions render text content then emit a full-screen
+                // FillRect to clear/fade — but our recompile may execute the
+                // FillRect at full opacity every frame, erasing the text the
+                // user is supposed to see during fade-in. Mode 1 ("all" or
+                // "1") skips EVERY full-screen FillRect; useful for diagnosing
+                // whether content is being overwritten by spurious clears.
+                static const int s_skip_fullscreen_fill = []() {
+                    const char* e = std::getenv("ROGUESQ_NO_FULLSCREEN_FILLRECT");
+                    if (!e || !*e || e[0] == '0') return 0;
+                    if (!strcmp(e, "all") || !strcmp(e, "1")) return 1;
+                    return 1; // anything else truthy = mode 1
+                }();
+                if (s_skip_fullscreen_fill && rectCoversWholeTarget) {
+                    static std::atomic<uint64_t> s_skipped{0};
+                    uint64_t n = ++s_skipped;
+                    if (n <= 4 || (n % 1000) == 0) {
+                        const uint32_t rtAddr = fbStorage->framebufferKey.colorTargetKey.address;
+                        std::fprintf(stderr,
+                            "[fill-rect] SKIP #%llu rt=0x%08X (mode=1 all-fullscreen)\n",
+                            (unsigned long long)n, rtAddr);
+                        std::fflush(stderr);
+                    }
+                    break;
+                }
+
                 const RenderRect *clearRects = rectCoversWholeTarget ? nullptr : &clearRect.rect;
                 uint32_t clearRectCount = rectCoversWholeTarget ? 0 : 1;
                 if (fbStorage->colorTarget != nullptr) {

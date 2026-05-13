@@ -4,7 +4,10 @@
 
 #include "rt64_rdp.h"
 
+#include <atomic>
 #include <cassert>
+#include <cstdio>
+#include <cstdlib>
 
 #include "../include/rt64_extended_gbi.h"
 
@@ -1315,6 +1318,43 @@ namespace RT64 {
 #   ifdef LOG_TEXRECT_METHODS
         RT64_LOG_PRINTF("RDP::drawTexRect(ulx %d, uly %d, lrx %d, lry %d, tile %u, uls %d, ult %d, dsdx %d, dtdy %d, flip %u)", ulx, uly, lrx, lry, tile, uls, ult, dsdx, dtdy, flip);
 #   endif
+
+        // ROGUESQ_LOG_PIPELINE (stage 1) — count drawTexRect input. Combined
+        // with the GPU-side stage 2.5 counter, this shows how many texrects
+        // enter the pipeline vs how many reach the for-loop.
+        // Per-frame counters: reset to 0 each time g_pipe_frame_idx advances.
+        // Log emits at first occurrence per frame + every Nth thereafter.
+        {
+            static const bool log_pipe = []{
+                const char *e = std::getenv("ROGUESQ_LOG_PIPELINE");
+                return e && *e && *e != '0';
+            }();
+            if (log_pipe) {
+                extern std::atomic<uint64_t> g_pipe_frame_idx;
+                static std::atomic<uint64_t> last_frame{(uint64_t)-1};
+                static std::atomic<int> n_in_frame{0};
+                static std::atomic<int> n_total{0};
+                uint64_t cur = g_pipe_frame_idx.load(std::memory_order_relaxed);
+                uint64_t prev = last_frame.exchange(cur, std::memory_order_relaxed);
+                if (prev != cur) {
+                    int finalCount = n_in_frame.exchange(0, std::memory_order_relaxed);
+                    if (finalCount > 0) {
+                        std::fprintf(stderr,
+                            "[pipe-stage 1-drawTexRect] frame=%llu FINAL=%d\n",
+                            (unsigned long long)prev, finalCount);
+                        std::fflush(stderr);
+                    }
+                }
+                int nf = ++n_in_frame;
+                int nt = ++n_total;
+                if (nf == 1 || (nf % 50) == 0 || nt <= 5) {
+                    std::fprintf(stderr,
+                        "[pipe-stage 1-drawTexRect] frame=%llu nf=%d total=%d (rt=0x%08X ulx=%d uly=%d lrx=%d lry=%d)\n",
+                        (unsigned long long)cur, nf, nt, (unsigned)colorImage.address, ulx, uly, lrx, lry);
+                    std::fflush(stderr);
+                }
+            }
+        }
 
         // Check if the texture needs to be updated.
         DrawCall &drawCall = state->drawCall;
