@@ -401,7 +401,7 @@ namespace RT64 {
 
     template<bool RGBA32 = false, bool BLOCK = false, bool TLUT = false>
     __forceinline void loadToTMEMCommon(uint8_t *TMEM, const uint8_t *RDRAM, uint32_t textureStart, uint32_t textureStride, uint32_t tmemStart,
-        uint32_t tmemStride, uint32_t wordsPerRow, uint32_t rowCount, uint32_t dxtIncrement = 0)
+        uint32_t tmemStride, uint32_t wordsPerRow, uint32_t rowCount, uint32_t dxtIncrement, uint32_t *wordTags, uint32_t tag)
     {
         assert((!BLOCK || (rowCount == 1)) && "Load block must behave as if it only loads one row of data.");
         
@@ -465,6 +465,11 @@ namespace RT64 {
             wordCount = wordsPerRow;
             while (wordCount > 0) {
                 loadWord<RGBA32, TLUT>(TMEM, tmemAddress, tmemXorMask, RDRAM, textureAddress);
+                wordTags[((tmemAddress ^ tmemXorMask) & RDP_TMEM_MASK8) >> 3] = tag;
+                if constexpr (RGBA32) {
+                    wordTags[(((tmemAddress ^ tmemXorMask) | (RDP_TMEM_BYTES >> 1)) & RDP_TMEM_MASK8) >> 3] = tag;
+                }
+
                 loadWordStep();
                 wordCount--;
             }
@@ -505,10 +510,10 @@ namespace RT64 {
             uint8_t *TMEM8 = reinterpret_cast<uint8_t *>(TMEM);
             const uint8_t *RDRAM = state->RDRAM;
             if (RGBA32) {
-                loadToTMEMCommon<true>(TMEM8, RDRAM, textureStart, bytesPerRow, tmemStart, tmemStride, wordsPerRow, rowCount);
+                loadToTMEMCommon<true>(TMEM8, RDRAM, textureStart, bytesPerRow, tmemStart, tmemStride, wordsPerRow, rowCount, 0, tmemWordTags, ++tmemLoadTag);
             }
             else {
-                loadToTMEMCommon<false>(TMEM8, RDRAM, textureStart, bytesPerRow, tmemStart, tmemStride, wordsPerRow, rowCount);
+                loadToTMEMCommon<false>(TMEM8, RDRAM, textureStart, bytesPerRow, tmemStart, tmemStride, wordsPerRow, rowCount, 0, tmemWordTags, ++tmemLoadTag);
             }
         }
     }
@@ -541,10 +546,10 @@ namespace RT64 {
             uint8_t *TMEM8 = reinterpret_cast<uint8_t *>(TMEM);
             const uint8_t *RDRAM = state->RDRAM;
             if (RGBA32) {
-                loadToTMEMCommon<true, true>(TMEM8, RDRAM, textureStart, bytesPerRow, tmemStart, tmemStride, wordCount, 1, loadTile.lrt);
+                loadToTMEMCommon<true, true>(TMEM8, RDRAM, textureStart, bytesPerRow, tmemStart, tmemStride, wordCount, 1, loadTile.lrt, tmemWordTags, ++tmemLoadTag);
             }
             else {
-                loadToTMEMCommon<false, true>(TMEM8, RDRAM, textureStart, bytesPerRow, tmemStart, tmemStride, wordCount, 1, loadTile.lrt);
+                loadToTMEMCommon<false, true>(TMEM8, RDRAM, textureStart, bytesPerRow, tmemStart, tmemStride, wordCount, 1, loadTile.lrt, tmemWordTags, ++tmemLoadTag);
             }
         }
     }
@@ -581,10 +586,10 @@ namespace RT64 {
             uint8_t *TMEM8 = reinterpret_cast<uint8_t *>(TMEM);
             const uint8_t *RDRAM = state->RDRAM;
             if (RGBA32) {
-                loadToTMEMCommon<true, false, true>(TMEM8, RDRAM, textureStart, bytesPerRow, tmemStart, tmemStride, wordsPerRow, rowCount);
+                loadToTMEMCommon<true, false, true>(TMEM8, RDRAM, textureStart, bytesPerRow, tmemStart, tmemStride, wordsPerRow, rowCount, 0, tmemWordTags, ++tmemLoadTag);
             }
             else {
-                loadToTMEMCommon<false, false, true>(TMEM8, RDRAM, textureStart, bytesPerRow, tmemStart, tmemStride, wordsPerRow, rowCount);
+                loadToTMEMCommon<false, false, true>(TMEM8, RDRAM, textureStart, bytesPerRow, tmemStart, tmemStride, wordsPerRow, rowCount, 0, tmemWordTags, ++tmemLoadTag);
             }
         }
     }

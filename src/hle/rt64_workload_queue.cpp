@@ -1031,13 +1031,6 @@ namespace RT64 {
 
                     assert((logicalTicks > displayTicks) && "Logical ticks must always remain bigger than the display ticks.");
                     assert(((logicalTicks - displayTicks) <= (frameSpan + tickStep)) && "The gap between logical ticks and display ticks can't be bigger than the target rate.");
-                    {
-                        static const bool s_lt = [](){ const char *e = std::getenv("ROGUESQ_LOG_INTERP_TICKS"); return e && e[0] && e[0] != '0'; }();
-                        static uint32_t s_n = 0;
-                        if (s_lt && (workload.viFrameTicks != 2 || (++s_n % 300) == 0)) {
-                            fprintf(stderr, "[interp-ticks] vi=%u rate=%u step=%lld span=%lld frames=%u\n", workload.viFrameTicks, workload.viOriginalRate, (long long)tickStep, (long long)frameSpan, displayFrames);
-                        }
-                    }
                     assert((displayFrames > 0) && "At least one display frame must be generated.");
                 }
                 else if (workload.viOriginalRate > 0) {
@@ -1045,7 +1038,7 @@ namespace RT64 {
                 }
 
                 ext.sharedResources->viOriginalRate = workload.viOriginalRate;
-                
+
                 // Get the current and previous set of frame counters. The other set can be in use by the present queue. Skip if no new present event has arrived before this workload event.
                 InterpolatedFrameCounters &prevFrameCounters = ext.sharedResources->interpolatedFrames[ext.sharedResources->interpolatedFramesIndex];
                 const bool useDifferentCounters = (lastPresentId != workload.presentId);

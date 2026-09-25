@@ -237,13 +237,12 @@ namespace RT64 {
         {
             static int s_skyFix = -1;
             if (s_skyFix < 0) { const char *e = std::getenv("ROGUESQ_F5_SKY_NO_ZWRITE"); s_skyFix = (e && e[0] == '0') ? 0 : 1; }
-            // Only the game's own sky pin qualifies: it draws the dome with zSource=PRIM, Z_UPD and
-            // primDepth 0x7FBF itself. Attribution/menu geometry is also cull=BOTH but carries no depth
-            // (zSource=PIXEL, no Z_UPD/Z_CMP) and is left alone. ROGUESQ_F5_SKY_PIN_ALL=1 pins every
-            // cull=BOTH draw as before.
+            // Matches the game's sky state (zSource=PRIM, Z_UPD, no Z_CMP, primDepth near max) on every sky draw, including the single-sided horizon part; ROGUESQ_F5_SKY_PIN_ALL=1 = old cull=BOTH rule.
             static const bool s_pinAll = [](){ const char *e = std::getenv("ROGUESQ_F5_SKY_PIN_ALL"); return e && e[0] == '1'; }();
-            const bool gameSkyPin = s_pinAll || (rdp->otherMode.L & G_ZS_PRIM) != 0;
-            if (s_skyFix && gameSkyPin && rsp->cullBothMask != 0 && (drawCall.geometryMode & rsp->cullBothMask) == rsp->cullBothMask) {
+            const uint32_t skyL = rdp->otherMode.L;
+            const bool gameSkyPin = (skyL & G_ZS_PRIM) && (skyL & Z_UPD) && !(skyL & Z_CMP) && rdp->primDepthStack[rdp->primDepthStackSize - 1].x >= 0.99f;
+            const bool cullBoth = rsp->cullBothMask != 0 && (drawCall.geometryMode & rsp->cullBothMask) == rsp->cullBothMask;
+            if (s_skyFix && (s_pinAll ? cullBoth : gameSkyPin)) {
                 drawCall.otherMode.L |= (uint32_t)(G_ZS_PRIM | Z_UPD);
                 drawCall.rdpParams.primDepth = { 0.99999f, 0.0f };   // just under the 1.0 clear; remap T (0.995) stays well below
             }
@@ -2089,21 +2088,6 @@ namespace RT64 {
                 viChangedProfiler.logAndRestart();
                 viHistory.pushVI(newVI, screenFbSize.x);
                 viHistory.pushFactor(lastScreenFactorCounter + 1);
-                {
-                    static const bool s_lf = [](){ const char *e = std::getenv("ROGUESQ_LOG_VI_FACTORS"); return e && e[0] && e[0] != '0'; }();
-                    static uint32_t s_hist[6] = {}, s_n = 0;
-                    static char s_seq[128]; static uint32_t s_seqLen = 0;
-                    if (s_lf) {
-                        const uint32_t f = lastScreenFactorCounter + 1;
-                        s_hist[f < 5 ? f : 5]++;
-                        if (s_seqLen + 1 < sizeof(s_seq)) s_seq[s_seqLen++] = char(f < 10 ? '0' + f : '+');
-                        if (++s_n % 120 == 0) {
-                            s_seq[s_seqLen] = 0;
-                            fprintf(stderr, "[vifactor] n=%u 1:%u 2:%u 3:%u 4:%u 5+:%u rate=%u seq=%s\n", s_n, s_hist[1], s_hist[2], s_hist[3], s_hist[4], s_hist[5], viHistory.logicalRateFromFactors(), s_seq);
-                            s_seqLen = 0;
-                        }
-                    }
-                }
                 lastScreenFactorCounter = 0;
             }
             else if (viVisible) {

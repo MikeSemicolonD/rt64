@@ -1803,8 +1803,7 @@ namespace RT64 {
                 FixedRect intersectionRect = proj.scissorRect.intersection(viewport.rect(viewportClipRatios));
                 bool coversWholeWidth = !intersectionRect.isEmpty() && coversFbWidth(intersectionRect.ulx, intersectionRect.lrx);
                 bool horizontalRatio = !intersectionRect.isEmpty() && (intersectionRect.width(true, true) > intersectionRect.height(true, true));
-                bool useWideViewport = (viewportOrigin == G_EX_ORIGIN_NONE) && coversWholeWidth && horizontalRatio;
-                if (useWideViewport) {
+                bool useWideViewport = (viewportOrigin == G_EX_ORIGIN_NONE) && coversWholeWidth && horizontalRatio;                if (useWideViewport) {
                     projInvRatioScale = 1.0f;
                 }
                 else {
@@ -1976,7 +1975,6 @@ namespace RT64 {
                             else {
                                 horizontalMisalignment = p.horizontalMisalignment;
                             }
-
                             RenderViewport viewportRect = convertViewportRect(call.callDesc.rect, p.resolutionScale, p.fbWidth, invRatioScale, extOriginPercentage, horizontalMisalignment, call.callDesc.rectLeftOrigin, call.callDesc.rectRightOrigin);
                             triangles.screenScale = { viewportRect.width / framebuffer.viewport.width, viewportRect.height / framebuffer.viewport.height };
                             triangles.screenOffset.x = halfPixelOffset.x + ((viewportRect.x + viewportRect.width / 2.0f) - halfViewportSize.x) / halfViewportSize.x;

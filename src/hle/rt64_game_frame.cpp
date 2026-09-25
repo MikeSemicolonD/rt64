@@ -25,6 +25,11 @@ namespace RT64 {
         static const float v = [](){ const char *e = std::getenv("ROGUESQ_INTERP_MAX_SCREEN"); float f = (e && e[0]) ? (float)atof(e) : 0.35f; return f > 0.0f ? f : 0.35f; }();
         return v;
     }
+    // Auto-matched (id-less) transforms further apart than this on screen (NDC) are not paired: a newly spawned particle would otherwise smear from a leftover one. ROGUESQ_INTERP_AUTO_MAX_SCREEN=0 disables.
+    static bool f5AutoMatchTooFar(float screenSpaceDifference) {
+        static const float v = [](){ const char *e = std::getenv("ROGUESQ_INTERP_AUTO_MAX_SCREEN"); return (e && e[0]) ? (float)atof(e) : 0.2f; }();
+        return (v > 0.0f) && (screenSpaceDifference > v);
+    }
     static float f5InterpMaxPosFrac() {
         static const float v = [](){ const char *e = std::getenv("ROGUESQ_INTERP_MAX_POS"); float f = (e && e[0]) ? (float)atof(e) : 0.25f; return f > 0.0f ? f : 0.25f; }();
         return v;
@@ -656,7 +661,7 @@ namespace RT64 {
             prevRigidBody = (firstPrevWorkloadMap != nullptr) ? &firstPrevWorkloadMap->transforms[indices.second].rigidBody : nullptr;
 
             TransformMatchResult matchResult = computeTransformMatch(curTransform, firstCurViewProj, prevTransform, firstPrevViewProj, prevRigidBody);
-            if (matchResult.valid) {
+            if (matchResult.valid && !f5AutoMatchTooFar(matchResult.screenSpaceDifference)) {
                 // With triangleCount out of the key the candidate set widens; reject pairs that are
                 // too far apart so a wrong match pops (correct) instead of warping (a smear the user
                 // hated). Position gate is relative to the object's camera-space distance (F5 world
@@ -1044,7 +1049,7 @@ namespace RT64 {
                                 const auto prevMatrix = prevDrawData.worldTransforms[prevTransform];
                                 if (isCallCompatible(curProj.drawCalls[curIt->second], drawData, prevProj.drawCalls[prevIt->second], prevDrawData)) {
                                     const TransformMatchResult matchResult = computeTransformMatch(curMatrix, curViewProj, prevMatrix, prevViewProj, prevFrame.transformMap.transforms[prevTransform].rigidBody);
-                                    if (matchResult.valid) {
+                                    if (matchResult.valid && !f5AutoMatchTooFar(matchResult.screenSpaceDifference)) {
                                         matchCandidates.push_back({ curTransform, prevTransform, matchResult.computeDifference() });
                                     }
                                 }

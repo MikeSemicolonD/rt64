@@ -104,7 +104,7 @@ namespace RT64 {
         // map is rebuilt every frame (a buffer's map clears when its slot 0 is written), so it can't
         // accumulate the stale mappings that made the earlier persistent pointer map warp.
         static bool f5_node_id_enabled() {
-            static bool s = env_on("ROGUESQ_F5_NODE_ID", false);
+            static bool s = env_on("ROGUESQ_F5_NODE_ID", true);
             return s;
         }
         // ROGUESQ_F5_VTX_INTERP=1: also interpolate per-vertex positions/texcoords for id-matched
@@ -119,6 +119,232 @@ namespace RT64 {
         static bool f5_terrain_id_enabled() {
             static bool s = env_on("ROGUESQ_F5_TERRAIN_ID", false);
             return s;
+        }
+        // The terrain root re-centers in whole grid cells (node+0x40/+0x48, integral) while its tiles shift the opposite way.
+        // ROGUESQ_F5_REGRID_COMP folds the accumulated shift L into every vertex under the root (+L) and its transform (-L) so the transform stays continuous; without it (or before k is learned, or on rebase) the id changes instead.
+        struct F5Regrid {
+            float x = 0, z = 0, dx = 0, dz = 0, k = 0;
+            uint32_t gen = 0;
+            int32_t lx = 0, lz = 0;
+            bool pendingK = false, moved = false, haveT = false;
+            float prevT[3] = {}, prevD[3] = {};
+            uint64_t lastTask = 0;
+        };
+        static std::unordered_map<uint32_t, F5Regrid> s_regrid;
+        static uint32_t s_regrid_cur = 0;
+        // Inverse of this frame's (compensated) terrain-root transform: maps camera space to a world-stable frame for matching particles.
+        static hlslpp::float4x4 s_world_from_view;
+        static uint64_t s_world_task = ~0ull;
+        static int32_t s_mv_off_x = 0, s_mv_off_z = 0;
+        static bool f5_regrid_comp_enabled() {
+            static const bool s = env_on("ROGUESQ_F5_REGRID_COMP", true);
+            return s;
+        }
+        static uint32_t f5_node_regrid_generation(const uint8_t* ram, uint32_t node) {
+            static const bool s_on = env_on("ROGUESQ_F5_REGRID_SNAP", true);
+            s_regrid_cur = 0;
+            if (!s_on) return 0;
+            union { uint32_t u; float f; } a, b;
+            a.u = rd_be_u32(ram, node + 0x40u);
+            b.u = rd_be_u32(ram, node + 0x48u);
+            if ((a.f != std::floor(a.f)) || (b.f != std::floor(b.f)) || !std::isfinite(a.f) || !std::isfinite(b.f)) return 0;
+            if (s_regrid.size() > 1024) s_regrid.clear();
+            auto ins = s_regrid.try_emplace(node);
+            F5Regrid& e = ins.first->second;
+            s_regrid_cur = node;
+            e.moved = false;
+            if (ins.second) {
+                e.x = a.f;
+                e.z = b.f;
+                return 0;
+            }
+            if ((e.x != a.f) || (e.z != b.f)) {
+                e.dx = a.f - e.x;
+                e.dz = b.f - e.z;
+                e.x = a.f;
+                e.z = b.f;
+                e.moved = true;
+                if (f5_regrid_comp_enabled() && (e.k > 0.0f)) {
+                    e.lx += (int32_t)std::lround(e.dx * e.k);
+                    e.lz += (int32_t)std::lround(e.dz * e.k);
+                    if ((std::abs(e.lx) > 8192) || (std::abs(e.lz) > 8192)) {
+                        e.lx = e.lz = 0;
+                        e.gen = (e.gen + 1) & 0xFu;
+                    }
+                }
+                else {
+                    e.lx = e.lz = 0;
+                    e.gen = (e.gen + 1) & 0xFu;
+                    e.pendingK = f5_regrid_comp_enabled();
+                }
+            }
+            return e.gen;
+        }
+        // After a modelview load: learn k (local units per root unit) from the first re-center jump, then apply -L to the root transform.
+        static void f5_regrid_after_load(State* state) {
+            s_mv_off_x = s_mv_off_z = 0;
+            if (s_regrid_cur == 0) return;
+            auto it = s_regrid.find(s_regrid_cur);
+            s_regrid_cur = 0;
+            if (it == s_regrid.end()) return;
+            F5Regrid& e = it->second;
+            auto& m = state->rsp->modelMatrixStack[state->rsp->modelMatrixStackSize - 1];
+            const float t[3] = { (float)m[3][0], (float)m[3][1], (float)m[3][2] };
+            const bool cont = e.haveT && (e.lastTask + 1 == state->displayListCounter);
+            if (e.pendingK && e.moved && cont) {
+                float w[3], j[3], jw = 0, ww = 0;
+                for (int c = 0; c < 3; ++c) {
+                    w[c] = e.dx * (float)m[0][c] + e.dz * (float)m[2][c];
+                    j[c] = t[c] - e.prevT[c] - e.prevD[c];
+                    jw += j[c] * w[c];
+                    ww += w[c] * w[c];
+                }
+                const float k = (ww > 1e-6f) ? (jw / ww) : 0.0f;
+                const float p2 = std::exp2(std::round(std::log2(std::max(k, 1.0f))));
+                if ((k > 1.0f) && (k < 65536.0f) && (std::fabs(k - p2) < 0.1f * p2)) {
+                    e.k = p2;
+                    e.pendingK = false;
+                }
+            }
+            if (cont && !e.moved) {
+                for (int c = 0; c < 3; ++c) e.prevD[c] = t[c] - e.prevT[c];
+            }
+            for (int c = 0; c < 3; ++c) e.prevT[c] = t[c];
+            e.haveT = true;
+            e.lastTask = state->displayListCounter;
+            if (f5_regrid_comp_enabled() && ((e.lx != 0) || (e.lz != 0))) {
+                const hlslpp::float4x4 shift(1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, (float)-e.lx, 0, (float)-e.lz, 1);
+                m = hlslpp::mul(shift, m);
+                s_mv_off_x = e.lx;
+                s_mv_off_z = e.lz;
+            }
+            if ((e.k > 0.0f) || (e.gen != 0)) {
+                s_world_from_view = hlslpp::inverse(m);
+                s_world_task = state->displayListCounter;
+            }
+        }
+        // Sprites drawn per node id last frame. A node drawing many sprites is a particle system (smoke trail) whose puffs are baked per frame; tweening its transform slides them, so it gets no id.
+        static std::unordered_map<uint32_t, uint32_t> s_sprites_cur, s_sprites_prev;
+        static uint32_t s_mv_candidate_id = 0;
+        // Particles tracked across frames: each sprite takes the id of the previous-frame sprite nearest its predicted position, so pairing survives fast camera motion.
+        struct F5WorldSprite { float x, y, z, r, vx, vy, vz; uint32_t node; float lx, ly, lz, lr, lvx, lvy, lvz; uint32_t ord, id; bool used; };
+        static std::vector<F5WorldSprite> s_wsprites_cur, s_wsprites_prev;
+        static uint32_t s_wsprite_next = 1;
+        static void f5_sprite_count_rotate(State* state) {
+            static uint64_t s_task = ~0ull;
+            if (state->displayListCounter != s_task) {
+                s_task = state->displayListCounter;
+                s_sprites_prev.swap(s_sprites_cur);
+                s_sprites_cur.clear();
+                s_wsprites_prev.swap(s_wsprites_cur);
+                s_wsprites_cur.clear();
+            }
+        }
+        // Id for a sprite from the mesh face that emitted it (per node, since instanced models share faces). A new generation starts when the
+        // face was not drawn last frame, its flipbook restarts (texture address drops back) or it jumps far beyond its size: the pool slot was reused.
+        static uint32_t f5_face_sprite_id(State* state, uint32_t face, uint32_t node, uint32_t tex, float cx, float cy, float cz, float half) {
+            static const bool s_on = env_on("ROGUESQ_F5_SPRITE_FACE_ID", true);
+            if (!s_on || (face < 0x80000000u)) return 0;
+            struct Entry { uint64_t task; uint32_t tex, gen; float x, y, z; };
+            static std::unordered_map<uint64_t, Entry> s_faces;
+            if (s_faces.size() > 8192) s_faces.clear();
+            const uint64_t key = ((uint64_t)node << 32) | face;
+            auto ins = s_faces.try_emplace(key, Entry{ 0, tex, 0, cx, cy, cz });
+            Entry& e = ins.first->second;
+            if (!ins.second) {
+                const float dx = cx - e.x, dy = cy - e.y, dz = cz - e.z;
+                const bool gap = (e.task + 1 != state->displayListCounter) && (e.task != state->displayListCounter);
+                const bool restart = (tex < e.tex) && ((e.tex - tex) < 0x20000u);
+                const bool jump = std::sqrt(dx * dx + dy * dy + dz * dz) > 4.0f * std::max(half, 1.0f);
+                if (gap || restart || jump) {
+                    e.gen++;
+                }
+            }
+            e.task = state->displayListCounter;
+            e.tex = tex;
+            e.x = cx;
+            e.y = cy;
+            e.z = cz;
+            const uint32_t h = (face * 0x9E3779B1u) ^ (node * 0x85EBCA6Bu) ^ (e.gen * 0xC2B2AE35u);
+            return 0x60000000u | (h & 0x0FFFFFFFu);
+        }
+
+        // Returns a persistent id for a sprite at local centre (cx,cy,cz) with local half-size `half` under node `node` (0 = none), or 0 to leave it to the auto matcher.
+        // Matches first in the node's local space (sprites riding a moving object, e.g. engine glows), then in the world-stable frame (puffs left behind by an emitter or camera).
+        static uint32_t f5_world_sprite_id(State* state, const hlslpp::float4x4& model, uint32_t node, uint32_t ordinal, float cx, float cy, float cz, float half) {
+            static const bool s_on = env_on("ROGUESQ_F5_SPRITE_WORLD_MATCH", true);
+            if (!s_on) return 0;
+            const bool haveWorld = (s_world_task == state->displayListCounter);
+            const float lr = std::max(half, 1.0f);
+            float wx = 0, wy = 0, wz = 0, r = 0;
+            if (haveWorld) {
+                const hlslpp::float4 view = hlslpp::mul(hlslpp::float4(cx, cy, cz, 1.0f), model);
+                const hlslpp::float4 world = hlslpp::mul(view, s_world_from_view);
+                wx = (float)world.x;
+                wy = (float)world.y;
+                wz = (float)world.z;
+                r = std::max(half * (float)hlslpp::length(model[0].xyz) * (float)hlslpp::length(s_world_from_view[0].xyz), 1.0f);
+            }
+            auto nearest = [&](bool local) -> F5WorldSprite* {
+                F5WorldSprite* best = nullptr;
+                float bestD = 0.0f;
+                for (F5WorldSprite& p : s_wsprites_prev) {
+                    if (p.used || (local && (p.node != node))) continue;
+                    // Compare against where the particle should be now given last frame's motion.
+                    const float dx = local ? (p.lx + p.lvx - cx) : (p.x + p.vx - wx), dy = local ? (p.ly + p.lvy - cy) : (p.y + p.vy - wy), dz = local ? (p.lz + p.lvz - cz) : (p.z + p.vz - wz);
+                    const float d = std::sqrt(dx * dx + dy * dy + dz * dz);
+                    const float lim = 1.25f * (local ? std::max(lr, p.lr) : std::max(r, p.r));
+                    if ((d <= lim) && ((best == nullptr) || (d < bestD))) {
+                        best = &p;
+                        bestD = d;
+                    }
+                }
+                return best;
+            };
+            // Emitters draw their particles in a stable order, so the previous sprite in the same slot wins when it is still within reach; nearest-neighbour alone lets overlapping puffs trade ids (a wobble).
+            F5WorldSprite* best = nullptr;
+            if (node != 0) {
+                for (F5WorldSprite& p : s_wsprites_prev) {
+                    if (p.used || (p.node != node) || (p.ord != ordinal)) continue;
+                    const float dx = p.lx + p.lvx - cx, dy = p.ly + p.lvy - cy, dz = p.lz + p.lvz - cz;
+                    if (std::sqrt(dx * dx + dy * dy + dz * dz) <= 1.25f * std::max(lr, p.lr)) best = &p;
+                    break;
+                }
+                if (best == nullptr) best = nearest(true);
+            }
+            if ((best == nullptr) && haveWorld) {
+                best = nearest(false);
+            }
+            if ((best == nullptr) && !haveWorld && (node == 0)) return 0;
+            uint32_t id;
+            F5WorldSprite cur{ wx, wy, wz, r, 0, 0, 0, node, cx, cy, cz, lr, 0, 0, 0, ordinal, 0, false };
+            if (best != nullptr) {
+                best->used = true;
+                id = best->id;
+                if (haveWorld && (best->r > 0.0f)) {
+                    cur.vx = wx - best->x;
+                    cur.vy = wy - best->y;
+                    cur.vz = wz - best->z;
+                }
+                if (best->node == node) {
+                    cur.lvx = cx - best->lx;
+                    cur.lvy = cy - best->ly;
+                    cur.lvz = cz - best->lz;
+                }
+            }
+            else {
+                id = 0x50000000u | (s_wsprite_next++ & 0x0FFFFFFFu);
+            }
+            cur.id = id;
+            if (s_wsprites_cur.size() < 4096) s_wsprites_cur.push_back(cur);
+            return id;
+        }
+        static bool f5_node_sprite_dense(State* state, uint32_t id) {
+            static const bool s_on = env_on("ROGUESQ_F5_DENSE_SPRITE_NOID", true) && !env_on("ROGUESQ_F5_SPRITE_XFORM", true);
+            if (!s_on) return false;
+            f5_sprite_count_rotate(state);
+            auto it = s_sprites_prev.find(id);
+            return (it != s_sprites_prev.end()) && (it->second > 2);
         }
         static constexpr uint32_t F5_NODE_MAP_SLOTS = 256;
         static uint32_t s_node_map[2][F5_NODE_MAP_SLOTS] = {};   // [buffer][slot] = stamped id (0 = leave AUTO)
@@ -158,7 +384,10 @@ namespace RT64 {
             const int buf = f5_ring_buffer(off);
             const int slot = f5_ring_slot(off);
             if (slot < 0) return;
-            if (slot == 0) {   // slot 0 = start of a new frame (one per frame, in the active buffer)
+            // The ring flips buffers every frame; the first write of a frame need not be slot 0 (cinematics start later in the ring).
+            static int s_last_buf = -1;
+            if (buf != s_last_buf) {
+                s_last_buf = buf;
                 for (uint32_t i = 0; i < F5_NODE_MAP_SLOTS; ++i) s_node_map[buf][i] = 0;
                 s_nodes_prev.swap(s_nodes_cur);
                 s_nodes_cur.clear();
@@ -167,6 +396,20 @@ namespace RT64 {
             // Store the raw node pointer for nodes present last frame (stable); 0 = leave AUTO.
             // op_01 reads the node's flags via RDRAM to classify before stamping an id.
             s_node_map[buf][slot] = s_nodes_prev.count(nodeId) ? nodeId : 0u;
+        }
+        // DL address of each 0xBD command -> the mesh face that emitted it (renderLitMeshFaceGroup hooks). Fixed-size, overwritten in place, so no locking or growth.
+        static constexpr uint32_t F5_SPRITE_MAP_SIZE = 131072;
+        static uint32_t s_sprite_map_addr[F5_SPRITE_MAP_SIZE] = {};
+        static uint32_t s_sprite_map_face[F5_SPRITE_MAP_SIZE] = {};
+        void f5_map_sprite_impl(uint32_t dlAddr, uint32_t face) {
+            const uint32_t phys = dlAddr & 0x1FFFFFFFu;
+            const uint32_t i = (phys >> 3) & (F5_SPRITE_MAP_SIZE - 1);
+            s_sprite_map_face[i] = face;
+            s_sprite_map_addr[i] = phys;
+        }
+        static uint32_t f5_lookup_sprite_face(uint32_t phys) {
+            const uint32_t i = (phys >> 3) & (F5_SPRITE_MAP_SIZE - 1);
+            return (s_sprite_map_addr[i] == phys) ? s_sprite_map_face[i] : 0u;
         }
         // Look up the id a hook stored for this ring address; 0 if none.
         static uint32_t f5_lookup_node_id(uint32_t w1) {
@@ -507,7 +750,7 @@ namespace RT64 {
             const uint32_t col[4] = { rec[1].w1, rec[2].w0, rec[2].w1, rec[3].w0 };
             const uint32_t w7 = rec[3].w1, w8 = rec[4].w0, w9 = rec[4].w1;
             const int16_t h[4] = { (int16_t)(w1 >> 16), (int16_t)w1, (int16_t)(w2 >> 16), (int16_t)w2 };
-            const int32_t x = (int16_t)(w8 >> 16), y = (int32_t)(int16_t)w8 << 4, z = (int16_t)(w9 >> 16), sz = (int16_t)w9;
+            const int32_t x = (int16_t)(w8 >> 16) + s_mv_off_x, y = (int32_t)(int16_t)w8 << 4, z = (int16_t)(w9 >> 16) + s_mv_off_z, sz = (int16_t)w9;
             const int16_t s = (int16_t)f5_terrain_uv_span(state, (int16_t)(w7 & 0xFFFF));   // S10.5, stored as-is by overlay 0x24
             f5_ensure_viewport(state);
             RSP::Vertex* tmp = reinterpret_cast<RSP::Vertex*>(state->fromRDRAM(F5_VTX_SCRATCH + F5_FACE_SLOT * sizeof(RSP::Vertex)));
@@ -577,24 +820,12 @@ namespace RT64 {
             const int shift = (int)(rec[0].w0 & 0xFF) & 7;
             const int M = ((gridN - 1) >> shift) + 1;
             const uint32_t w7 = rec[3].w1, w8 = rec[4].w0, w9 = rec[4].w1;
-            const int32_t x = (int16_t)(w8 >> 16), y = (int32_t)(int16_t)w8 << 4, z = (int16_t)(w9 >> 16), sz = (int16_t)w9;
+            const int32_t x = (int16_t)(w8 >> 16) + s_mv_off_x, y = (int32_t)(int16_t)w8 << 4, z = (int16_t)(w9 >> 16) + s_mv_off_z, sz = (int16_t)w9;
             // Overlay 0x10: s += w7.lo per sample along x, t = w7.lo*(M-1) - w7.lo*j along z (S10.5, no scale).
             const int16_t s = (int16_t)(w7 & 0xFFFF);
             const float span = (float)((M - 1) * sz);          // tile extent in world units
             const float step5 = span / 4.0f;                    // world units per 5x5-space cell
             const float uvcell = (float)f5_terrain_uv_span(state, (int32_t)s * (M - 1)) / 4.0f;   // S10.5 per 5x5-space cell
-            {
-                static bool s_ttex = env_on("ROGUESQ_LOG_TERRAIN_TEX", false);
-                static int s_ttn = 0;
-                if (s_ttex && (++s_ttn <= 40 || (s_ttn % 5000) == 0)) {
-                    const auto& ts = state->rsp->textureState;
-                    const LoadTile& T = state->rdp->tiles[ts.tile & 7];
-                    std::fprintf(stderr, "[ttex] shift=%d M=%d span=%d tex=%06X tile=%u lv=%u sc=%04X tc=%04X fmt=%u siz=%u line=%u tmem=%u pal=%u cms=%u cmt=%u mask=%u/%u shift=%u/%u size=(%u,%u)-(%u,%u) filt=%u cyc=%u\n",
-                        shift, M, (int)s * (M - 1), state->rdp->texture.address & 0xFFFFFFu, ts.tile, ts.levels, ts.sc, ts.tc,
-                        T.fmt, T.siz, T.line, T.tmem, T.palette, T.cms, T.cmt, T.masks, T.maskt, T.shifts, T.shiftt,
-                        T.uls, T.ult, T.lrs, T.lrt, state->rdp->otherMode.textFilt(), state->rdp->otherMode.cycleType());
-                }
-            }
             const uint8_t* ram = state->RDRAM;
             // Grid heights are s8 samples; the pools below hold them <<4 (world units, as overlay 0x0C).
             const float hcoeff = s_hmul;
@@ -945,7 +1176,7 @@ namespace RT64 {
                               auto it = s_draw_hist[buf].find(dr);
                               stamp = (dr >= 0x80000000u) && (it != s_draw_hist[buf].end()) && (it->second == 1);
                           }
-                          if (stamp) id = 0x20000000u | (nodePtr & 0x00FFFFFFu);
+                          if (stamp) id = 0x20000000u | (nodePtr & 0x00FFFFFFu) | (f5_node_regrid_generation(state->RDRAM, nodePtr) << 24);
                           // ROGUESQ_F5_TERRAIN_ID: terrain tiles are a scrolling pool — the node ptr is
                           // the reused SLOT, which makes RT64 interpolate a slot through the world-cell
                           // change at a grid re-center (the periodic terrain hitch). Instead, id a
@@ -993,6 +1224,10 @@ namespace RT64 {
                       const uint32_t off = w1 & 0x00FFFFFFu;
                       if (s_slotid && off >= 0x700000u && off < 0x720000u) id = 0x00010000u | (w1 & 0xFFFFu);
                   }
+                  s_mv_candidate_id = id;
+                  if ((id != 0) && f5_node_sprite_dense(state, id)) {
+                      id = 0;
+                  }
                   if (id != 0) {   // never 0 (IGNORE) or 0xFFFFFFFF (AUTO)
                       // Terrain geomorph: the PC port interpolates terrain vertices into position (the N64
                       // snapped). Now that terrain cells have a stable id, enable vertex interpolation for
@@ -1006,9 +1241,18 @@ namespace RT64 {
                           /*order*/G_EX_ORDER_LINEAR, /*aspect*/G_EX_ASPECT_AUTO, /*editable*/G_EX_EDIT_NONE,
                           /*idIsAddress*/false, /*editGroup*/false);
                   }
+                  // Without an id the load would inherit the previous object's group and pair with it; fall back to RT64's auto matcher.
+                  auto& grp = state->rsp->extended.modelMatrixIdStack[state->rsp->extended.modelMatrixIdStackSize - 1];
+                  if ((id == 0) && (grp.matrixId != G_EX_ID_AUTO)) {
+                      grp = TransformGroup();
+                      state->rsp->extended.modelMatrixIdStackChanged = true;
+                  }
             }
 
             state->rsp->matrix(w1, proj ? 0x03 : 0x02);   // F3D constants: PROJECTION=1, LOAD=2
+            if (!proj) {
+                f5_regrid_after_load(state);
+            }
 
             // ROGUESQ_LOG_FACE_UV: compose the full fixed-point matrix (int part + frac/65536)
             // and print its top-left 3x3 + translation. A ~90-deg rotation in the upper-left
@@ -1054,9 +1298,9 @@ namespace RT64 {
             RSP::Vertex* out = reinterpret_cast<RSP::Vertex*>(state->fromRDRAM(F5_VTX_SCRATCH));
             for (uint32_t i = 0; i < n; ++i) {
                 const uint32_t va = w1 + i * 8;
-                out[i].x = (int16_t)rd_be_s16(ram, va);
+                out[i].x = (int16_t)std::clamp<int32_t>(rd_be_s16(ram, va) + s_mv_off_x, -32768, 32767);
                 out[i].y = (int16_t)rd_be_s16(ram, va + 2);
-                out[i].z = (int16_t)rd_be_s16(ram, va + 4);
+                out[i].z = (int16_t)std::clamp<int32_t>(rd_be_s16(ram, va + 4) + s_mv_off_z, -32768, 32767);
                 out[i].flag = 0;
                 out[i].s = 0;
                 out[i].t = 0;
@@ -1127,16 +1371,20 @@ namespace RT64 {
                     float R[3], U[3]; cross(cY, cW, R); cross(cW, cX, U); norm(R); norm(U);
                     float rx = R[0], ry = R[1], rz = R[2], ux = U[0], uy = U[1], uz = U[2];
                     const bool haveView = (rx*rx + ry*ry + rz*rz) > 0.01f && (ux*ux + uy*uy + uz*uz) > 0.01f;
+                    // Each sprite gets its own transform (the node transform moved to the sprite centre, quad built around the origin) so interpolation can pair particles one by one.
+                    static const bool s_sprite_xform = env_on("ROGUESQ_F5_SPRITE_XFORM", true);
+                    const float ox = s_sprite_xform ? 0.0f : (float)c.x, oy = s_sprite_xform ? 0.0f : (float)c.y, oz = s_sprite_xform ? 0.0f : (float)c.z;
                     for (int k = 0; k < 4; ++k) {
                         tmp[k] = c;
                         const float dx = sgx[k] * (float)halfX, dy = sgy[k] * (float)halfY;
                         if (haveView) {
-                            tmp[k].x = (int16_t)(c.x + dx * rx + dy * ux);
-                            tmp[k].y = (int16_t)(c.y + dx * ry + dy * uy);
-                            tmp[k].z = (int16_t)(c.z + dx * rz + dy * uz);
+                            tmp[k].x = (int16_t)(ox + dx * rx + dy * ux);
+                            tmp[k].y = (int16_t)(oy + dx * ry + dy * uy);
+                            tmp[k].z = (int16_t)(oz + dx * rz + dy * uz);
                         } else {
-                            tmp[k].x = (int16_t)(c.x + dx);
-                            tmp[k].y = (int16_t)(c.y + dy);
+                            tmp[k].x = (int16_t)(ox + dx);
+                            tmp[k].y = (int16_t)(oy + dy);
+                            tmp[k].z = (int16_t)oz;
                         }
                         tmp[k].s = us[k]; tmp[k].t = vt[k];
                         tmp[k].color.r = tmp[k].color.g = tmp[k].color.b = tmp[k].color.a = 0xFF;  // white; PRIM carries the color
@@ -1169,9 +1417,53 @@ namespace RT64 {
                     uint32_t& gm = state->rsp->geometryModeStack[state->rsp->geometryModeStackSize - 1];
                     const uint32_t savedGM = gm;
                     gm &= ~(uint32_t)G_LIGHTING;
-                    // Pooled particles have no stable identity, so frame interpolation pairs unrelated ones (flicker); draw them on their own non-interpolated transform.
+                    // Sprites on a node that drew at most 2 sprites last frame (laser bolts) get an id from the node and their order; particle-system sprites auto-pair by proximity.
+                    // With ROGUESQ_F5_SPRITE_XFORM=0, sprites without a node id draw on a non-interpolated transform instead (they would otherwise pair with unrelated particles).
                     static const bool s_sprite_interp = env_on("ROGUESQ_F5_SPRITE_INTERP", false);
-                    if (!s_sprite_interp) {
+                    const auto& curGroup = state->rsp->extended.modelMatrixIdStack[state->rsp->extended.modelMatrixIdStackSize - 1];
+                    const bool nodeHasId = (curGroup.matrixId != G_EX_ID_AUTO) && (curGroup.matrixId != G_EX_ID_IGNORE);
+                    f5_sprite_count_rotate(state);
+                    uint32_t ordinal = 0;
+                    bool sparseNode = false;
+                    if (s_mv_candidate_id != 0) {
+                        ordinal = s_sprites_cur[s_mv_candidate_id]++;
+                        auto prevIt = s_sprites_prev.find(s_mv_candidate_id);
+                        sparseNode = (prevIt == s_sprites_prev.end()) || (prevIt->second <= 2);
+                    }
+                    const bool isolate = !s_sprite_xform && !s_sprite_interp && !nodeHasId;
+                    auto& modelTop = state->rsp->modelMatrixStack[state->rsp->modelMatrixStackSize - 1];
+                    const hlslpp::float4x4 savedModel = modelTop;
+                    if (s_sprite_xform) {
+                        const uint32_t dlPhys = (uint32_t)(reinterpret_cast<const uint8_t*>(*dl) - state->RDRAM);
+                        const uint32_t face = f5_lookup_sprite_face(dlPhys);
+                        uint32_t spriteId = f5_face_sprite_id(state, face, s_mv_candidate_id, state->rdp->texture.address & 0xFFFFFFu, (float)c.x, (float)c.y, (float)c.z, (float)std::max(halfX, halfY));
+                        if (spriteId != 0) {
+                            // Identified by the emitting mesh face.
+                        }
+                        else if (nodeHasId && sparseNode) {
+                            spriteId = 0x40000000u | ((s_mv_candidate_id * 0x9E3779B1u + ordinal * 0x85EBCA6Bu) & 0x0FFFFFFFu);
+                        }
+                        else {
+                            spriteId = f5_world_sprite_id(state, savedModel, s_mv_candidate_id, ordinal, (float)c.x, (float)c.y, (float)c.z, (float)std::max(halfX, halfY));
+                        }
+                        if (spriteId != 0) {
+                            state->rsp->matrixId(spriteId, /*push*/true, /*proj*/false, /*decompose*/true,
+                                G_EX_COMPONENT_INTERPOLATE, G_EX_COMPONENT_INTERPOLATE, G_EX_COMPONENT_INTERPOLATE, G_EX_COMPONENT_INTERPOLATE, G_EX_COMPONENT_INTERPOLATE,
+                                G_EX_COMPONENT_SKIP, G_EX_COMPONENT_SKIP, G_EX_COMPONENT_AUTO, G_EX_COMPONENT_AUTO,
+                                G_EX_ORDER_LINEAR, G_EX_ASPECT_AUTO, G_EX_EDIT_NONE, /*idIsAddress*/false, /*editGroup*/false);
+                        }
+                        else {
+                            auto& ext = state->rsp->extended;
+                            if (size_t(ext.modelMatrixIdStackSize) < ext.modelMatrixIdStack.size()) {
+                                ext.modelMatrixIdStack[ext.modelMatrixIdStackSize++] = TransformGroup();
+                            }
+                            ext.modelMatrixIdStackChanged = true;
+                        }
+                        const hlslpp::float4x4 toCentre(1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, (float)c.x, (float)c.y, (float)c.z, 1);
+                        modelTop = hlslpp::mul(toCentre, savedModel);
+                        state->rsp->modelViewProjChanged = true;
+                    }
+                    else if (isolate) {
                         state->rsp->matrixId(G_EX_ID_IGNORE, /*push*/true, /*proj*/false, /*decompose*/false,
                             G_EX_COMPONENT_SKIP, G_EX_COMPONENT_SKIP, G_EX_COMPONENT_SKIP, G_EX_COMPONENT_SKIP, G_EX_COMPONENT_SKIP,
                             G_EX_COMPONENT_SKIP, G_EX_COMPONENT_SKIP, G_EX_COMPONENT_SKIP, G_EX_COMPONENT_SKIP,
@@ -1197,7 +1489,12 @@ namespace RT64 {
                     }
                     state->rsp->drawIndexedTri(F5_FACE_SLOT, F5_FACE_SLOT + 3, F5_FACE_SLOT + 2);
                     state->rsp->drawIndexedTri(F5_FACE_SLOT, F5_FACE_SLOT + 1, F5_FACE_SLOT + 3);
-                    if (!s_sprite_interp) {
+                    if (s_sprite_xform) {
+                        modelTop = savedModel;
+                        state->rsp->popMatrixId(1, false);
+                        state->rsp->modelViewProjChanged = true;
+                    }
+                    else if (isolate) {
                         state->rsp->popMatrixId(1, false);
                         state->rsp->modelViewProjChanged = true;
                     }
@@ -1332,6 +1629,46 @@ namespace RT64 {
             // 0x7FBE; overriding that drew the horizon haze over far structures). ROGUESQ_F5_MESH_PRIMDEPTH=0 A/B.
             if (!s_cull_skip) {
                 state->rsp->setVertex(0x80000000u | (F5_VTX_SCRATCH + F5_FACE_SLOT * sizeof(RSP::Vertex)), n, F5_FACE_SLOT);
+                // Full-screen overlay quads (the pause dim) are world quads sized to the 4:3 frustum; widescreen would leave the sides uncovered, so grow them in their own plane.
+                static const bool s_widen_overlay = env_on("ROGUESQ_F5_OVERLAY_WIDEN", true);
+                if (s_widen_overlay && (n == 4) && (st == nullptr)) {
+                    const int wc = state->ext.workloadQueue->writeCursor;
+                    const auto &pt = state->ext.workloadQueue->workloads[wc].drawData.posTransformed;
+                    float x0 = 9, x1 = -9, y0 = 9, y1 = -9;
+                    bool front = true;
+                    for (int k = 0; k < n; ++k) {
+                        const auto &p = pt[state->rsp->indices[F5_FACE_SLOT + k]];
+                        const float w = (float)p[3];
+                        if (w <= 0.0f) {
+                            front = false;
+                            break;
+                        }
+                        const float x = (float)p[0] / w, y = (float)p[1] / w;
+                        x0 = std::min(x0, x);
+                        x1 = std::max(x1, x);
+                        y0 = std::min(y0, y);
+                        y1 = std::max(y1, y);
+                    }
+                    const bool fullScreen = front && (x0 <= -1.0f) && (x1 >= 1.0f) && (y0 <= -1.0f) && (y1 >= 1.0f) && (x1 < 2.0f) && (x0 > -2.0f) && (std::fabs(x0 + x1) < 0.2f) && (std::fabs(y0 + y1) < 0.2f);
+                    if (fullScreen) {
+                        float cx = 0, cy = 0, cz = 0;
+                        for (int k = 0; k < n; ++k) {
+                            cx += tmp[k].x;
+                            cy += tmp[k].y;
+                            cz += tmp[k].z;
+                        }
+                        cx /= n;
+                        cy /= n;
+                        cz /= n;
+                        auto grow = [](float c, int16_t v) { return (int16_t)std::clamp(c + (v - c) * 4.0f, -32768.0f, 32767.0f); };
+                        for (int k = 0; k < n; ++k) {
+                            tmp[k].x = grow(cx, tmp[k].x);
+                            tmp[k].y = grow(cy, tmp[k].y);
+                            tmp[k].z = grow(cz, tmp[k].z);
+                        }
+                        state->rsp->setVertex(0x80000000u | (F5_VTX_SCRATCH + F5_FACE_SLOT * sizeof(RSP::Vertex)), n, F5_FACE_SLOT);
+                    }
+                }
                 if ((state->rdp->otherMode.L & 0x04u) && !s_prim_depth_from_game) {
                     static const bool s_mpd = env_on("ROGUESQ_F5_MESH_PRIMDEPTH", true);
                     if (s_mpd) {
@@ -1531,4 +1868,9 @@ namespace RT64 {
 // Safe no-op until that hook exists; the lookup falls back to G_EX_ID_AUTO when the map is empty.
 extern "C" void rs64_f5_map_node(uint32_t ringDst, uint32_t nodeId) {
     RT64::GBI_F3DFACTOR5::f5_map_node_impl(ringDst, nodeId);
+}
+
+// Game-side hook in renderLitMeshFaceGroup at each 0xBD emission: dlAddr = the command's DL address, face = the emitting mesh face.
+extern "C" void rs64_f5_map_sprite(uint32_t dlAddr, uint32_t face) {
+    RT64::GBI_F3DFACTOR5::f5_map_sprite_impl(dlAddr, face);
 }
