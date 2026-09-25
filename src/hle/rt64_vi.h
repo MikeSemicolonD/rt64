@@ -141,6 +141,7 @@ namespace RT64 {
         uint8_t fbSiz() const;
         uint32_t fbAddress() const;
         hlslpp::uint2 fbSize() const;
+        float pixelAspect() const;
         float xScaleFloat() const;
         float xOffsetFloat() const;
         float yScaleFloat() const;

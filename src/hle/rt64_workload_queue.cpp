@@ -120,7 +120,7 @@ namespace RT64 {
         framebufferRenderer->updateMultisampling();
     }
 
-    void WorkloadQueue::threadConfigurationUpdate(hlslpp::uint2 viFbSize, WorkloadConfiguration &workloadConfig) {
+    void WorkloadQueue::threadConfigurationUpdate(hlslpp::uint2 viFbSize, float viPixelAspect, WorkloadConfiguration &workloadConfig) {
         const std::scoped_lock lock(ext.sharedResources->configurationMutex);
         const bool sizeChanged = ext.sharedResources->swapChainSizeChanged;
         ext.sharedResources->swapChainSizeChanged = false;
@@ -131,7 +131,9 @@ namespace RT64 {
         const uint32_t referenceHeight = (viFbSize[1] > 0) ? std::max(viFbSize[1], MinimumReferenceHeight) : 240;
 
         // Compute the aspect ratio to be used for the frame.
-        workloadConfig.aspectRatioSource = (viFbSize[1] > 0) ? float(viFbSize[0]) / float(viFbSize[1]) : (4.0f / 3.0f);
+        // Displayed aspect: the framebuffer ratio corrected by the VI pixel aspect.
+        workloadConfig.pixelAspect = viPixelAspect;
+        workloadConfig.aspectRatioSource = (viFbSize[1] > 0) ? (float(viFbSize[0]) / float(viFbSize[1])) * viPixelAspect : (4.0f / 3.0f);
 
         const auto ratioMode = ext.sharedResources->userConfig.aspectRatio;
         switch (ratioMode) {
@@ -628,6 +630,7 @@ namespace RT64 {
                     drawParams.rasterShaderCache = ext.rasterShaderCache;
                     drawParams.resolutionScale = fixedResScale;
                     drawParams.aspectRatioSource = workloadConfig.aspectRatioSource;
+                    drawParams.pixelAspect = workloadConfig.pixelAspect;
                     drawParams.aspectRatioTarget = workloadConfig.aspectRatioTarget;
                     drawParams.extAspectPercentage = workloadConfig.extAspectPercentage;
                     drawParams.horizontalMisalignment = (colorTarget != nullptr) ? float(colorTarget->misalignX) : float(depthTarget->misalignX);
@@ -886,6 +889,9 @@ namespace RT64 {
         int64_t displayTicks = 0;
         uint32_t originalRateForTicks = 0;
         uint32_t displayRateForTicks = 0;
+        bool variableForTicks = false;
+        int64_t tickStep = 1;
+        int64_t frameSpan = 1;
         int processCursor = -1;
         bool frameReduction = false;
         while (threadsRunning) {
@@ -912,7 +918,7 @@ namespace RT64 {
 
                 ElapsedTimer workloadTimer;
                 workloadProfiler.start();
-                threadConfigurationUpdate(workload.viFbSize, workloadConfig);
+                threadConfigurationUpdate(workload.viFbSize, workload.viPixelAspect, workloadConfig);
 
                 // FIXME: This is a very hacky way to find out if we need to advance the frame if the workload was paused for the first time.
                 if (!workload.paused || (!gameFrames[curFrameIndex].workloads.empty() && (gameFrames[curFrameIndex].workloads[0] != (uint32_t)processCursor))) {
@@ -988,7 +994,20 @@ namespace RT64 {
                     const bool displayRateAboveOriginal = (workload.viOriginalRate > 0) && (workloadConfig.targetRate > workload.viOriginalRate);
                     generateInterpolatedFrames = !workload.paused && displayRateAboveOriginal && !interpolationTargetKey.isEmpty();
 
-                    const bool resetTicks = !generateInterpolatedFrames || (originalRateForTicks != workload.viOriginalRate) || (displayRateForTicks != workloadConfig.targetRate) || !displayRateAboveOriginal;
+                    // ROGUESQ_INTERP_VARIABLE: time each real frame by its own VI count instead of the averaged rate, so a frame the game stretched to 3 VIs tweens over 3 VIs.
+                    static const bool s_variable = [](){ const char *e = std::getenv("ROGUESQ_INTERP_VARIABLE"); return !(e && e[0] == '0'); }();
+                    const bool variable = s_variable && generateInterpolatedFrames && (workload.viFrameTicks >= 1) && (workload.viFrameTicks <= 8);
+                    if (variable) {
+                        tickStep = 60;
+                        frameSpan = int64_t(workloadConfig.targetRate) * std::min<uint32_t>(workload.viFrameTicks, 4);
+                    }
+                    else {
+                        tickStep = workload.viOriginalRate;
+                        frameSpan = workloadConfig.targetRate;
+                    }
+
+                    const bool resetTicks = !generateInterpolatedFrames || (originalRateForTicks != workload.viOriginalRate) || (displayRateForTicks != workloadConfig.targetRate) || !displayRateAboveOriginal || (variableForTicks != variable);
+                    variableForTicks = variable;
                     if (resetTicks) {
                         logicalTicks = 0;
                         displayTicks = 0;
@@ -1000,18 +1019,25 @@ namespace RT64 {
                 // Estimate amount of frames to render based on how many display frames it'd take to reach the next logical frame.
                 uint32_t displayFrames = 1;
                 if (generateInterpolatedFrames) {
-                    logicalTicks += workloadConfig.targetRate;
-                    displayFrames = uint32_t((logicalTicks - displayTicks) / workload.viOriginalRate);
+                    logicalTicks += frameSpan;
+                    displayFrames = uint32_t((logicalTicks - displayTicks) / tickStep);
                     deltaTimeMs = 1.0f / float(workloadConfig.targetRate);
 
                     if ((displayFrames > 1) && frameReduction) {
-                        displayTicks += workload.viOriginalRate;
+                        displayTicks += tickStep;
                         displayFrames--;
                         frameReduction = false;
                     }
 
                     assert((logicalTicks > displayTicks) && "Logical ticks must always remain bigger than the display ticks.");
-                    assert(((logicalTicks - displayTicks) <= (workloadConfig.targetRate + workload.viOriginalRate)) && "The gap between logical ticks and display ticks can't be bigger than the target rate.");
+                    assert(((logicalTicks - displayTicks) <= (frameSpan + tickStep)) && "The gap between logical ticks and display ticks can't be bigger than the target rate.");
+                    {
+                        static const bool s_lt = [](){ const char *e = std::getenv("ROGUESQ_LOG_INTERP_TICKS"); return e && e[0] && e[0] != '0'; }();
+                        static uint32_t s_n = 0;
+                        if (s_lt && (workload.viFrameTicks != 2 || (++s_n % 300) == 0)) {
+                            fprintf(stderr, "[interp-ticks] vi=%u rate=%u step=%lld span=%lld frames=%u\n", workload.viFrameTicks, workload.viOriginalRate, (long long)tickStep, (long long)frameSpan, displayFrames);
+                        }
+                    }
                     assert((displayFrames > 0) && "At least one display frame must be generated.");
                 }
                 else if (workload.viOriginalRate > 0) {
@@ -1055,7 +1081,7 @@ namespace RT64 {
                     }
                 }
                 
-                const int64_t originalTimeMicro = (workload.viOriginalRate > 0) ? (1000000 / workload.viOriginalRate) : 0;
+                const int64_t originalTimeMicro = (generateInterpolatedFrames && (tickStep == 60)) ? (1000000 * frameSpan / (60 * int64_t(workloadConfig.targetRate))) : ((workload.viOriginalRate > 0) ? (1000000 / workload.viOriginalRate) : 0);
                 const int64_t setupTimeMicro = workloadTimer.elapsedMicroseconds();
                 const int64_t adjustedTimeWindowMicro = originalTimeMicro - setupTimeMicro;
                 const int64_t maxTimePerFrameMicro = adjustedTimeWindowMicro / displayFrames;
@@ -1071,7 +1097,7 @@ namespace RT64 {
                         const int64_t expectedTimeMicro = frame * maxTimePerFrameMicro;
                         const int64_t measuredFrameMicro = renderTimeTotalMicro / framesRendered;
                         if ((currentTimeMicro > expectedTimeMicro) || ((currentTimeMicro + measuredFrameMicro) > adjustedTimeWindowMicro)) {
-                            displayTicks += workload.viOriginalRate;
+                            displayTicks += tickStep;
                             skippedFrames = true;
                             continue;
                         }
@@ -1080,9 +1106,9 @@ namespace RT64 {
                     RenderTarget *overrideTarget = nullptr;
                     uint32_t overrideModifier = 0;
                     if (generateInterpolatedFrames) {
-                        prevFrameWeight = std::clamp((workloadConfig.targetRate + displayTicks - logicalTicks) / float(workloadConfig.targetRate), 0.0f, 1.0f);
-                        displayTicks += workload.viOriginalRate;
-                        curFrameWeight = std::clamp((workloadConfig.targetRate + displayTicks - logicalTicks) / float(workloadConfig.targetRate), 0.0f, 1.0f);
+                        prevFrameWeight = std::clamp((frameSpan + displayTicks - logicalTicks) / float(frameSpan), 0.0f, 1.0f);
+                        displayTicks += tickStep;
+                        curFrameWeight = std::clamp((frameSpan + displayTicks - logicalTicks) / float(frameSpan), 0.0f, 1.0f);
 
                         // Override the render target.
                         if (usingMSAA || (frame > 0)) {
@@ -1143,7 +1169,7 @@ namespace RT64 {
 
                         // Add the amount of display ticks that correspond to the remaining frames.
                         if (skipWorkloadNow) {
-                            displayTicks += workload.viOriginalRate * (displayFrames - (frame + 1));
+                            displayTicks += tickStep * (displayFrames - (frame + 1));
                         }
 
                         ext.sharedResources->interpolatedCondition.notify_all();

@@ -46,12 +46,16 @@
 #include <unordered_set>
 #include <unordered_map>
 #include <cmath>
+#include <chrono>
 
 extern "C" volatile unsigned g_most_drawn_fb = 0;
 extern "C" volatile unsigned g_most_drawn_fb_width = 0;  // width of g_most_drawn_fb's color image
 extern "C" volatile unsigned long long g_most_drawn_fb_ms = 0;  // steady-clock ms of its last texrect
 extern "C" volatile unsigned g_f5_task_hops = 0;    // previous task's chunk transitions (diagnostic)
 extern "C" volatile unsigned g_f5_task_faces = 0;   // previous task's emitted faces
+// Heuristic firing counts (ROGUESQ_LOG_HEURISTICS): 0 = op 0x0A seen, 1 = op_01 shape rule
+// disagrees with byte1 bit0, 2 = B4 filler guard fired, 3 = attribution de-flicker skip.
+extern "C" volatile unsigned g_f5_heur[4] = {};
 extern "C" volatile int g_explosion_hold = 0;
 
 namespace RT64 {
@@ -438,6 +442,55 @@ namespace RT64 {
             }
         }
 
+        // ROGUESQ_LOG_TERRAIN_CRACKS=1: per task, compare every tile-edge point's world height with the
+        // neighbour tile's value at the same position; logs mismatches (cracks) every 5 s.
+        static void f5_terrain_crack_check(State* state, int32_t x0, int32_t z0, float step, const float y5[25], int kind) {
+            static const bool s_on = env_on("ROGUESQ_LOG_TERRAIN_CRACKS", false);
+            if (!s_on) return;
+            static std::unordered_map<uint64_t, std::pair<float, int>> s_pts;
+            static uint64_t s_task = ~0ull;
+            static unsigned s_cmp = 0, s_bad = 0, s_pairBad[3][3] = {}, s_pairCmp[3][3] = {}; static float s_max = 0.0f, s_pairMax[3][3] = {};
+            static auto s_last = std::chrono::steady_clock::now();
+            if (state->displayListCounter != s_task) { s_task = state->displayListCounter; s_pts.clear(); }
+            const int k = std::clamp(kind, 0, 2);
+            for (int r = 0; r < 5; ++r) for (int c = 0; c < 5; ++c) {
+                if (r != 0 && r != 4 && c != 0 && c != 4) continue;
+                const int32_t px = x0 + (int32_t)std::lround(c * step), pz = z0 + (int32_t)std::lround(r * step);
+                const uint64_t key = ((uint64_t)(uint32_t)px << 32) | (uint32_t)pz;
+                const float yv = y5[r * 5 + c];
+                auto it = s_pts.find(key);
+                if (it == s_pts.end()) { s_pts.emplace(key, std::make_pair(yv, k)); continue; }
+                ++s_cmp;
+                s_pairCmp[std::min(k, it->second.second)][std::max(k, it->second.second)]++;
+                const float dlt = std::fabs(it->second.first - yv);
+                if (dlt > 1.0f) {
+                    ++s_bad;
+                    s_max = std::max(s_max, dlt);
+                    const int a = std::min(k, it->second.second), b = std::max(k, it->second.second);
+                    s_pairBad[a][b]++;
+                    s_pairMax[a][b] = std::max(s_pairMax[a][b], dlt);
+                }
+            }
+            const auto now = std::chrono::steady_clock::now();
+            if (now - s_last > std::chrono::seconds(5)) {
+                s_last = now;
+                char b[256]; int o = std::snprintf(b, sizeof b, "[tcrack] shared edge points=%u cracks>1=%u max=%.1f |", s_cmp, s_bad, s_max);
+                for (int a = 0; a < 3; ++a) for (int c = a; c < 3; ++c) if (s_pairCmp[a][c]) o += std::snprintf(b + o, sizeof b - o, " %d-%d:%u shared %u bad max%.0f", a, c, s_pairCmp[a][c], s_pairBad[a][c], s_pairMax[a][c]);
+                std::fprintf(stderr, "%s\n", b);
+            }
+        }
+
+        // The ucode spans a tile over texels 0..dim-1, so neighbours meet one texel off; span the full dim under the game's clamp.
+        // A wrap mask instead bleeds the opposite edge of transition textures.
+        static int32_t f5_terrain_uv_span(State* state, int32_t span) {
+            static bool s_on = env_on("ROGUESQ_F5_TERRAIN_FULL_UV", true);
+            if (!s_on) return span;
+            const LoadTile& T = state->rdp->tiles[state->rsp->textureState.tile & 7];
+            const int dim = ((T.lrs - T.uls) >> 2) + 1;
+            if (T.masks || T.maskt || dim < 2 || dim != ((T.lrt - T.ult) >> 2) + 1 || span != ((dim - 1) << 5)) return span;
+            return dim << 5;
+        }
+
         // 0x05 `05 05 02 xx` form (ucode overlays 0xC -> 0x24): a TERRAIN TILE quad. From the record
         // (word index = 8-byte pairs after the command, halves hi/lo):
         //   w1 = (h0,h1)  word2 = (h2,h3)          per-corner heights added to y
@@ -455,7 +508,7 @@ namespace RT64 {
             const uint32_t w7 = rec[3].w1, w8 = rec[4].w0, w9 = rec[4].w1;
             const int16_t h[4] = { (int16_t)(w1 >> 16), (int16_t)w1, (int16_t)(w2 >> 16), (int16_t)w2 };
             const int32_t x = (int16_t)(w8 >> 16), y = (int32_t)(int16_t)w8 << 4, z = (int16_t)(w9 >> 16), sz = (int16_t)w9;
-            const int16_t s = (int16_t)(w7 & 0xFFFF);   // stored into the vertex as-is by overlay 0x24 (S10.5)
+            const int16_t s = (int16_t)f5_terrain_uv_span(state, (int16_t)(w7 & 0xFFFF));   // S10.5, stored as-is by overlay 0x24
             f5_ensure_viewport(state);
             RSP::Vertex* tmp = reinterpret_cast<RSP::Vertex*>(state->fromRDRAM(F5_VTX_SCRATCH + F5_FACE_SLOT * sizeof(RSP::Vertex)));
             const int32_t px[4] = { x, x + sz, x, x + sz }, pz[4] = { z, z, z + sz, z + sz };
@@ -473,6 +526,15 @@ namespace RT64 {
             state->rsp->drawIndexedTri(F5_FACE_SLOT, F5_FACE_SLOT + 3, F5_FACE_SLOT + 2);
             state->rsp->drawIndexedTri(F5_FACE_SLOT, F5_FACE_SLOT + 1, F5_FACE_SLOT + 3);
             s_task_faces += 2;
+            {
+                float y5[25];
+                for (int r = 0; r < 5; ++r) for (int c = 0; c < 5; ++c) {
+                    const float u = c / 4.0f, v = r / 4.0f;
+                    y5[r * 5 + c] = (float)y + (u >= v ? h[0] + (h[1] - h[0]) * u + (h[3] - h[1]) * v
+                                                       : h[0] + (h[2] - h[0]) * v + (h[3] - h[2]) * u);
+                }
+                f5_terrain_crack_check(state, x, z, sz / 4.0f, y5, 2);
+            }
         }
 
         // Emit N terrain strips (2*(N+1) verts each, laid out contiguously) exactly as the
@@ -520,55 +582,132 @@ namespace RT64 {
             const int16_t s = (int16_t)(w7 & 0xFFFF);
             const float span = (float)((M - 1) * sz);          // tile extent in world units
             const float step5 = span / 4.0f;                    // world units per 5x5-space cell
-            const float uvcell = (float)s * (float)(M - 1) / 4.0f;   // S10.5 per 5x5-space cell
-            const uint8_t* ram = state->RDRAM;
-            // Grid heights are the flat-tile s16 heights compressed to s8 (>>4): flat corner heights run
-            // 544..2032, grid s8 run 31..110, ratio ~16. So grid worldY = h<<4 to seat against flat tiles
-            // (using a smaller scale drops grid tiles below the flat plateaus -> stepped layers). Env mult tunes.
-            const float hcoeff = 16.0f * s_hmul;
-            f5_ensure_viewport(state);
-            // Parser overlay 0xC samples the N*N input at the LOD stride: output (i,j) = input
-            // [(i*stride)*N + j*stride], an M*M grid. Samples between stride points are never read at
-            // this LOD and hold unrelated heights -- meshing them produced spikes on steep terrain.
-            const int stride = 1 << shift;
-            float G[5][5] = {};
-            for (int i = 0; i < M && i < 5; ++i) for (int j = 0; j < M && j < 5; ++j)
-                G[i][j] = (float)(int8_t)ram[(hptr + (uint32_t)((i * stride) * gridN + j * stride)) ^ 3];
-            // Edge LOD seams (overlays 0x14 rows, 0x18 columns). Record bytes +4..+7 are the left, right,
-            // top and bottom neighbour LODs. When one differs from this tile's shift, the odd samples along
-            // that edge become the mean of their neighbours (a straight edge, no T-junction), then blend
-            // toward the corner line by that edge's weight (+0x16 L, +0x18 R, +0x1A T, +0x1C B, 16.16).
+            const float uvcell = (float)f5_terrain_uv_span(state, (int32_t)s * (M - 1)) / 4.0f;   // S10.5 per 5x5-space cell
             {
-                static bool s_seam = env_on("ROGUESQ_F5_TERRAIN_SEAMS", true);
-                const uint32_t nbw = rec[0].w1;
-                const int nb[4] = { (int)((nbw >> 24) & 0xFF), (int)((nbw >> 16) & 0xFF), (int)((nbw >> 8) & 0xFF), (int)(nbw & 0xFF) };
-                const float wt[4] = { (float)(rec[2].w1 & 0xFFFFu) / 65536.0f, (float)((rec[3].w0 >> 16) & 0xFFFFu) / 65536.0f,
-                                      (float)(rec[3].w0 & 0xFFFFu) / 65536.0f, (float)((rec[3].w1 >> 16) & 0xFFFFu) / 65536.0f };
-                // edge e: 0=L (col 0), 1=R (col M-1), 2=T (row 0), 3=B (row M-1); k walks along the edge
-                auto at = [&](int e, int k) -> float& {
-                    return e == 0 ? G[k][0] : e == 1 ? G[k][M - 1] : e == 2 ? G[0][k] : G[M - 1][k]; };
-                for (int e = 0; s_seam && M > 2 && e < 4; ++e) {
-                    if (nb[e] == shift) continue;
-                    for (int k = 1; k + 1 < M; k += 2) at(e, k) = 0.5f * (at(e, k - 1) + at(e, k + 1));
-                    if (wt[e] > 0.0f) {
-                        const float c0 = at(e, 0), c1 = at(e, M - 1);
-                        for (int k = 1; k + 1 < M; ++k) {
-                            const float line = c0 + (c1 - c0) * (float)k / (float)(M - 1);
-                            at(e, k) = line * wt[e] + at(e, k) * (1.0f - wt[e]);
+                static bool s_ttex = env_on("ROGUESQ_LOG_TERRAIN_TEX", false);
+                static int s_ttn = 0;
+                if (s_ttex && (++s_ttn <= 40 || (s_ttn % 5000) == 0)) {
+                    const auto& ts = state->rsp->textureState;
+                    const LoadTile& T = state->rdp->tiles[ts.tile & 7];
+                    std::fprintf(stderr, "[ttex] shift=%d M=%d span=%d tex=%06X tile=%u lv=%u sc=%04X tc=%04X fmt=%u siz=%u line=%u tmem=%u pal=%u cms=%u cmt=%u mask=%u/%u shift=%u/%u size=(%u,%u)-(%u,%u) filt=%u cyc=%u\n",
+                        shift, M, (int)s * (M - 1), state->rdp->texture.address & 0xFFFFFFu, ts.tile, ts.levels, ts.sc, ts.tc,
+                        T.fmt, T.siz, T.line, T.tmem, T.palette, T.cms, T.cmt, T.masks, T.maskt, T.shifts, T.shiftt,
+                        T.uls, T.ult, T.lrs, T.lrt, state->rdp->otherMode.textFilt(), state->rdp->otherMode.cycleType());
+                }
+            }
+            const uint8_t* ram = state->RDRAM;
+            // Grid heights are s8 samples; the pools below hold them <<4 (world units, as overlay 0x0C).
+            const float hcoeff = s_hmul;
+            f5_ensure_viewport(state);
+            // Heights and colors follow the ucode (overlays 0x0C parse, 0x14 row seams, 0x18 column seams,
+            // 0x10 interior), in its fixed point, so tiles sharing an edge produce identical vertices.
+            // Pools are M*M, row j along z, column i along x; heights are s8<<4 (world units).
+            auto clamp16 = [](int64_t v) -> int32_t { return (int32_t)(v > 32767 ? 32767 : (v < -32768 ? -32768 : v)); };
+            auto mean2 = [](int32_t a, int32_t b) -> int32_t { return (a + b) >> 1; };
+            // acc = a*(0x10000-f) + b*f; returns h blended toward acc>>16 by w (0.16), as vmudl/vmadm.
+            auto morph = [&](int64_t acc, int32_t h, uint32_t w) -> int32_t {
+                const int64_t hi = clamp16(acc >> 16), lo = acc & 0xFFFF;
+                int64_t a2 = ((lo * (int64_t)w) >> 16) + hi * (int64_t)w;
+                a2 += (int64_t)h * (int64_t)((0x10000u - w) & 0xFFFFu);
+                return clamp16(a2 >> 16);
+            };
+            const int stride = 1 << shift;
+            // Channel 0 = height, 1..4 = RGBA; every seam/interior step applies to all five alike.
+            int32_t P[5][5][5] = {};
+            for (int j = 0; j < M && j < 5; ++j) for (int i = 0; i < M && i < 5; ++i)
+                P[j][i][0] = (int32_t)(int8_t)ram[(hptr + (uint32_t)((j * stride) * gridN + i * stride)) ^ 3] << 4;
+            {
+                // Colors: an Mc*Mc source at LOD shift L; lattice points between source samples take the
+                // mean of the two (or main-diagonal) neighbours (overlay 0x0C 1E5C..1F58).
+                const int L = (int)((rec[0].w0 >> 12) & 0xF);
+                const int d = L - shift;
+                const int cstep = d >= 0 ? (0x100 >> d) : (0x100 << -d);
+                const int cmask = d >= 0 ? (1 << d) - 1 : 0;
+                const int Mc = ((gridN - 1) >> L) + 1;
+                auto src = [&](int idx, int ch) -> int32_t { return (int32_t)ram[(cptr + (uint32_t)idx * 4u + (uint32_t)ch) ^ 3]; };
+                for (int j = 0; j < M && j < 5; ++j) for (int i = 0; i < M && i < 5; ++i) {
+                    const int idx = ((j * cstep) >> 8) * Mc + ((i * cstep) >> 8);
+                    const bool mi = (i & cmask) != 0, mj = (j & cmask) != 0;
+                    for (int ch = 0; ch < 4; ++ch)
+                        P[j][i][1 + ch] = (mi || mj) ? mean2(src(idx, ch), src(idx + (mi ? 1 : 0) + (mj ? Mc : 0), ch)) : src(idx, ch);
+                }
+            }
+            // Edge seams: rows (z-min +6/+0x1A, z-max +7/+0x1C), then columns (x-min +4/+0x16, x-max +5/+0x18).
+            // Neighbour byte != this tile's LOD: odd samples -> mean of their neighbours, then toward the
+            // 4-sample-span line by w. Equal and w != 0: odd samples morph toward their neighbours' midpoint.
+            // The game sends the coarser tile down "equal" and the finer down "differs" with the coarser
+            // tile's w, so a shared edge moves in lockstep on both sides.
+            static bool s_seam = env_on("ROGUESQ_F5_TERRAIN_SEAMS", true);
+            const uint32_t nbw = rec[0].w1;
+            const int nbXmin = (int)((nbw >> 24) & 0xFF), nbXmax = (int)((nbw >> 16) & 0xFF);
+            const int nbZmin = (int)((nbw >> 8) & 0xFF), nbZmax = (int)(nbw & 0xFF);
+            const uint32_t wXmin = rec[2].w1 & 0xFFFFu, wXmax = (rec[3].w0 >> 16) & 0xFFFFu;
+            const uint32_t wZmin = rec[3].w0 & 0xFFFFu, wZmax = (rec[3].w1 >> 16) & 0xFFFFu;
+            const uint32_t wInterior = (rec[2].w1 >> 16) & 0xFFFFu;
+            bool differs[4] = {};   // 0 z-min row, 1 z-max row, 2 x-min column, 3 x-max column
+            auto seam = [&](int e, int nb, uint32_t w) {
+                auto E = [&](int k, int ch) -> int32_t& {
+                    return e == 0 ? P[0][k][ch] : e == 1 ? P[M - 1][k][ch] : e == 2 ? P[k][0][ch] : P[k][M - 1][ch]; };
+                for (int ch = 0; ch < 5; ++ch) {
+                    if (nb != shift) {
+                        for (int k = 1; k < M - 1; k += 2) E(k, ch) = mean2(E(k - 1, ch), E(k + 1, ch));
+                        if (w != 0 && M >= 5) {
+                            for (int k = 1; k < M - 1; ++k) {
+                                if ((k & 3) == 0) continue;
+                                const int64_t f = (int64_t)(k & 3) << 14;
+                                const int k0 = k & ~3;
+                                E(k, ch) = morph((int64_t)E(k0, ch) * (0x10000 - f) + (int64_t)E(k0 + 4, ch) * f, E(k, ch), w);
+                            }
                         }
+                    } else if (w != 0) {
+                        for (int k = 1; k < M - 1; k += 2)
+                            E(k, ch) = morph((int64_t)E(k - 1, ch) * 0x8000 + (int64_t)E(k + 1, ch) * 0x8000, E(k, ch), w);
+                    }
+                }
+                differs[e] = nb != shift;
+            };
+            if (s_seam && M >= 3) {
+                seam(0, nbZmin, wZmin); seam(1, nbZmax, wZmax);
+                seam(2, nbXmin, wXmin); seam(3, nbXmax, wXmax);
+            }
+            // Interior geomorph (+0x14, the tile's own weight): points with an odd row or column move toward
+            // the mean of their horizontal, vertical or main-diagonal neighbours. Runs after the edges.
+            if (wInterior != 0 && M >= 3) {
+                const int64_t half = wInterior >> 1, inv = (0x10000u - wInterior) & 0xFFFFu;
+                for (int j = 1; j <= M - 2; ++j) for (int i = 1; i <= M - 2; ++i) {
+                    if (!(i & 1) && !(j & 1)) continue;
+                    const int dj = j & 1, di = i & 1;
+                    for (int ch = 0; ch < 5; ++ch) {
+                        const int64_t a = P[j - dj][i - di][ch], b = P[j + dj][i + di][ch];
+                        P[j][i][ch] = clamp16(((a + b) * half + (int64_t)P[j][i][ch] * inv) >> 16);
                     }
                 }
             }
-            // Upsample the M*M grid onto the 5x5 the mesh is built from (identity for M == 5).
+            // Lattice for the mesh (float, 5x5). An M=3 pool fills the in-between points by the same
+            // horizontal/vertical/main-diagonal midpoints, so a fully morphed M=5 tile and an M=3 tile
+            // give the same lattice. On an edge whose neighbour is coarser, odd points sit exactly on the
+            // coarse segment (the ucode's crack slivers cover that rounding gap instead).
+            float Lt[5][5][5];
+            for (int r = 0; r < 5; ++r) for (int c = 0; c < 5; ++c) for (int ch = 0; ch < 5; ++ch) {
+                if (M >= 5) { Lt[r][c][ch] = (float)P[r][c][ch]; continue; }
+                const int r0 = r >> 1, c0 = c >> 1;
+                const int r1 = (r & 1) ? r0 + 1 : r0, c1 = (c & 1) ? c0 + 1 : c0;
+                Lt[r][c][ch] = 0.5f * ((float)P[r0][c0][ch] + (float)P[r1][c1][ch]);
+            }
+            for (int e = 0; e < 4; ++e) {
+                if (!differs[e]) continue;
+                for (int k = 1; k < 4; k += 2) for (int ch = 0; ch < 5; ++ch) {
+                    float* p = e == 0 ? &Lt[0][k][ch] : e == 1 ? &Lt[4][k][ch] : e == 2 ? &Lt[k][0][ch] : &Lt[k][4][ch];
+                    const float* a = e == 0 ? &Lt[0][k - 1][ch] : e == 1 ? &Lt[4][k - 1][ch] : e == 2 ? &Lt[k - 1][0][ch] : &Lt[k - 1][4][ch];
+                    const float* b = e == 0 ? &Lt[0][k + 1][ch] : e == 1 ? &Lt[4][k + 1][ch] : e == 2 ? &Lt[k + 1][0][ch] : &Lt[k + 1][4][ch];
+                    *p = 0.5f * (*a + *b);
+                }
+            }
             float H[25];
+            float C[25][4];
             for (int r = 0; r < 5; ++r) for (int c = 0; c < 5; ++c) {
-                const float gi = (float)r * (float)(M - 1) / 4.0f, gj = (float)c * (float)(M - 1) / 4.0f;
-                int i0 = (int)gi, j0 = (int)gj; if (i0 > M - 2) i0 = M - 2; if (j0 > M - 2) j0 = M - 2;
-                if (i0 < 0) i0 = 0; if (j0 < 0) j0 = 0;
-                const int i1 = (M > 1) ? i0 + 1 : i0, j1 = (M > 1) ? j0 + 1 : j0;
-                const float ti = gi - (float)i0, tj = gj - (float)j0;
-                H[r * 5 + c] = (G[i0][j0] * (1.0f - tj) + G[i0][j1] * tj) * (1.0f - ti)
-                             + (G[i1][j0] * (1.0f - tj) + G[i1][j1] * tj) * ti;
+                H[r * 5 + c] = Lt[r][c][0];
+                for (int ch = 0; ch < 4; ++ch) C[r * 5 + c][ch] = Lt[r][c][1 + ch];
             }
             // ROGUESQ_LOG_GFX_TASK: trace near-LOD (shift 0) and blended tiles to catch transition garbage.
             { static bool s_lg = env_on("ROGUESQ_LOG_GFX_TASK", false); static int s_n = 0;
@@ -583,17 +722,18 @@ namespace RT64 {
             // (per-tile LOD lives in w1 low bytes; uniform S avoids inter-tile cracks). Grid tiles span (M-1)*size
             // (step5 per 5x5 cell); UV spans the tile over the 4 cells; colors are read at the hardware stride
             // (real values at even samples, odd are checkerboard filler) so sample the nearest even cell.
-            // Distance LOD: the game's own per-tile `shift` is its distance band (0 = near, >=1 = far).
-            // Near tiles keep full subdivision (smooth foreground); far tiles use fewer strips, which is
-            // where the frame-hitch cost lives (op_05 emission scales with strip count). Tile edges are
-            // linearly interpolated, so a finer tile's edge verts stay collinear with a coarser neighbour
-            // -- no geometric crack across an LOD boundary.
+            // Far tiles (game `shift` >= 1) use ROGUESQ_F5_TERRAIN_SUB_FAR, default equal to near: a lower value leaves T-junctions at the LOD boundary, which rasterize as hairline cracks.
             static int s_sub_near = -1, s_sub_far = -1;
             if (s_sub_near < 0) {
                 const char* v = std::getenv("ROGUESQ_F5_TERRAIN_SUB"); s_sub_near = (v && *v) ? std::atoi(v) : 2;
                 if (s_sub_near < 1) s_sub_near = 1; if (s_sub_near > 4) s_sub_near = 4;
-                const char* vf = std::getenv("ROGUESQ_F5_TERRAIN_SUB_FAR"); s_sub_far = (vf && *vf) ? std::atoi(vf) : 1;
+                const char* vf = std::getenv("ROGUESQ_F5_TERRAIN_SUB_FAR"); s_sub_far = (vf && *vf) ? std::atoi(vf) : s_sub_near;
                 if (s_sub_far < 1) s_sub_far = 1; if (s_sub_far > 4) s_sub_far = 4;
+            }
+            {
+                float y5[25];
+                for (int k = 0; k < 25; ++k) y5[k] = (float)y + H[k] * hcoeff;
+                f5_terrain_crack_check(state, x, z, step5, y5, shift);
             }
             const int s_sub = (shift == 0) ? s_sub_near : s_sub_far;
             const int N = 4 * s_sub;   // cells per axis; N+1 verts per axis; 2*(N+1) <= 34 slots for S<=4
@@ -606,23 +746,13 @@ namespace RT64 {
                 { const int32_t yy = y + (int32_t)(h * hcoeff); v.y = (int16_t)(yy > 32767 ? 32767 : (yy < -32768 ? -32768 : yy)); }   // saturate, see f5_tile_quad
                 v.z = (int16_t)(z + (int32_t)(fy * step5));
                 v.flag = 0; v.s = (int16_t)(uvcell * fx); v.t = (int16_t)(uvcell * (4.0f - fy));
-                // Colors: real samples sit every (1<<shift) in the N*N grid; the parser overlay averages
-                // between them, so interpolate bilinearly instead of snapping to the nearest sample.
                 {
-                    const int cstep = 1 << shift;
-                    const float gx = fx * (float)(gridN - 1) / 4.0f, gy = fy * (float)(gridN - 1) / 4.0f;
-                    int x0 = ((int)gx / cstep) * cstep, y0 = ((int)gy / cstep) * cstep;
-                    if (x0 > gridN - 1) x0 = gridN - 1; if (y0 > gridN - 1) y0 = gridN - 1;
-                    const int x1 = (x0 + cstep <= gridN - 1) ? x0 + cstep : x0, y1 = (y0 + cstep <= gridN - 1) ? y0 + cstep : y0;
-                    const float tx = (x1 != x0) ? (gx - (float)x0) / (float)(x1 - x0) : 0.0f;
-                    const float ty = (y1 != y0) ? (gy - (float)y0) / (float)(y1 - y0) : 0.0f;
-                    auto ch = [&](int cx, int cy, int k) -> float { return (float)ram[(cptr + (uint32_t)(cy * gridN + cx) * 4 + (uint32_t)k) ^ 3]; };
                     uint8_t out[4];
                     for (int k = 0; k < 4; ++k) {
-                        const float top = ch(x0, y0, k) * (1.0f - tx) + ch(x1, y0, k) * tx;
-                        const float bot = ch(x0, y1, k) * (1.0f - tx) + ch(x1, y1, k) * tx;
-                        float val = top * (1.0f - ty) + bot * ty + 0.5f;
-                        out[k] = (uint8_t)(val > 255.0f ? 255.0f : val);
+                        const float top = C[y0*5+x0][k] * (1 - tx) + C[y0*5+x0+1][k] * tx;
+                        const float bot = C[(y0+1)*5+x0][k] * (1 - tx) + C[(y0+1)*5+x0+1][k] * tx;
+                        const float val = top * (1 - ty) + bot * ty + 0.5f;
+                        out[k] = (uint8_t)(val > 255.0f ? 255.0f : (val < 0.0f ? 0.0f : val));
                     }
                     v.color.r = out[0]; v.color.g = out[1]; v.color.b = out[2]; v.color.a = out[3];
                 }
@@ -755,9 +885,18 @@ namespace RT64 {
             const uint32_t w0 = (*dl)->w0, w1 = (*dl)->w1;
             const uint32_t addr = state->rsp->fromSegmentedMasked(w1);
             if (addr + 64 > RDRAMSize) return;
+            // Ucode (IMEM 0x1484): byte1 bit0 selects projection (DMEM 0x590) vs modelview (0x5D0).
+            // ROGUESQ_F5_PROJ_SHAPE=1 restores the old matrix-shape guess, which read segmented
+            // addresses unresolved and misrouted the main menu's segment-4 modelviews as projections.
+            static const bool s_shape = env_on("ROGUESQ_F5_PROJ_SHAPE", false);
             const uint8_t* ram = state->RDRAM;
-            const int m33 = rd_be_s16(ram, w1 + 2 * 15), m23 = rd_be_s16(ram, w1 + 2 * 11);
-            const bool proj = (((w0 >> 16) & 0xFF) == 0x03) || (m33 == 0 && m23 != 0);
+            bool proj = ((w0 >> 16) & 1u) != 0;
+            if (s_shape) {
+                const int m33 = rd_be_s16(ram, w1 + 2 * 15), m23 = rd_be_s16(ram, w1 + 2 * 11);
+                const bool shape = (((w0 >> 16) & 0xFF) == 0x03) || (m33 == 0 && m23 != 0);
+                if (shape != proj) ++g_f5_heur[1];
+                proj = shape;
+            }
             if (!f5_native_active()) return;
             f5_ensure_viewport(state);
 
@@ -765,9 +904,9 @@ namespace RT64 {
             {
                 const float thr2 = f5_cull_dist2();
                 if (thr2 > 0.0f && !proj) {
-                    const float tx = (float)rd_be_s16(ram, w1 + 2 * 12) + (float)rd_be_u16(ram, w1 + 32 + 2 * 12) / 65536.0f;
-                    const float ty = (float)rd_be_s16(ram, w1 + 2 * 13) + (float)rd_be_u16(ram, w1 + 32 + 2 * 13) / 65536.0f;
-                    const float tz = (float)rd_be_s16(ram, w1 + 2 * 14) + (float)rd_be_u16(ram, w1 + 32 + 2 * 14) / 65536.0f;
+                    const float tx = (float)rd_be_s16(ram, addr + 2 * 12) + (float)rd_be_u16(ram, addr + 32 + 2 * 12) / 65536.0f;
+                    const float ty = (float)rd_be_s16(ram, addr + 2 * 13) + (float)rd_be_u16(ram, addr + 32 + 2 * 13) / 65536.0f;
+                    const float tz = (float)rd_be_s16(ram, addr + 2 * 14) + (float)rd_be_u16(ram, addr + 32 + 2 * 14) / 65536.0f;
                     s_cull_skip = (tx * tx + ty * ty + tz * tz) > thr2;
                     { static bool s_lg = env_on("ROGUESQ_F5_CULL_LOG", false); static int s_n = 0;
                       if (s_lg && (++s_n & 31) == 0) { std::fprintf(stderr, "[f5-cull] dist=%.0f thr=%.0f skip=%d\n",
@@ -880,7 +1019,7 @@ namespace RT64 {
                 if (++s_m <= 16) {
                     float M[16];
                     for (int i = 0; i < 16; ++i)
-                        M[i] = (float)rd_be_s16(ram, w1 + 2 * i) + (float)rd_be_u16(ram, w1 + 32 + 2 * i) / 65536.0f;
+                        M[i] = (float)rd_be_s16(ram, addr + 2 * i) + (float)rd_be_u16(ram, addr + 32 + 2 * i) / 65536.0f;
                     std::fprintf(stderr,
                         "[face-mtx #%d] %s addr=%06X r0[% .3f % .3f % .3f] r1[% .3f % .3f % .3f] r2[% .3f % .3f % .3f] tr[% .1f % .1f % .1f]\n",
                         s_m, proj ? "PROJ" : "MDLV", w1 & 0x00FFFFFFu,
@@ -937,21 +1076,42 @@ namespace RT64 {
         // record color + bound texture, GPU-projected. Gated ROGUESQ_F5_SPRITES (off until validated).
         void op_bd_sprite(State* state, DisplayList** dl) {
             static bool s_on = env_on("ROGUESQ_F5_SPRITES", true);   // F5 billboard sprites (fire/smoke/explosion); ROGUESQ_F5_SPRITES=0 disables
+            static const bool s_bd16 = env_on("ROGUESQ_F5_BD16", false);
             const uint32_t w0 = (*dl)->w0, w1 = (*dl)->w1;
             if (s_on && f5_native_active()) {
                 const uint32_t slot = ((w0 >> 5) & 0x7F8u) / 0x28u;
                 if (slot < s_cache_count && slot < F5_FACE_SLOT) {
                     const RSP::Vertex* cache = reinterpret_cast<const RSP::Vertex*>(state->fromRDRAM(F5_VTX_SCRATCH));
                     const RSP::Vertex c = cache[slot];
-                    int16_t half = (int16_t)((*dl)[1].w1 & 0xFFFFu);   // rec[1] = (S,S) half-size
-                    if (half <= 0 || half > 4000) half = 40;
-                    // UV spans the actual bound tile (lrs/lrt are 10.2 fixed -> +1 texel), S10.5 into the vertex.
-                    const LoadTile& T = state->rdp->tiles[0];
-                    const int16_t tw = (int16_t)(((T.lrs - T.uls) >> 2) + 1) << 5;
-                    const int16_t th = (int16_t)(((T.lrt - T.ult) >> 2) + 1) << 5;
+                    // 24-byte record (overlay 0x2C): w2 = fog color, w3 = half-extent (x hi, y lo),
+                    // w4 = texture extent (S hi, T lo, 10.5). w0 bit0 swaps the axes (texrect-flip),
+                    // bit1 / bit2 reverse S / T. The ucode's texrect starts S/T 0x10 (half a texel) early.
+                    // ROGUESQ_F5_BD16=1 restores the old reading (16-byte walk, single half-size from
+                    // w3 lo, UVs spanning tile 0, flags ignored) for A/B.
+                    const uint32_t w3 = (*dl)[1].w1, w4 = (*dl)[2].w0;
+                    const bool swap = !s_bd16 && (w0 & 1u) != 0;
+                    int16_t halfX = (int16_t)(s_bd16 ? (w3 & 0xFFFFu) : (w3 >> 16)), halfY = (int16_t)(w3 & 0xFFFFu);
+                    if (swap) std::swap(halfX, halfY);
+                    if (halfX <= 0 || halfX > 4000) halfX = 40;
+                    if (halfY <= 0 || halfY > 4000) halfY = 40;
+                    float texS = (float)(int16_t)(w4 >> 16), texT = (float)(int16_t)(w4 & 0xFFFFu), uvOff = 16.0f;
+                    if (s_bd16) {
+                        const LoadTile& T = state->rdp->tiles[0];
+                        texS = (float)((((T.lrs - T.uls) >> 2) + 1) << 5);
+                        texT = (float)((((T.lrt - T.ult) >> 2) + 1) << 5);
+                        uvOff = 0.0f;
+                    }
                     RSP::Vertex* tmp = reinterpret_cast<RSP::Vertex*>(state->fromRDRAM(F5_VTX_SCRATCH + F5_FACE_SLOT * sizeof(RSP::Vertex)));
-                    const int16_t us[4] = { 0, tw, 0, tw }, vt[4] = { 0, 0, th, th };
+                    int16_t us[4], vt[4];
                     const float sgx[4] = { -1, 1, -1, 1 }, sgy[4] = { -1, -1, 1, 1 };
+                    for (int k = 0; k < 4; ++k) {
+                        const float ax = (sgx[k] + 1.0f) * 0.5f, ay = (sgy[k] + 1.0f) * 0.5f;
+                        float sf = swap ? ay : ax, tf = swap ? ax : ay;
+                        if (!s_bd16 && (w0 & 2u)) sf = 1.0f - sf;
+                        if (!s_bd16 && (w0 & 4u)) tf = 1.0f - tf;
+                        us[k] = (int16_t)(sf * texS - uvOff);
+                        vt[k] = (int16_t)(tf * texT - uvOff);
+                    }
                     // Camera-facing billboard. F5's view matrix is identity (camera is baked into the MVP),
                     // so derive the world directions that project to pure screen X/Y from the MVP rows:
                     //   screenRight_world = cross(clipY_coeffs, clipW_coeffs)
@@ -969,7 +1129,7 @@ namespace RT64 {
                     const bool haveView = (rx*rx + ry*ry + rz*rz) > 0.01f && (ux*ux + uy*uy + uz*uz) > 0.01f;
                     for (int k = 0; k < 4; ++k) {
                         tmp[k] = c;
-                        const float dx = sgx[k] * (float)half, dy = sgy[k] * (float)half;
+                        const float dx = sgx[k] * (float)halfX, dy = sgy[k] * (float)halfY;
                         if (haveView) {
                             tmp[k].x = (int16_t)(c.x + dx * rx + dy * ux);
                             tmp[k].y = (int16_t)(c.y + dx * ry + dy * uy);
@@ -1009,6 +1169,15 @@ namespace RT64 {
                     uint32_t& gm = state->rsp->geometryModeStack[state->rsp->geometryModeStackSize - 1];
                     const uint32_t savedGM = gm;
                     gm &= ~(uint32_t)G_LIGHTING;
+                    // Pooled particles have no stable identity, so frame interpolation pairs unrelated ones (flicker); draw them on their own non-interpolated transform.
+                    static const bool s_sprite_interp = env_on("ROGUESQ_F5_SPRITE_INTERP", false);
+                    if (!s_sprite_interp) {
+                        state->rsp->matrixId(G_EX_ID_IGNORE, /*push*/true, /*proj*/false, /*decompose*/false,
+                            G_EX_COMPONENT_SKIP, G_EX_COMPONENT_SKIP, G_EX_COMPONENT_SKIP, G_EX_COMPONENT_SKIP, G_EX_COMPONENT_SKIP,
+                            G_EX_COMPONENT_SKIP, G_EX_COMPONENT_SKIP, G_EX_COMPONENT_SKIP, G_EX_COMPONENT_SKIP,
+                            G_EX_ORDER_LINEAR, G_EX_ASPECT_AUTO, G_EX_EDIT_NONE, /*idIsAddress*/false, /*editGroup*/false);
+                        state->rsp->modelViewProjChanged = true;
+                    }
                     state->rsp->setVertex(0x80000000u | (F5_VTX_SCRATCH + F5_FACE_SLOT * sizeof(RSP::Vertex)), 4, F5_FACE_SLOT);
                     // primDepth must equal the depth a normally-projected vertex gets here. RasterVS never
                     // applies an MVP: it rebuilds clip space from the CPU's posScreen (z_clip = posScreen.z*w),
@@ -1028,6 +1197,10 @@ namespace RT64 {
                     }
                     state->rsp->drawIndexedTri(F5_FACE_SLOT, F5_FACE_SLOT + 3, F5_FACE_SLOT + 2);
                     state->rsp->drawIndexedTri(F5_FACE_SLOT, F5_FACE_SLOT + 1, F5_FACE_SLOT + 3);
+                    if (!s_sprite_interp) {
+                        state->rsp->popMatrixId(1, false);
+                        state->rsp->modelViewProjChanged = true;
+                    }
                     gm = savedGM;
                     if (!s_norestore) {
                         state->rdp->setOtherMode(savedOMH, savedOML);
@@ -1037,7 +1210,8 @@ namespace RT64 {
                     s_task_faces += 2;
                 }
             }
-            (*dl)++;  // 16-byte command: skip the extra 8 bytes like op_consume16
+            // 24-byte record: the ucode dispatcher consumes w0/w1 and overlay 0x2C another 0x10.
+            (*dl) += s_bd16 ? 1 : 2;
         }
 
         // raw UV * 16.16 scale -> S10.5, as the ucode's vmudn/vmadh pair (result clamped to int16).
@@ -1202,6 +1376,7 @@ namespace RT64 {
             const uint32_t w0 = (*dl)->w0, w1 = (*dl)->w1;
             static bool s_guard = !env_on("ROGUESQ_F5_NOFILLERGUARD", false);
             if (s_guard && (f5_is_byte_ramp(w0) || f5_is_byte_ramp(w1))) {
+                ++g_f5_heur[2];
                 *dl = state->popReturnAddress();
                 return;
             }
@@ -1281,7 +1456,7 @@ namespace RT64 {
             // same handlers as 0xBF..0xB5 (0x0C = G_TEXTURE follows every 0x05 sprite record).
             gbi->map[0x08] = &op_bf_tri;
             gbi->map[0x09] = &op_consume16;      // BE
-            gbi->map[0x0A] = &op_consume16;      // BD
+            gbi->map[0x0A] = +[](State* s, DisplayList** dl) { ++g_f5_heur[0]; op_consume16(s, dl); };   // BD
             // Moveword 8 / 0x0A write the fog M / O words (see f5_apply_fog). F3D reads 0x0A as a light
             // color, so both are intercepted. ROGUESQ_F5_NOFOG=1 leaves fog untouched.
             { static GBIFunction s_mw = gbi->map[0xBC];

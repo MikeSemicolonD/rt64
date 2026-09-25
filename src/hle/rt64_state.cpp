@@ -229,24 +229,41 @@ namespace RT64 {
             drawCall.scissorRightOrigin = rdp->extended.scissorRightOriginStack[rdp->scissorStackSize - 1];
         }
 
-        // F5 skybox dome: force it behind everything. The dome is the only cull=BOTH geometry and
-        // (RenderDoc-confirmed) renders at ndc.z ~0.985 -- NEARER than far world geometry (~0.996) -- so it
-        // occludes the far cut AND bleeds sky colour over distant structures. A skybox must sit at the far
-        // plane. Pin it to max depth via the existing fixed-depth path (zSource=PRIM + primDepth~1 makes
-        // RasterVS output ndc.z~1) so all real geometry wins the depth test, and drop its depth-write so it
-        // never occludes anything. ROGUESQ_F5_SKY_NO_ZWRITE=0 disables for A/B.
+        // F5 skybox dome. The game pins it itself (zSource=PRIM, Z_UPD, primDepth 0x7FBF); this only raises
+        // primDepth to 0.99999 so distant terrain between the two values (where RT64's fog, applied in the
+        // wrong depth domain, is still partial) is not hidden behind the sky. Z_UPD must stay on: the dome
+        // refreshes the sky region's depth every frame, or the ship fails against stale depth there.
+        // ROGUESQ_F5_SKY_NO_ZWRITE=0 disables for A/B.
         {
             static int s_skyFix = -1;
             if (s_skyFix < 0) { const char *e = std::getenv("ROGUESQ_F5_SKY_NO_ZWRITE"); s_skyFix = (e && e[0] == '0') ? 0 : 1; }
-            if (s_skyFix && rsp->cullBothMask != 0 && (drawCall.geometryMode & rsp->cullBothMask) == rsp->cullBothMask) {
-                // Keep Z_UPD ON: the dome must WRITE its far-plane depth every frame. It is the sky
-                // region's per-frame z refresh -- with the write off, sky pixels keep stale depth, and the
-                // player ship (drawn at ~the same screen spot each frame) fails LESS against its own
-                // previous-frame depth and vanishes against the sky while still showing over terrain
-                // (which rewrites fresh depth). At 0.99999 the dome is behind everything, so writing
-                // never occludes.
+            // Only the game's own sky pin qualifies: it draws the dome with zSource=PRIM, Z_UPD and
+            // primDepth 0x7FBF itself. Attribution/menu geometry is also cull=BOTH but carries no depth
+            // (zSource=PIXEL, no Z_UPD/Z_CMP) and is left alone. ROGUESQ_F5_SKY_PIN_ALL=1 pins every
+            // cull=BOTH draw as before.
+            static const bool s_pinAll = [](){ const char *e = std::getenv("ROGUESQ_F5_SKY_PIN_ALL"); return e && e[0] == '1'; }();
+            const bool gameSkyPin = s_pinAll || (rdp->otherMode.L & G_ZS_PRIM) != 0;
+            if (s_skyFix && gameSkyPin && rsp->cullBothMask != 0 && (drawCall.geometryMode & rsp->cullBothMask) == rsp->cullBothMask) {
                 drawCall.otherMode.L |= (uint32_t)(G_ZS_PRIM | Z_UPD);
                 drawCall.rdpParams.primDepth = { 0.99999f, 0.0f };   // just under the 1.0 clear; remap T (0.995) stays well below
+            }
+        }
+
+        {
+            static const bool s_logZ = [](){ const char *e = std::getenv("ROGUESQ_LOG_ZPRIM"); return e && e[0] == '1'; }();
+            if (s_logZ && (rdp->otherMode.L & G_ZS_PRIM)) {
+                static rt64diag::BoundedMap<uint64_t, uint32_t> s_seen;
+                const uint32_t L = rdp->otherMode.L;
+                const uint32_t cull = (rsp->cullBothMask != 0) ? (drawCall.geometryMode & rsp->cullBothMask) : 0;
+                const uint32_t pd = (uint32_t)(rdp->primDepthStack[rdp->primDepthStackSize - 1].x * 32768.0f);
+                const uint64_t key = ((uint64_t)L << 32) ^ ((uint64_t)cull << 16) ^ pd;
+                uint32_t &n = s_seen[key];
+                ++n;
+                if (n == 1 || n == 1000 || n == 100000) {
+                    fprintf(stderr, "[zprim] L=%08X H=%08X zcmp=%d zupd=%d zmode=%u cull=%X pd=%04X->%.5f out=%.5f geo=%08X n=%u\n",
+                        L, rdp->otherMode.H, (L & 0x10) ? 1 : 0, (L & 0x20) ? 1 : 0, (L >> 10) & 3, cull, pd,
+                        pd / 32768.0f, drawCall.rdpParams.primDepth.x, drawCall.geometryMode, n);
+                }
             }
         }
 
@@ -1711,8 +1728,13 @@ namespace RT64 {
             workload.viOriginalRate = viHistory.logicalRateFromFactors();
         }
 
+        // VIs since the previous workload: the game's real duration for this frame (its logic is VI-clocked).
+        workload.viFrameTicks = uint32_t(std::min<uint64_t>(viTickCounter - lastWorkloadViTick, 0xFF));
+        lastWorkloadViTick = viTickCounter;
+
         if (viHistory.top().vi.visible()) {
             workload.viFbSize = viHistory.top().vi.fbSize();
+            workload.viPixelAspect = viHistory.top().vi.pixelAspect();
         }
 
         // Log and reset profilers.
@@ -1984,6 +2006,10 @@ namespace RT64 {
     }
     
     void State::updateScreen(const VI &newVI, bool fromEarlyPresent) {
+        if (!fromEarlyPresent) {
+            viTickCounter++;
+        }
+
         // If the debugger has paused the plugin, keep submitting the last workload and screen VI for rendering and a present event.
         if (debuggerInspector.paused && !fromEarlyPresent) {
             if (ext.userConfig->developerMode) {
@@ -2063,6 +2089,21 @@ namespace RT64 {
                 viChangedProfiler.logAndRestart();
                 viHistory.pushVI(newVI, screenFbSize.x);
                 viHistory.pushFactor(lastScreenFactorCounter + 1);
+                {
+                    static const bool s_lf = [](){ const char *e = std::getenv("ROGUESQ_LOG_VI_FACTORS"); return e && e[0] && e[0] != '0'; }();
+                    static uint32_t s_hist[6] = {}, s_n = 0;
+                    static char s_seq[128]; static uint32_t s_seqLen = 0;
+                    if (s_lf) {
+                        const uint32_t f = lastScreenFactorCounter + 1;
+                        s_hist[f < 5 ? f : 5]++;
+                        if (s_seqLen + 1 < sizeof(s_seq)) s_seq[s_seqLen++] = char(f < 10 ? '0' + f : '+');
+                        if (++s_n % 120 == 0) {
+                            s_seq[s_seqLen] = 0;
+                            fprintf(stderr, "[vifactor] n=%u 1:%u 2:%u 3:%u 4:%u 5+:%u rate=%u seq=%s\n", s_n, s_hist[1], s_hist[2], s_hist[3], s_hist[4], s_hist[5], viHistory.logicalRateFromFactors(), s_seq);
+                            s_seqLen = 0;
+                        }
+                    }
+                }
                 lastScreenFactorCounter = 0;
             }
             else if (viVisible) {

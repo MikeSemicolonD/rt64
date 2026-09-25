@@ -92,7 +92,9 @@ namespace RT64 {
                 }
 
                 if (!intersectionRect.isEmpty()) {
-                    bool coversWholeWidth = (intersectionRect.ulx <= fbPair.scissorRect.ulx) && (intersectionRect.lrx >= fbPair.scissorRect.lrx);
+                    // One native pixel of slack; must match coversFbWidth in the framebuffer renderer.
+                    const int32_t Slack = 4;
+                    bool coversWholeWidth = (intersectionRect.ulx <= fbPair.scissorRect.ulx + Slack) && (intersectionRect.lrx + Slack >= fbPair.scissorRect.lrx);
                     bool horizontalRatio = (intersectionRect.width(true, true) > intersectionRect.height(true, true));
                     adjustAspectRatio = (viewportOrigin == G_EX_ORIGIN_NONE) && coversWholeWidth && horizontalRatio;
                 }

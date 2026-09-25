@@ -3,6 +3,7 @@
 //
 
 #include <algorithm>
+#include <cmath>
 #include <cassert>
 #include <cstdlib>
 #include <cstring>
@@ -124,6 +125,30 @@ namespace RT64 {
         } else {
             return hlslpp::uint2(0, 0);
         }
+    }
+
+    // Horizontal pixel aspect as displayed: the VI active region on a 640x480 raster vs the framebuffer size (~1.25 for a 512-wide buffer, 320x240 snaps to 1).
+    // ROGUESQ_VI_PIXEL_ASPECT=0 restores square pixels.
+    float VI::pixelAspect() const {
+        static const bool s_enabled = []() {
+            const char *v = std::getenv("ROGUESQ_VI_PIXEL_ASPECT");
+            return !(v && v[0] == '0');
+        }();
+
+        const hlslpp::uint2 size = fbSize();
+        const int hSpan = int(hRegion.hEnd) - int(hRegion.hStart);
+        const int vSpan = int(vRegion.vEnd) - int(vRegion.vStart);
+        if (!s_enabled || (size.x == 0) || (size.y == 0) || (hSpan <= 0) || (vSpan <= 0)) {
+            return 1.0f;
+        }
+
+        const float displayAspect = (4.0f / 3.0f) * (float(hSpan) / 640.0f) / (float(vSpan) / 480.0f);
+        const float par = displayAspect / (float(size.x) / float(size.y));
+        if ((par < 0.5f) || (par > 2.0f) || (std::abs(par - 1.0f) < 0.05f)) {
+            return 1.0f;
+        }
+
+        return par;
     }
 
     float VI::xScaleFloat() const {

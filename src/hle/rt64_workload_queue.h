@@ -52,6 +52,7 @@ namespace RT64 {
             uint32_t downsampleMultiplier = 1;
             bool raytracingEnabled = false;
             float aspectRatioSource = 1.0f;
+            float pixelAspect = 1.0f;
             float aspectRatioTarget = 1.0f;
             float aspectRatioScale = 1.0f;
             float extAspectPercentage = 1.0f;
@@ -111,7 +112,7 @@ namespace RT64 {
         void waitForWorkloadId(uint64_t waitId);
         void setup(const External &ext);
         void updateMultisampling();
-        void threadConfigurationUpdate(hlslpp::uint2 viFbSize, WorkloadConfiguration &workloadConfig);
+        void threadConfigurationUpdate(hlslpp::uint2 viFbSize, float viPixelAspect, WorkloadConfiguration &workloadConfig);
         void threadConfigurationValidate();
         void threadRenderFrame(GameFrame &curFrame, const GameFrame &prevFrame, const WorkloadConfiguration &workloadConfig,
             const DebuggerRenderer &debuggerRenderer, const DebuggerCamera &debuggerCamera, float curFrameWeight, float prevFrameWeight,

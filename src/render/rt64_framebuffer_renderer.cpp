@@ -193,7 +193,7 @@ namespace RT64 {
         // sets each), which is the real CBV view-heap leak driver.
         {
             static int s_fc = -1;
-            if (s_fc < 0) { const char *e = std::getenv("ROGUESQ_DESC_DIAG"); s_fc = (e && e[0] && e[0] != '0') ? 0 : -2; }
+            if (s_fc == -1) { const char *e = std::getenv("ROGUESQ_DESC_DIAG"); s_fc = (e && e[0] && e[0] != '0') ? 0 : -2; }
             if (s_fc >= 0) { static uint32_t s_max = 0; if (framebufferCount > s_max) { s_max = framebufferCount; fprintf(stderr, "[fbpair] frame fbPairCount=%u (new max) vecSize=%zu\n", framebufferCount, framebufferVector.size()); fflush(stderr); } }
         }
         framebufferCount = 0;
@@ -350,7 +350,7 @@ namespace RT64 {
             const uint32_t fixedCap = (textureCacheSize + 1) > (uint32_t)FramebufferRendererDescriptorTextureSet::UpperRange
                 ? legacyCap : (uint32_t)FramebufferRendererDescriptorTextureSet::UpperRange;
             static int s_dd = -1;
-            if (s_dd < 0) { const char *e = std::getenv("ROGUESQ_DESC_DIAG"); s_dd = (e && e[0] && e[0] != '0') ? 0 : -2; }
+            if (s_dd == -1) { const char *e = std::getenv("ROGUESQ_DESC_DIAG"); s_dd = (e && e[0] && e[0] != '0') ? 0 : -2; }
             if (s_dd >= 0 && s_dd < 200) { ++s_dd; fprintf(stderr, "[desc-texset] rebuild textureCacheSize=%u cap=%u\n", textureCacheSize, s_fixed_cap ? fixedCap : legacyCap); fflush(stderr); }
             descTextureSet = std::make_unique<FramebufferRendererDescriptorTextureSet>(worker->device, s_fixed_cap ? fixedCap : legacyCap);
         }
@@ -1701,9 +1701,14 @@ namespace RT64 {
         targetDrawCall.sceneIndices.clear();
 
         const float SimilarityPercentage = 0.1f; // TODO: Make more strict once VI ratios are in.
-        const float scissorRatio = static_cast<float>(fbPair.scissorRect.width(false, true)) / static_cast<float>(fbPair.scissorRect.height(false, true));
+        const float scissorRatio = p.pixelAspect * static_cast<float>(fbPair.scissorRect.width(false, true)) / static_cast<float>(fbPair.scissorRect.height(false, true));
         const bool adjustRatio = (abs((scissorRatio / p.aspectRatioSource) - 1.0f) < SimilarityPercentage);
         const float aspectRatioScale = adjustRatio ? (p.aspectRatioTarget / p.aspectRatioSource) : 1.0f;
+        // Full-width test for widescreen expansion, with one native pixel of slack (the game scissors 3D to 0..W-1 but clears 0..W).
+        const auto coversFbWidth = [&](int32_t ulx, int32_t lrx) {
+            const int32_t Slack = 4;
+            return (ulx <= fbPair.scissorRect.ulx + Slack) && (lrx + Slack >= fbPair.scissorRect.lrx);
+        };
         InstanceDrawCall instanceDrawCall;
         interop::RenderIndices renderIndices;
 
@@ -1729,6 +1734,35 @@ namespace RT64 {
         uint32_t vertexTestZFaceIndicesStart = 0;
         int32_t vertexTestZCallIndex = -1;
         RenderViewport viewportClip;
+
+        // Widescreen: clear the strips outside the original aspect to black on the first pass into this color image, so 2D screens that never clear get bars instead of the previous screen.
+        bool firstPassForColorImage = true;
+        for (uint32_t f = 0; f < p.fbPairIndex; f++) {
+            if (p.curWorkload->fbPairs[f].colorImage.address == fbPair.colorImage.address) {
+                firstPassForColorImage = false;
+                break;
+            }
+        }
+
+        if ((aspectRatioScale > 1.0f) && firstPassForColorImage && (p.fbStorage->colorTarget != nullptr) && !fbPair.scissorRect.isNull()) {
+            const RenderRect full = convertFixedRect(fbPair.scissorRect, p.resolutionScale, p.fbWidth, 1.0f, extOriginPercentage, 0, G_EX_ORIGIN_NONE, G_EX_ORIGIN_NONE);
+            const RenderRect inner = convertFixedRect(fbPair.scissorRect, p.resolutionScale, p.fbWidth, 1.0f / aspectRatioScale, extOriginPercentage, 0, G_EX_ORIGIN_NONE, G_EX_ORIGIN_NONE);
+            const RenderRect strips[2] = { RenderRect(full.left, full.top, inner.left, full.bottom), RenderRect(inner.right, full.top, full.right, full.bottom) };
+            for (const RenderRect &strip : strips) {
+                if (strip.right <= strip.left) {
+                    continue;
+                }
+
+                InstanceDrawCall stripClear;
+                stripClear.type = InstanceDrawCall::Type::FillRect;
+                stripClear.clearRect.rect = strip;
+                stripClear.clearRect.color = RenderColor(0.0f, 0.0f, 0.0f, 1.0f);
+                renderIndicesVector.push_back(interop::RenderIndices{});
+                rasterScene.instanceIndices.push_back(static_cast<uint32_t>(instanceDrawCallVector.size()));
+                instanceDrawCallVector.push_back(stripClear);
+            }
+        }
+
         for (uint32_t pr = 0; (pr < fbPair.projectionCount) && (globalCallIndex < p.maxGameCall); pr++) {
             const Projection &proj = fbPair.projections[pr];
             if (proj.scissorRect.isNull()) {
@@ -1767,7 +1801,7 @@ namespace RT64 {
                 // The call's scissor spans the whole width of the framebuffer pair scissor. Custom origin must not be in use to be able to use the stretched viewport.
                 const auto &viewport = drawData.rspViewports[proj.transformsIndex];
                 FixedRect intersectionRect = proj.scissorRect.intersection(viewport.rect(viewportClipRatios));
-                bool coversWholeWidth = !intersectionRect.isEmpty() && (intersectionRect.ulx <= fbPair.scissorRect.ulx) && (intersectionRect.lrx >= fbPair.scissorRect.lrx);
+                bool coversWholeWidth = !intersectionRect.isEmpty() && coversFbWidth(intersectionRect.ulx, intersectionRect.lrx);
                 bool horizontalRatio = !intersectionRect.isEmpty() && (intersectionRect.width(true, true) > intersectionRect.height(true, true));
                 bool useWideViewport = (viewportOrigin == G_EX_ORIGIN_NONE) && coversWholeWidth && horizontalRatio;
                 if (useWideViewport) {
@@ -1818,7 +1852,7 @@ namespace RT64 {
                     int32_t horizontalMisalignment = 0;
 
                     // A rect that spans the whole width of the scissor.
-                    if ((call.callDesc.rect.ulx <= fbPair.scissorRect.ulx) && (call.callDesc.rect.lrx >= fbPair.scissorRect.lrx)) {
+                    if (coversFbWidth(call.callDesc.rect.ulx, call.callDesc.rect.lrx)) {
                         invRatioScale = 1.0f;
                     }
                     // A regular rectangle that should correct its misalignment.
@@ -1827,6 +1861,18 @@ namespace RT64 {
                     }
 
                     clearRect.rect = convertFixedRect(call.callDesc.rect, p.resolutionScale, p.fbWidth, invRatioScale, extOriginPercentage, horizontalMisalignment, call.callDesc.rectLeftOrigin, call.callDesc.rectRightOrigin);
+
+                    // A partial fill touching a scissor edge extends to the widened edge on that side (the game masks the horizon ring with half-width fills).
+                    if (invRatioScale != 1.0f) {
+                        const RenderRect full = convertFixedRect(fbPair.scissorRect, p.resolutionScale, p.fbWidth, 1.0f, extOriginPercentage, 0, G_EX_ORIGIN_NONE, G_EX_ORIGIN_NONE);
+                        if (call.callDesc.rect.ulx <= fbPair.scissorRect.ulx + 4) {
+                            clearRect.rect.left = full.left;
+                        }
+
+                        if (call.callDesc.rect.lrx + 4 >= fbPair.scissorRect.lrx) {
+                            clearRect.rect.right = full.right;
+                        }
+                    }
                 }
                 else if (call.callDesc.extendedType != DrawExtendedType::None) {
                     switch (call.callDesc.extendedType) {
@@ -1923,7 +1969,7 @@ namespace RT64 {
 
                             // The call's scissor spans the whole width of the framebuffer pair scissor. The rect must not be using extended origins.
                             const bool regularOrigins = (call.callDesc.rectLeftOrigin == G_EX_ORIGIN_NONE) && (call.callDesc.rectRightOrigin == G_EX_ORIGIN_NONE);
-                            const bool coversScissorWidth = regularOrigins && (call.callDesc.rect.ulx <= fbPair.scissorRect.ulx) && (call.callDesc.rect.lrx >= fbPair.scissorRect.lrx);
+                            const bool coversScissorWidth = regularOrigins && coversFbWidth(call.callDesc.rect.ulx, call.callDesc.rect.lrx);
                             if (tileCopiesUsed || coversScissorWidth) {
                                 invRatioScale = 1.0f;
                             }
@@ -2009,7 +2055,7 @@ namespace RT64 {
                     if (rtScene.instanceIndices.empty()) {
                         float projRatioScale = 1.0f / aspectRatioScale;
                         float invRatioScale = 1.0f / aspectRatioScale;
-                        const bool coversScissorWidth = (proj.scissorRect.ulx <= fbPair.scissorRect.ulx) && (proj.scissorRect.lrx >= fbPair.scissorRect.lrx);
+                        const bool coversScissorWidth = coversFbWidth(proj.scissorRect.ulx, proj.scissorRect.lrx);
                         if (coversScissorWidth) {
                             invRatioScale = 1.0f;
                         }

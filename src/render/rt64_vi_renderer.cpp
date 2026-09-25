@@ -138,7 +138,11 @@ namespace RT64 {
         // the region of interest is rendered. A scissor will cut it off correctly according to the coordinates
         // specified by the VI.
         const hlslpp::float2 sdSize = removeBlackBorders ? hlslpp::float2(vi.fbSize()) : hlslpp::float2(320.0f, 240.0f);
-        const hlslpp::float2 hdSize = computeHDSize(sdSize, resolutionScale, downsamplingScale);
+        hlslpp::float2 hdSize = computeHDSize(sdSize, resolutionScale, downsamplingScale);
+        if (removeBlackBorders) {
+            hdSize.x *= vi.pixelAspect();
+        }
+
         const hlslpp::float2 windowSize = { float(swapChain->getWidth()), float(swapChain->getHeight()) };
 
         // Query the VI for the current rendering area.

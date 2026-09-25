@@ -100,6 +100,8 @@ namespace RT64 {
         VI lastScreenVI;
         uint64_t lastScreenHash;
         uint32_t lastScreenFactorCounter;
+        uint64_t viTickCounter = 0;
+        uint64_t lastWorkloadViTick = 0;
         VIHistory viHistory;
         PresetDrawCallLibrary drawCallLibrary;
         PresetLightsLibrary lightsLibrary;

@@ -6,9 +6,11 @@
 
 #include <cassert>
 #include <cstdio>
+#include <cstring>
 #include <cstdlib>
 #include <cstdint>
 #include <chrono>
+#include <atomic>
 
 //#define DUMP_DISPLAY_LISTS
 
@@ -260,6 +262,24 @@ namespace RT64 {
         if (walkProf) {
             const uint64_t total_us = (uint64_t)std::chrono::duration_cast<std::chrono::microseconds>(
                 std::chrono::high_resolution_clock::now() - prof_t0).count();
+            // Every 300 walks: cumulative per-opcode share, for comparing configurations.
+            {
+                static uint64_t s_us[256] = {}, s_n[256] = {}, s_total = 0, s_walks = 0;
+                for (int o = 0; o < 256; ++o) { s_us[o] += prof_us[o]; s_n[o] += prof_n[o]; }
+                s_total += total_us;
+                if (++s_walks % 300 == 0) {
+                    char buf[512]; int off = snprintf(buf, sizeof buf, "[walksum] walks=%llu avg=%.2fms top:", (unsigned long long)s_walks, s_total / 1000.0 / s_walks);
+                    uint64_t tmp[256]; std::memcpy(tmp, s_us, sizeof tmp);
+                    for (int k = 0; k < 5; ++k) {
+                        int best = -1; uint64_t bestv = 0;
+                        for (int o = 0; o < 256; ++o) if (tmp[o] > bestv) { bestv = tmp[o]; best = o; }
+                        if (best < 0) break;
+                        off += snprintf(buf + off, sizeof buf - off, " 0x%02X=%.2fms/n%.0f", best, bestv / 1000.0 / s_walks, double(s_n[best]) / s_walks);
+                        tmp[best] = 0;
+                    }
+                    fprintf(stderr, "%s\n", buf); fflush(stderr);
+                }
+            }
             if (total_us > 20000) {
                 char buf[512]; int off = snprintf(buf, sizeof buf,
                     "[walkprof] %.1fms cmds=%llu top:", total_us / 1000.0, (unsigned long long)prof_cmds);

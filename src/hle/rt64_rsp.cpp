@@ -1210,19 +1210,24 @@ namespace RT64 {
             // State::loadDrawState. Its back hemisphere (101 of 149 tris sit behind the camera) would then
             // draw its near-plane cap at the far plane. The front hemisphere alone covers the whole view,
             // so drop any dome tri that touches the near plane, matching the RSP's hardware near-clip.
-            const bool isDomeTri = cullBothMask != 0 && (geometryMode & cullBothMask) == cullBothMask;
-            if (anyNear && isDomeTri) return;
+            // Only the game-pinned sky (zSource=PRIM) is flattened; other cull=BOTH geometry keeps real depth.
+            static const bool s_pinAll = [](){ const char *e = std::getenv("ROGUESQ_F5_SKY_PIN_ALL"); return e && e[0] == '1'; }();
+            const bool isDomeTri = cullBothMask != 0 && (geometryMode & cullBothMask) == cullBothMask &&
+                                   (s_pinAll || (state->rdp->otherMode.L & G_ZS_PRIM) != 0);
+            // ROGUESQ_F5_DOME_NEAR_DROP=0 near-clips these tris instead of dropping them.
+            static const bool s_domeNearDrop = [](){ const char *e = std::getenv("ROGUESQ_F5_DOME_NEAR_DROP"); return !(e && e[0] == '0'); }();
+            if (anyNear && isDomeTri && s_domeNearDrop) return;
 
             if (extreme) {
-                // Signed distance to each clip plane (inside when >= 0) for a clip-space pos p.
-                auto planeDist = [kNearW](const hlslpp::float4 &p, int plane) -> float {
+                // Signed distance to near and the guard-band lateral planes; clipping at |x| = w cut the sky at the 4:3 edge once widescreen widens the view.
+                auto planeDist = [kNearW, kGuard](const hlslpp::float4 &p, int plane) -> float {
                     const float x = p.x, y = p.y, w = p.w;
                     switch (plane) {
-                        case 0:  return w - kNearW; // near   w >= kNearW
-                        case 1:  return w + x;      // left   x >= -w
-                        case 2:  return w - x;      // right  x <=  w
-                        case 3:  return w + y;      // bottom y >= -w
-                        default: return w - y;      // top    y <=  w
+                        case 0:  return w - kNearW;
+                        case 1:  return kGuard * w + x;
+                        case 2:  return kGuard * w - x;
+                        case 3:  return kGuard * w + y;
+                        default: return kGuard * w - y;
                     }
                 };
                 uint32_t poly[10];

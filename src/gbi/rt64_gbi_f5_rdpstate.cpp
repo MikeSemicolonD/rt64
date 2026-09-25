@@ -26,6 +26,7 @@
 #include "common/rt64_diag_bounds.h"
 
 extern "C" void rt64_f5_desync_dump(const char *why, uint32_t badW1);
+extern "C" volatile unsigned g_f5_heur[4];
 
 #include <cstdio>
 #include <cstdlib>
@@ -75,7 +76,7 @@ namespace RT64 {
             // bilinearly: does the game ever write bilerp, and does F5's shift/length decode land it?
             {
                 static int s_om = -1;
-                if (s_om < 0) { const char* v = std::getenv("ROGUESQ_LOG_OTHERMODE"); s_om = (v && *v && v[0] != '0') ? 0 : -2; }
+                if (s_om == -1) { const char* v = std::getenv("ROGUESQ_LOG_OTHERMODE"); s_om = (v && *v && v[0] != '0') ? 0 : -2; }
                 if (s_om >= 0 && s_om < 200) {
                     ++s_om;
                     const uint32_t size = (*dl)->p0(0, 8), off = (*dl)->p0(8, 8), data = (*dl)->w1;
@@ -141,7 +142,7 @@ namespace RT64 {
             // game's baseline requests bilerp (bits 12-13) and whether we decode it.
             {
                 static int s_om = -1;
-                if (s_om < 0) { const char* v = std::getenv("ROGUESQ_LOG_OTHERMODE"); s_om = (v && *v && v[0] != '0') ? 0 : -2; }
+                if (s_om == -1) { const char* v = std::getenv("ROGUESQ_LOG_OTHERMODE"); s_om = (v && *v && v[0] != '0') ? 0 : -2; }
                 if (s_om >= 0 && s_om < 40) {
                     ++s_om;
                     GBI_RDP::setOtherMode(state, dl);
@@ -449,6 +450,7 @@ namespace RT64 {
                     s_deflicker = (e && e[0] == '0') ? 0 : 1;
                 }
                 if (s_deflicker && g_current_scene == F5_SCENE_ATTRIBUTION && s_attrib_prev_glyphs >= 200) {
+                    ++g_f5_heur[3];
                     return;  // partial frame: keep the prior full frame's content
                 }
             }
@@ -479,7 +481,7 @@ namespace RT64 {
             // DIAG (ROGUESQ_LOG_FILL=1): sample the actual clear color + rect size +
             // target buffer across the whole run, to see what the cinematic/logo
             // buffers are cleared to (chasing the white-bg-not-black symptom).
-            { static int s_fd = -1, s_fc = 0; if (s_fd < 0) { const char* v = std::getenv("ROGUESQ_LOG_FILL"); s_fd = (v && *v && v[0] != '0') ? 0 : -2; }
+            { static int s_fd = -1, s_fc = 0; if (s_fd == -1) { const char* v = std::getenv("ROGUESQ_LOG_FILL"); s_fd = (v && *v && v[0] != '0') ? 0 : -2; }
               if (s_fd >= 0) { ++s_fc;
                 const uint32_t lrx = (*dl)->p0(12, 12), lry = (*dl)->p0(0, 12);
                 const bool big = (lrx >= 0x800 /* >=512 in 10.2 fixed (lrx/4>=512?) */) || (lry >= 0x800);
@@ -536,7 +538,7 @@ namespace RT64 {
             // fires while the flipbook loads, the explosion is triangle/mesh geometry.
             {
                 static int s_mf = -1;
-                if (s_mf < 0) { const char* v = std::getenv("ROGUESQ_MEASURE_FB"); s_mf = (v && *v && v[0] != '0') ? 0 : -2; }
+                if (s_mf == -1) { const char* v = std::getenv("ROGUESQ_MEASURE_FB"); s_mf = (v && *v && v[0] != '0') ? 0 : -2; }
                 const uint32_t tsrc = state->rdp->texture.address & 0x00FFFFFFu;
                 if (s_mf >= 0 && s_mf < 24 && tsrc >= 0x4C0000u && tsrc < 0x520000u) {
                     ++s_mf;
@@ -563,7 +565,7 @@ namespace RT64 {
             // billboards if they take the texrect path. Format-keyed, address-independent.
             {
                 static int s_fxt = -1;
-                if (s_fxt < 0) { const char* v = std::getenv("ROGUESQ_FX_PROBE"); s_fxt = (v && *v && v[0] != '0') ? 0 : -2; }
+                if (s_fxt == -1) { const char* v = std::getenv("ROGUESQ_FX_PROBE"); s_fxt = (v && *v && v[0] != '0') ? 0 : -2; }
                 if (s_fxt >= 0) {
                     const uint8_t rtile = (*dl)[0].p1(24, 3);
                     const auto& T = state->rdp->tiles[rtile];
@@ -597,7 +599,7 @@ namespace RT64 {
             // flame, the data+palette are good and RT64's sampler is the only bug.
             {
                 static int s_pp = -1;
-                if (s_pp < 0) { const char* v = std::getenv("ROGUESQ_DECODE_PPM"); s_pp = (v && *v && v[0] != '0') ? 0 : -2; }
+                if (s_pp == -1) { const char* v = std::getenv("ROGUESQ_DECODE_PPM"); s_pp = (v && *v && v[0] != '0') ? 0 : -2; }
                 const uint32_t tsrc = state->rdp->texture.address & 0x00FFFFFFu;
                 const bool isScratch = (tsrc >= 0x713000u && tsrc < 0x71B000u);  // de-swizzled scratch
                 if (s_pp >= 0 && s_pp < 6 && ((tsrc >= 0x4C0000u && tsrc < 0x520000u) || isScratch)) {
@@ -964,7 +966,7 @@ namespace RT64 {
             // words-per-row for a 32-texel CI4 row) while a CI4 TLUT is active.
             {
                 static int s_fixdxt = -1;
-                if (s_fixdxt < 0) { const char* v = std::getenv("ROGUESQ_CI4_FIXDXT"); s_fixdxt = (v && *v) ? (int)strtoul(v, nullptr, 0) : -2; }
+                if (s_fixdxt == -1) { const char* v = std::getenv("ROGUESQ_CI4_FIXDXT"); s_fixdxt = (v && *v) ? (int)strtoul(v, nullptr, 0) : -2; }
                 // Scope to the FLIPBOOK range only (0x4Cxxxx-0x52xxxx) so the logo
                 // (also CI4, renders clean with dxt=0) is untouched. 0x200 = the
                 // odd-row interleave for a 64-wide CI4 loaded as 16b (2048/4 words).
@@ -991,7 +993,7 @@ namespace RT64 {
             // banks when the LOAD tile is siz3/fmt0; a 16b load idiom leaves the alpha bank empty.
             {
                 static int s_fxl = -1;
-                if (s_fxl < 0) { const char* v = std::getenv("ROGUESQ_FX_PROBE"); s_fxl = (v && *v && v[0] != '0') ? 0 : -2; }
+                if (s_fxl == -1) { const char* v = std::getenv("ROGUESQ_FX_PROBE"); s_fxl = (v && *v && v[0] != '0') ? 0 : -2; }
                 const uint32_t srcFx = state->rdp->texture.address & 0x00FFFFFFu;
                 const bool rgbaImg = (state->rdp->texture.siz == 3 && state->rdp->texture.fmt == 0);
                 if (s_fxl >= 0 && s_fxl < 24 && (rgbaImg || (srcFx >= 0x550000u && srcFx < 0x560000u))) {
@@ -1011,7 +1013,7 @@ namespace RT64 {
             // (the real cause of the flipbook noise, given the base CI4 decode works).
             {
                 static int s_dt = -1;
-                if (s_dt < 0) { const char* v = std::getenv("ROGUESQ_DUMP_TEX"); s_dt = (v && *v && v[0] != '0') ? 0 : -2; }
+                if (s_dt == -1) { const char* v = std::getenv("ROGUESQ_DUMP_TEX"); s_dt = (v && *v && v[0] != '0') ? 0 : -2; }
                 const uint32_t srcChk = state->rdp->texture.address & 0x00FFFFFFu;
                 const bool isFlipbook = (srcChk >= 0x4C0000u && srcChk < 0x520000u);
                 if (s_dt >= 0 && s_dt < 16 && s_ci4_tlut_recent > 0 && isFlipbook) {
@@ -1077,7 +1079,7 @@ namespace RT64 {
             // scrambled -> the LOAD is the bug (fixable here).
             {
                 static int s_tm = -1;
-                if (s_tm < 0) { const char* v = std::getenv("ROGUESQ_DUMP_TEX"); s_tm = (v && *v && v[0] != '0') ? 0 : -2; }
+                if (s_tm == -1) { const char* v = std::getenv("ROGUESQ_DUMP_TEX"); s_tm = (v && *v && v[0] != '0') ? 0 : -2; }
                 const uint32_t srcChk = state->rdp->texture.address & 0x00FFFFFFu;
                 if (s_tm >= 0 && s_tm < 8 && s_ci4_tlut_recent > 0 &&
                     srcChk >= 0x4C0000u && srcChk < 0x520000u) {
