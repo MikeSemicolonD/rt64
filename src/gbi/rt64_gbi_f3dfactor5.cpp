@@ -226,13 +226,21 @@ namespace RT64 {
         // Sprites drawn per node id last frame. A node drawing many sprites is a particle system (smoke trail) whose puffs are baked per frame; tweening its transform slides them, so it gets no id.
         static std::unordered_map<uint32_t, uint32_t> s_sprites_cur, s_sprites_prev;
         static uint32_t s_mv_candidate_id = 0;
+        static uint32_t s_mv_last_w1 = 0;
         // Particles tracked across frames: each sprite takes the id of the previous-frame sprite nearest its predicted position, so pairing survives fast camera motion.
         struct F5WorldSprite { float x, y, z, r, vx, vy, vz; uint32_t node; float lx, ly, lz, lr, lvx, lvy, lvz; uint32_t ord, id; bool used; };
         static std::vector<F5WorldSprite> s_wsprites_cur, s_wsprites_prev;
         static uint32_t s_wsprite_next = 1;
+        // ROGUESQ_LOG_INTERP_PAIR: per-frame face-sprite id outcomes (new face, gen bump by gap / flipbook restart / jump, continued).
+        static uint32_t s_faceStats[5] = {};
         static void f5_sprite_count_rotate(State* state) {
             static uint64_t s_task = ~0ull;
             if (state->displayListCounter != s_task) {
+                static const bool s_log = env_on("ROGUESQ_LOG_INTERP_PAIR", false);
+                if (s_log && (s_faceStats[0] + s_faceStats[1] + s_faceStats[2] + s_faceStats[3] + s_faceStats[4]) > 0) {
+                    std::fprintf(stderr, "[facesprite] new=%u gap=%u restart=%u jump=%u cont=%u\n", s_faceStats[0], s_faceStats[1], s_faceStats[2], s_faceStats[3], s_faceStats[4]);
+                }
+                for (uint32_t& v : s_faceStats) v = 0;
                 s_task = state->displayListCounter;
                 s_sprites_prev.swap(s_sprites_cur);
                 s_sprites_cur.clear();
@@ -245,22 +253,39 @@ namespace RT64 {
         static uint32_t f5_face_sprite_id(State* state, uint32_t face, uint32_t node, uint32_t tex, float cx, float cy, float cz, float half) {
             static const bool s_on = env_on("ROGUESQ_F5_SPRITE_FACE_ID", true);
             if (!s_on || (face < 0x80000000u)) return 0;
-            struct Entry { uint64_t task; uint32_t tex, gen; float x, y, z; };
+            struct Entry { uint64_t task; uint32_t tex, gen; float x, y, z, half, vx, vy, vz; };
             static std::unordered_map<uint64_t, Entry> s_faces;
             if (s_faces.size() > 8192) s_faces.clear();
             const uint64_t key = ((uint64_t)node << 32) | face;
-            auto ins = s_faces.try_emplace(key, Entry{ 0, tex, 0, cx, cy, cz });
+            auto ins = s_faces.try_emplace(key, Entry{ 0, tex, 0, cx, cy, cz, half, 0, 0, 0 });
             Entry& e = ins.first->second;
+            bool newGen = false;
             if (!ins.second) {
-                const float dx = cx - e.x, dy = cy - e.y, dz = cz - e.z;
+                // Distances are measured from where last frame's motion predicts the sprite, so fast sparks and debris keep their id; only an unpredicted jump means the slot was reused.
+                const float dx = cx - (e.x + e.vx), dy = cy - (e.y + e.vy), dz = cz - (e.z + e.vz);
                 const bool gap = (e.task + 1 != state->displayListCounter) && (e.task != state->displayListCounter);
-                const bool restart = (tex < e.tex) && ((e.tex - tex) < 0x20000u);
-                const bool jump = std::sqrt(dx * dx + dy * dy + dz * dz) > 4.0f * std::max(half, 1.0f);
-                if (gap || restart || jump) {
+                // A new puff respawned in the slot starts small; a looping flipbook keeps its size and place.
+                const float dist = std::sqrt(dx * dx + dy * dy + dz * dz);
+                const bool shrank = half < 0.7f * e.half;
+                const bool restart = (tex < e.tex) && ((e.tex - tex) < 0x20000u) && ((dist > 1.5f * std::max(half, 1.0f)) || shrank);
+                const bool respawn = half < 0.5f * e.half;
+                const bool noVelocity = (e.vx == 0.0f) && (e.vy == 0.0f) && (e.vz == 0.0f);
+                const bool jump = dist > (noVelocity ? 12.0f : 4.0f) * std::max(half, 1.0f);
+                if (gap || restart || respawn || jump) {
                     e.gen++;
+                    newGen = true;
                 }
+                s_faceStats[gap ? 1 : (restart || respawn) ? 2 : jump ? 3 : 4]++;
             }
+            else {
+                s_faceStats[0]++;
+                newGen = true;
+            }
+            e.vx = newGen ? 0.0f : (cx - e.x);
+            e.vy = newGen ? 0.0f : (cy - e.y);
+            e.vz = newGen ? 0.0f : (cz - e.z);
             e.task = state->displayListCounter;
+            e.half = half;
             e.tex = tex;
             e.x = cx;
             e.y = cy;
@@ -347,7 +372,7 @@ namespace RT64 {
             return (it != s_sprites_prev.end()) && (it->second > 2);
         }
         static constexpr uint32_t F5_NODE_MAP_SLOTS = 256;
-        static uint32_t s_node_map[2][F5_NODE_MAP_SLOTS] = {};   // [buffer][slot] = stamped id (0 = leave AUTO)
+        static uint32_t s_node_map[4][F5_NODE_MAP_SLOTS] = {};   // [buffer][slot] = stamped id (0 = leave AUTO)
         // A node only gets an interpolation id if it existed last frame (stable). Transient nodes
         // (per-frame terrain tessellation, just-spawned objects) are not paired by id — they fall
         // back to AUTO geometric matching, which handles deforming terrain far better than a
@@ -357,7 +382,7 @@ namespace RT64 {
         // A drawable used by exactly one node this frame = a distinct model instance (ship) that benefits
         // from stable-id interpolation; a shared drawable = instanced particles / terrain tiles that
         // flicker or morph under it. Rebuilt at each frame's first slot. Requires RDRAM (op_01 side).
-        static std::unordered_map<uint32_t, int> s_draw_hist[2];
+        static std::unordered_map<uint32_t, int> s_draw_hist[4];
         static uint32_t f5_node_drawable(const uint8_t* ram, uint32_t node) {
             const uint32_t rn = rd_be_u32(ram, node + 0x10);
             return (rn >= 0x80000000u) ? rd_be_u32(ram, rn + 0x08) : 0u;
@@ -371,7 +396,16 @@ namespace RT64 {
                 if (dr >= 0x80000000u) ++s_draw_hist[buf][dr];
             }
         }
-        static inline int f5_ring_buffer(uint32_t off) { return (off & 0x10000u) ? 1 : 0; }
+        // Two double-buffered matrix rings: the flight scene at 0x700000/0x710000 and a second one (menus, overlays) at 0x770000/0x780000. -1 = not a ring address.
+        static inline int f5_ring_buffer(uint32_t off) {
+            switch (off >> 16) {
+                case 0x70: return 0;
+                case 0x71: return 1;
+                case 0x77: return 2;
+                case 0x78: return 3;
+                default: return -1;
+            }
+        }
         static inline int f5_ring_slot(uint32_t off) {
             const uint32_t rel = (off & 0xFFFFu);
             if (rel < 0x40u) return -1;
@@ -380,23 +414,267 @@ namespace RT64 {
         }
         void f5_map_node_impl(uint32_t ringDst, uint32_t nodeId) {
             const uint32_t off = ringDst & 0x00FFFFFFu;
-            if (off < 0x700000u || off >= 0x720000u) return;
             const int buf = f5_ring_buffer(off);
+            if (buf < 0) {
+                static const bool s_lg = env_on("ROGUESQ_LOG_INTERP_PAIR", false);
+                static uint32_t s_n = 0;
+                if (s_lg && ((++s_n % 200) == 1)) std::fprintf(stderr, "[nodemap-outside] dst=%08X node=%08X count=%u\n", ringDst, nodeId, s_n);
+                return;
+            }
             const int slot = f5_ring_slot(off);
             if (slot < 0) return;
-            // The ring flips buffers every frame; the first write of a frame need not be slot 0 (cinematics start later in the ring).
-            static int s_last_buf = -1;
-            if (buf != s_last_buf) {
-                s_last_buf = buf;
+            // Each ring flips buffers every frame; the first write of a frame need not be slot 0 (cinematics start later in the ring).
+            static int s_last_buf[2] = { -1, -1 };
+            const int ring = buf >> 1;
+            if (buf != s_last_buf[ring]) {
+                s_last_buf[ring] = buf;
                 for (uint32_t i = 0; i < F5_NODE_MAP_SLOTS; ++i) s_node_map[buf][i] = 0;
-                s_nodes_prev.swap(s_nodes_cur);
-                s_nodes_cur.clear();
+                if (ring == 0) {
+                    s_nodes_prev.swap(s_nodes_cur);
+                    s_nodes_cur.clear();
+                }
             }
             s_nodes_cur.insert(nodeId);
-            // Store the raw node pointer for nodes present last frame (stable); 0 = leave AUTO.
-            // op_01 reads the node's flags via RDRAM to classify before stamping an id.
-            s_node_map[buf][slot] = s_nodes_prev.count(nodeId) ? nodeId : 0u;
+            // With ROGUESQ_F5_NODE_STABLE_ONLY=1 a node gets an id only once it existed last frame; off by default, since an id from the first frame lets a new object pair one frame sooner (measured fewer unpaired draws).
+            static const bool s_stable_only = env_on("ROGUESQ_F5_NODE_STABLE_ONLY", false);
+            s_node_map[buf][slot] = (!s_stable_only || s_nodes_prev.count(nodeId)) ? nodeId : 0u;
         }
+        // Moves each vertex along its view ray onto the plane whose screen depth is `depth` (posScreen.z units), so a zSource=PRIM face can draw with per-vertex depth that follows frame interpolation.
+        // Screen x/y are unchanged. Returns false (leaving the verts alone) when the projection's origin is not the eye or a vertex is behind the camera.
+        static bool f5_flatten_to_depth(State* state, RSP::Vertex* v, int n, float depth) {
+            const hlslpp::float4x4 &model = state->rsp->modelMatrixStack[state->rsp->modelMatrixStackSize - 1];
+            const hlslpp::float4x4 &proj = state->rsp->viewProjMatrixStack[state->rsp->projectionMatrixStackSize - 1];
+            const auto &vp = state->rsp->viewportStack[state->rsp->viewportStackSize - 1];
+            if ((std::fabs((float)proj[3][0]) > 1e-3f) || (std::fabs((float)proj[3][1]) > 1e-3f) || (std::fabs((float)proj[3][3]) > 1e-3f) || (std::fabs(vp.scale.z) < 1e-6f)) {
+                return false;
+            }
+            const float d = (depth - vp.translate.z) / vp.scale.z;
+            const float bz = (float)proj[3][2];
+            const hlslpp::float4x4 inv = hlslpp::inverse(model);
+            int16_t out[8][3];
+            for (int k = 0; k < n; ++k) {
+                const hlslpp::float4 c = hlslpp::mul(hlslpp::float4((float)v[k].x, (float)v[k].y, (float)v[k].z, 1.0f), model);
+                const hlslpp::float4 clip = hlslpp::mul(c, proj);
+                const float zc = (float)clip.z - bz, wc = (float)clip.w;
+                const float denom = zc - d * wc;
+                if ((wc <= 1e-3f) || (std::fabs(denom) < 1e-9f)) {
+                    return false;
+                }
+                const float s = -bz / denom;
+                if (!(s > 0.01f) || !(s < 100.0f)) {
+                    return false;
+                }
+                const hlslpp::float4 p = hlslpp::mul(hlslpp::float4((float)c.x * s, (float)c.y * s, (float)c.z * s, 1.0f), inv);
+                for (int a = 0; a < 3; ++a) {
+                    const float f = std::round((float)p[a]);
+                    if ((f < -32768.0f) || (f > 32767.0f)) {
+                        return false;
+                    }
+                    out[k][a] = (int16_t)f;
+                }
+            }
+            for (int k = 0; k < n; ++k) {
+                v[k].x = out[k][0];
+                v[k].y = out[k][1];
+                v[k].z = out[k][2];
+            }
+            return true;
+        }
+
+        // Id for a face drawn under a fixed non-scene-node matrix (searchlight shafts and glows): the game bakes its camera-space position into the verts every frame, so only vertex interpolation can smooth it.
+        // Tracked by position: each face takes the id of the previous-frame face with the same texture and vertex count nearest its predicted position (world frame when the terrain root gives one, else camera space),
+        // within its size; otherwise a fresh id, so a light pops rather than blending into a different one. 0 = leave as is.
+        static uint32_t f5_baked_face_id(State* state, const RSP::Vertex* v, int n) {
+            static const bool s_on = env_on("ROGUESQ_F5_BAKED_VTX_INTERP", true);
+            if (!s_on || (n <= 0)) {
+                return 0;
+            }
+            // Two tracking points: the centroid (stable for glows rebuilt facing the camera around their centre) and the shortest-edge midpoint (stable for light shafts, whose narrow lamp end stays put while the far end swings).
+            struct Face { uint32_t tex, n, id, ord; bool world, used; float x, y, z, vx, vy, vz, r, ax, ay, az, avx, avy, avz; };
+            static std::vector<Face> s_prev, s_cur;
+            static std::unordered_map<uint32_t, uint32_t> s_ord;
+            static std::unordered_map<uint64_t, size_t> s_prevBySlot;
+            static uint64_t s_task = ~0ull;
+            static uint32_t s_next = 1;
+            if (state->displayListCounter != s_task) {
+                static const bool s_lgf = env_on("ROGUESQ_LOG_INTERP_PAIR", false);
+                if (s_lgf && !s_cur.empty()) {
+                    std::map<uint32_t, int> perTex;
+                    for (const Face& f : s_cur) perTex[f.tex]++;
+                    std::string line = "[baked-frame] task=" + std::to_string(s_task);
+                    for (auto& kv : perTex) { char buf[32]; std::snprintf(buf, sizeof(buf), " %06X:%d", kv.first, kv.second); line += buf; }
+                    std::fprintf(stderr, "%s\n", line.c_str());
+                }
+                s_task = state->displayListCounter;
+                s_prev.swap(s_cur);
+                s_cur.clear();
+                s_ord.clear();
+                s_prevBySlot.clear();
+                for (size_t i = 0; i < s_prev.size(); ++i) s_prevBySlot[((uint64_t)s_prev[i].tex << 32) | s_prev[i].ord] = i;
+            }
+            const hlslpp::float4x4 &model = state->rsp->modelMatrixStack[state->rsp->modelMatrixStackSize - 1];
+            const bool world = (s_world_task == state->displayListCounter);
+            float cx = 0, cy = 0, cz = 0;
+            for (int k = 0; k < n; ++k) {
+                cx += v[k].x;
+                cy += v[k].y;
+                cz += v[k].z;
+            }
+            cx /= n;
+            cy /= n;
+            cz /= n;
+            float size = 1.0f;
+            for (int k = 0; k < n; ++k) size = std::max(size, std::max(std::fabs(v[k].x - cx), std::max(std::fabs(v[k].y - cy), std::fabs(v[k].z - cz))));
+            float axl = cx, ayl = cy, azl = cz;
+            {
+                float best = -1.0f;
+                for (int k = 0; k < n; ++k) {
+                    const RSP::Vertex& a = v[k];
+                    const RSP::Vertex& b = v[(k + 1) % n];
+                    const float ex = (float)b.x - a.x, ey = (float)b.y - a.y, ez = (float)b.z - a.z;
+                    const float len = ex * ex + ey * ey + ez * ez;
+                    if ((best < 0.0f) || (len < best)) {
+                        best = len;
+                        axl = 0.5f * ((float)a.x + b.x);
+                        ayl = 0.5f * ((float)a.y + b.y);
+                        azl = 0.5f * ((float)a.z + b.z);
+                    }
+                }
+            }
+            hlslpp::float4 p = hlslpp::mul(hlslpp::float4(cx, cy, cz, 1.0f), model);
+            hlslpp::float4 pa = hlslpp::mul(hlslpp::float4(axl, ayl, azl, 1.0f), model);
+            float r = size * (float)hlslpp::length(model[0].xyz);
+            if (world) {
+                p = hlslpp::mul(p, s_world_from_view);
+                pa = hlslpp::mul(pa, s_world_from_view);
+                r *= (float)hlslpp::length(s_world_from_view[0].xyz);
+            }
+            r = std::max(r, 1e-3f);
+            const uint32_t tex = state->rdp->texture.address & 0xFFFFFFu;
+            const uint32_t ord = s_ord[tex]++;
+            Face cur{ tex, (uint32_t)n, 0, ord, world, false, (float)p.x, (float)p.y, (float)p.z, 0, 0, 0, r, (float)pa.x, (float)pa.y, (float)pa.z, 0, 0, 0 };
+            auto distTo = [&](const Face& f) {
+                const float dx = f.x + f.vx - cur.x, dy = f.y + f.vy - cur.y, dz = f.z + f.vz - cur.z;
+                const float ex = f.ax + f.avx - cur.ax, ey = f.ay + f.avy - cur.ay, ez = f.az + f.avz - cur.az;
+                return std::min(std::sqrt(dx * dx + dy * dy + dz * dz), std::sqrt(ex * ex + ey * ey + ez * ez));
+            };
+            constexpr float MatchRadius = 1.5f;
+            constexpr float SlotRadius = 3.0f;
+            Face* best = nullptr;
+            // Meshes draw their faces in a stable order, so the face in the same (texture, order) slot last frame wins when it is roughly where its motion predicts; nearest-neighbour alone lets adjacent faces steal each other's ids.
+            auto slot = s_prevBySlot.find(((uint64_t)tex << 32) | ord);
+            if (slot != s_prevBySlot.end()) {
+                Face& f = s_prev[slot->second];
+                if (!f.used && (f.n == (uint32_t)n) && (f.world == world) && (distTo(f) <= SlotRadius * std::max(r, f.r))) {
+                    best = &f;
+                }
+            }
+            if (best == nullptr) {
+                float bestD = 0.0f;
+                for (Face& f : s_prev) {
+                    if (f.used || (f.tex != tex) || (f.n != (uint32_t)n) || (f.world != world)) continue;
+                    const float d = distTo(f);
+                    if ((d <= MatchRadius * std::max(r, f.r)) && ((best == nullptr) || (d < bestD))) {
+                        best = &f;
+                        bestD = d;
+                    }
+                }
+            }
+            if (best != nullptr) {
+                best->used = true;
+                cur.id = best->id;
+                cur.vx = cur.x - best->x;
+                cur.vy = cur.y - best->y;
+                cur.vz = cur.z - best->z;
+                cur.avx = cur.ax - best->ax;
+                cur.avy = cur.ay - best->ay;
+                cur.avz = cur.az - best->az;
+            }
+            else {
+                cur.id = 0x30000000u | (s_next++ & 0x0FFFFFFFu);
+                static const bool s_lg = env_on("ROGUESQ_LOG_INTERP_PAIR", false);
+                if (s_lg) {
+                    float nd = -1.0f, nr = 0.0f;
+                    int sameTex = 0, otherFrame = 0, used = 0;
+                    for (const Face& f : s_prev) {
+                        if ((f.tex != tex) || (f.n != (uint32_t)n)) continue;
+                        sameTex++;
+                        if (f.world != world) { otherFrame++; continue; }
+                        if (f.used) used++;
+                        const float dx = f.x + f.vx - cur.x, dy = f.y + f.vy - cur.y, dz = f.z + f.vz - cur.z;
+                        const float d = std::sqrt(dx * dx + dy * dy + dz * dz);
+                        if ((nd < 0.0f) || (d < nd)) { nd = d; nr = std::max(r, f.r); }
+                    }
+                    static int s_nl = 0;
+                    if ((++s_nl % 25) == 1) std::fprintf(stderr, "[baked-miss] tex=%06X n=%d world=%d sameTex=%d otherFrame=%d usedCands=%d nearest/r=%.2f r=%.1f prev=%zu\n", tex, n, (int)world, sameTex, otherFrame, used, (nd >= 0.0f) ? nd / nr : -1.0f, r, s_prev.size());
+                }
+            }
+            if (s_cur.size() < 4096) s_cur.push_back(cur);
+            return cur.id;
+        }
+
+        // ROGUESQ_LOG_INTERP_PAIR: draws made while the transform group is AUTO (no interpolation id), per draw site, summed over 60 frames.
+        static void f5_count_auto(State* state, int site) {
+            static const bool s_on = env_on("ROGUESQ_LOG_INTERP_PAIR", false);
+            if (!s_on) {
+                return;
+            }
+            static const char* s_names[5] = { "tile_quad", "tile_grid", "sprite", "face", "?" };
+            static uint32_t s_auto[5] = {}, s_all[5] = {};
+            static uint64_t s_task = ~0ull;
+            static uint32_t s_frames = 0;
+            if (state->displayListCounter != s_task) {
+                s_task = state->displayListCounter;
+                if (++s_frames >= 60) {
+                    std::fprintf(stderr, "[autodraw] %s=%u/%u %s=%u/%u %s=%u/%u %s=%u/%u lastMV=%08X\n", s_names[0], s_auto[0], s_all[0], s_names[1], s_auto[1], s_all[1], s_names[2], s_auto[2], s_all[2], s_names[3], s_auto[3], s_all[3], s_mv_last_w1);
+                    std::memset(s_auto, 0, sizeof(s_auto));
+                    std::memset(s_all, 0, sizeof(s_all));
+                    s_frames = 0;
+                }
+            }
+            const auto &grp = state->rsp->extended.modelMatrixIdStack[state->rsp->extended.modelMatrixIdStackSize - 1];
+            s_all[site]++;
+            if (grp.matrixId == G_EX_ID_AUTO) {
+                s_auto[site]++;
+            }
+        }
+
+        // ROGUESQ_LOG_INTERP_PAIR: do a node's face vertices (local space) change between frames? Split by zSource=PRIM (glows/shafts) vs normal faces.
+        static void f5_probe_face_verts(State* state, const RSP::Vertex* v, int n, bool prim) {
+            static const bool s_on = env_on("ROGUESQ_LOG_INTERP_PAIR", false);
+            if (!s_on) {
+                return;
+            }
+            static std::unordered_map<uint64_t, uint64_t> s_prev, s_cur;
+            static std::unordered_map<uint32_t, uint32_t> s_ord;
+            static uint64_t s_task = ~0ull;
+            static uint32_t s_stat[2][3] = {};
+            if (state->displayListCounter != s_task) {
+                if (s_stat[1][0] + s_stat[1][1] > 0) {
+                    std::fprintf(stderr, "[facevtx] prim same=%u changed=%u new=%u | normal same=%u changed=%u new=%u\n", s_stat[1][0], s_stat[1][1], s_stat[1][2], s_stat[0][0], s_stat[0][1], s_stat[0][2]);
+                }
+                std::memset(s_stat, 0, sizeof(s_stat));
+                s_prev.swap(s_cur);
+                s_cur.clear();
+                s_ord.clear();
+                s_task = state->displayListCounter;
+            }
+            if (s_mv_candidate_id == 0) {
+                return;
+            }
+            const uint32_t ord = s_ord[s_mv_candidate_id]++;
+            const uint64_t key = ((uint64_t)s_mv_candidate_id << 32) | ((uint64_t)prim << 31) | ord;
+            uint64_t h = 1469598103934665603ull;
+            for (int k = 0; k < n; ++k) {
+                h = (h ^ (uint16_t)v[k].x) * 1099511628211ull;
+                h = (h ^ (uint16_t)v[k].y) * 1099511628211ull;
+                h = (h ^ (uint16_t)v[k].z) * 1099511628211ull;
+            }
+            if (s_cur.size() < 65536) s_cur[key] = h;
+            auto it = s_prev.find(key);
+            s_stat[prim ? 1 : 0][(it == s_prev.end()) ? 2 : ((it->second == h) ? 0 : 1)]++;
+        }
+
         // DL address of each 0xBD command -> the mesh face that emitted it (renderLitMeshFaceGroup hooks). Fixed-size, overwritten in place, so no locking or growth.
         static constexpr uint32_t F5_SPRITE_MAP_SIZE = 131072;
         static uint32_t s_sprite_map_addr[F5_SPRITE_MAP_SIZE] = {};
@@ -414,7 +692,7 @@ namespace RT64 {
         // Look up the id a hook stored for this ring address; 0 if none.
         static uint32_t f5_lookup_node_id(uint32_t w1) {
             const uint32_t off = w1 & 0x00FFFFFFu;
-            if (off < 0x700000u || off >= 0x720000u) return 0;
+            if (f5_ring_buffer(off) < 0) return 0;
             const int buf = f5_ring_buffer(off);
             const int slot = f5_ring_slot(off);
             if (slot < 0) return 0;
@@ -766,6 +1044,7 @@ namespace RT64 {
                 tmp[k].color.b = (uint8_t)(col[k] >> 8);  tmp[k].color.a = (uint8_t)col[k];
             }
             state->rsp->setVertex(0x80000000u | (F5_VTX_SCRATCH + F5_FACE_SLOT * sizeof(RSP::Vertex)), 4, F5_FACE_SLOT);
+            f5_count_auto(state, 0);
             state->rsp->drawIndexedTri(F5_FACE_SLOT, F5_FACE_SLOT + 3, F5_FACE_SLOT + 2);
             state->rsp->drawIndexedTri(F5_FACE_SLOT, F5_FACE_SLOT + 1, F5_FACE_SLOT + 3);
             s_task_faces += 2;
@@ -793,6 +1072,7 @@ namespace RT64 {
                 state->rsp->setVertex(base, stripVerts, F5_FACE_SLOT);
                 for (int cc = 0; cc < N; ++cc) {
                     const int v0 = F5_FACE_SLOT + cc, v2 = F5_FACE_SLOT + (N + 1) + cc;
+                    f5_count_auto(state, 1);
                     state->rsp->drawIndexedTri(v0, v2 + 1, v2);
                     state->rsp->drawIndexedTri(v0, v0 + 1, v2 + 1);
                 }
@@ -1225,6 +1505,26 @@ namespace RT64 {
                       if (s_slotid && off >= 0x700000u && off < 0x720000u) id = 0x00010000u | (w1 & 0xFFFFu);
                   }
                   s_mv_candidate_id = id;
+                  s_mv_last_w1 = w1;
+                  { static const bool s_lg = env_on("ROGUESQ_LOG_INTERP_PAIR", false);
+                    if (s_lg && (id == 0)) {
+                        static std::map<uint32_t, uint32_t> s_hist;
+                        static uint64_t s_ht = ~0ull;
+                        if (state->displayListCounter != s_ht) {
+                            if (!s_hist.empty() && ((state->displayListCounter % 60) == 0)) {
+                                std::string line = "[noid]";
+                                char buf[48];
+                                for (auto& kv : s_hist) { std::snprintf(buf, sizeof(buf), " %06X:%u", kv.first, kv.second); line += buf; }
+                                std::fprintf(stderr, "%s\n", line.c_str());
+                            }
+                            s_hist.clear();
+                            s_ht = state->displayListCounter;
+                        }
+                        const uint32_t off = w1 & 0x00FFFFFFu;
+                        const bool inRing = f5_ring_buffer(off) >= 0;
+                        const uint32_t raw = inRing ? s_node_map[f5_ring_buffer(off)][std::max(0, f5_ring_slot(off))] : 0u;
+                        s_hist[inRing ? (0x700000u | (raw ? 1u : 0u)) : (off & 0xFFFF00u)]++;
+                    } }
                   if ((id != 0) && f5_node_sprite_dense(state, id)) {
                       id = 0;
                   }
@@ -1360,7 +1660,8 @@ namespace RT64 {
                     // so derive the world directions that project to pure screen X/Y from the MVP rows:
                     //   screenRight_world = cross(clipY_coeffs, clipW_coeffs)
                     //   screenUp_world    = cross(clipW_coeffs, clipX_coeffs)
-                    const auto& mv = state->rsp->modelViewProjMatrix;
+                    // rsp->modelViewProjMatrix is refreshed lazily in setVertex and may still hold the previous object's; compose it here.
+                    const hlslpp::float4x4 mv = hlslpp::mul(state->rsp->modelMatrixStack[state->rsp->modelMatrixStackSize - 1], state->rsp->viewProjMatrixStack[state->rsp->projectionMatrixStackSize - 1]);
                     const float cX[3] = { (float)mv[0][0], (float)mv[1][0], (float)mv[2][0] };  // clip.x coeffs
                     const float cY[3] = { (float)mv[0][1], (float)mv[1][1], (float)mv[2][1] };  // clip.y coeffs
                     const float cW[3] = { (float)mv[0][3], (float)mv[1][3], (float)mv[2][3] };  // clip.w coeffs
@@ -1374,9 +1675,16 @@ namespace RT64 {
                     // Each sprite gets its own transform (the node transform moved to the sprite centre, quad built around the origin) so interpolation can pair particles one by one.
                     static const bool s_sprite_xform = env_on("ROGUESQ_F5_SPRITE_XFORM", true);
                     const float ox = s_sprite_xform ? 0.0f : (float)c.x, oy = s_sprite_xform ? 0.0f : (float)c.y, oz = s_sprite_xform ? 0.0f : (float)c.z;
+                    // With a per-sprite transform, build the quad at a fixed reference size and put the sprite's size in the transform scale, so a growing puff interpolates its size instead of stepping at the game rate. ROGUESQ_F5_SPRITE_SCALE_XFORM=0 bakes the size into the verts.
+                    static const bool s_scale_xform = env_on("ROGUESQ_F5_SPRITE_SCALE_XFORM", true);
+                    constexpr float SpriteRefSize = 256.0f;
+                    const float spriteSize = (float)std::max(halfX, halfY);
+                    const bool scaleXform = s_sprite_xform && s_scale_xform && haveView;
+                    const float qx = scaleXform ? SpriteRefSize * (float)halfX / spriteSize : (float)halfX;
+                    const float qy = scaleXform ? SpriteRefSize * (float)halfY / spriteSize : (float)halfY;
                     for (int k = 0; k < 4; ++k) {
                         tmp[k] = c;
-                        const float dx = sgx[k] * (float)halfX, dy = sgy[k] * (float)halfY;
+                        const float dx = sgx[k] * qx, dy = sgy[k] * qy;
                         if (haveView) {
                             tmp[k].x = (int16_t)(ox + dx * rx + dy * ux);
                             tmp[k].y = (int16_t)(oy + dx * ry + dy * uy);
@@ -1410,7 +1718,9 @@ namespace RT64 {
                     // attract demo runs) which is the loop-dependent "behind terrain" bug.
                     // ROGUESQ_F5_SPRITE_NODEPTH=1 restores the no-depth-test band-aid for A/B.
                     static const bool s_nodepth = env_on("ROGUESQ_F5_SPRITE_NODEPTH", false);
-                    state->rdp->setOtherMode(state->rdp->otherMode.H, s_nodepth ? 0x00504A44u : 0x00504A54u);
+                    // The quad is screen-parallel, so per-vertex depth equals primDepth on real frames and, unlike primDepth, follows frame interpolation (a constant primDepth sinks glows into the surfaces they sit on). ROGUESQ_F5_SPRITE_PIXEL_Z=0 restores zSource=PRIM.
+                    static const bool s_pixelz = env_on("ROGUESQ_F5_SPRITE_PIXEL_Z", true);
+                    state->rdp->setOtherMode(state->rdp->otherMode.H, s_nodepth ? 0x00504A44u : (s_pixelz ? 0x00504A50u : 0x00504A54u));
                     // Billboards are UNLIT (hw draws them as screen-space texrects). Force lighting off
                     // so the scene's environment light doesn't modulate the sprite (white-scene -> white,
                     // dark-scene -> black). Restore the mode after.
@@ -1461,6 +1771,11 @@ namespace RT64 {
                         }
                         const hlslpp::float4x4 toCentre(1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, (float)c.x, (float)c.y, (float)c.z, 1);
                         modelTop = hlslpp::mul(toCentre, savedModel);
+                        if (scaleXform) {
+                            const float s = spriteSize / SpriteRefSize;
+                            const hlslpp::float4x4 scale(s, 0, 0, 0, 0, s, 0, 0, 0, 0, s, 0, 0, 0, 0, 1);
+                            modelTop = hlslpp::mul(scale, modelTop);
+                        }
                         state->rsp->modelViewProjChanged = true;
                     }
                     else if (isolate) {
@@ -1487,6 +1802,7 @@ namespace RT64 {
                         z = z < 0.0f ? 0.0f : (z > 1.0f ? 1.0f : z);
                         state->rdp->setPrimDepth((uint16_t)(z * 32767.0f), 0);
                     }
+                    f5_count_auto(state, 2);
                     state->rsp->drawIndexedTri(F5_FACE_SLOT, F5_FACE_SLOT + 3, F5_FACE_SLOT + 2);
                     state->rsp->drawIndexedTri(F5_FACE_SLOT, F5_FACE_SLOT + 1, F5_FACE_SLOT + 3);
                     if (s_sprite_xform) {
@@ -1628,6 +1944,24 @@ namespace RT64 {
             // face's own projected depth. Skipped when the game sent its own 0xEE (the sky pins itself to
             // 0x7FBE; overriding that drew the horizon haze over far structures). ROGUESQ_F5_MESH_PRIMDEPTH=0 A/B.
             if (!s_cull_skip) {
+                f5_probe_face_verts(state, tmp, n, (state->rdp->otherMode.L & 0x04u) != 0);
+                bool bakedGroup = false;
+                {
+                    const uint32_t mvOff = s_mv_last_w1 & 0x00FFFFFFu;
+                    const bool inRing = f5_ring_buffer(mvOff) >= 0;
+                    const auto &curGrp = state->rsp->extended.modelMatrixIdStack[state->rsp->extended.modelMatrixIdStackSize - 1];
+                    if ((s_mv_candidate_id == 0) && !inRing && (s_mv_last_w1 != 0) && (curGrp.matrixId == G_EX_ID_AUTO)) {
+                        const uint32_t id = f5_baked_face_id(state, tmp, n);
+                        if (id != 0) {
+                            state->rsp->matrixId(id, /*push*/true, /*proj*/false, /*decompose*/true,
+                                G_EX_COMPONENT_INTERPOLATE, G_EX_COMPONENT_INTERPOLATE, G_EX_COMPONENT_INTERPOLATE, G_EX_COMPONENT_INTERPOLATE, G_EX_COMPONENT_INTERPOLATE,
+                                G_EX_COMPONENT_AUTO, G_EX_COMPONENT_SKIP, G_EX_COMPONENT_AUTO, G_EX_COMPONENT_AUTO,
+                                G_EX_ORDER_LINEAR, G_EX_ASPECT_AUTO, G_EX_EDIT_NONE, /*idIsAddress*/false, /*editGroup*/false);
+                            state->rsp->modelViewProjChanged = true;
+                            bakedGroup = true;
+                        }
+                    }
+                }
                 state->rsp->setVertex(0x80000000u | (F5_VTX_SCRATCH + F5_FACE_SLOT * sizeof(RSP::Vertex)), n, F5_FACE_SLOT);
                 // Full-screen overlay quads (the pause dim) are world quads sized to the 4:3 frustum; widescreen would leave the sides uncovered, so grow them in their own plane.
                 static const bool s_widen_overlay = env_on("ROGUESQ_F5_OVERLAY_WIDEN", true);
@@ -1669,6 +2003,7 @@ namespace RT64 {
                         state->rsp->setVertex(0x80000000u | (F5_VTX_SCRATCH + F5_FACE_SLOT * sizeof(RSP::Vertex)), n, F5_FACE_SLOT);
                     }
                 }
+                float flatDepth = -1.0f;
                 if ((state->rdp->otherMode.L & 0x04u) && !s_prim_depth_from_game) {
                     static const bool s_mpd = env_on("ROGUESQ_F5_MESH_PRIMDEPTH", true);
                     if (s_mpd) {
@@ -1681,10 +2016,73 @@ namespace RT64 {
                         z /= (float)n;
                         z = z < 0.0f ? 0.0f : (z > 1.0f ? 1.0f : z);
                         state->rdp->setPrimDepth((uint16_t)(z * 32767.0f), 0);
+                        flatDepth = z;
                     }
                 }
+                else if (state->rdp->otherMode.L & 0x04u) {
+                    // Game-sent 0xEE depth; the sky pins (0x7FBE/0x7FBF) stay constant.
+                    const float d = state->rdp->primDepthStack[state->rdp->primDepthStackSize - 1].x;
+                    if (d < (float)0x7F00 / 32767.0f) flatDepth = d;
+                }
+                // A constant primDepth does not follow frame interpolation, so glows and light shafts sink into (or pop out of) the surfaces they sit on between real frames.
+                // ROGUESQ_F5_PRIM_FLATTEN puts the verts on the primDepth plane instead and draws with per-vertex depth; =0 keeps zSource=PRIM.
+                static const bool s_flatten = env_on("ROGUESQ_F5_PRIM_FLATTEN", true);
+                const uint32_t savedL = state->rdp->otherMode.L;
+                bool flattened = false;
+                bool flatGroup = false;
+                if (s_flatten && (flatDepth >= 0.0f) && (n <= 8) && f5_flatten_to_depth(state, tmp, n, flatDepth)) {
+                    // Flattened verts depend on this frame's camera, so between real frames they must blend too: each face gets its own id (node + PRIM face order) with vertex interpolation.
+                    static const bool s_flat_vtx = env_on("ROGUESQ_F5_PRIM_FLATTEN_VTX", true);
+                    { static const bool s_lg = env_on("ROGUESQ_LOG_INTERP_PAIR", false); static int s_nn = 0;
+                      if (s_lg && (s_mv_candidate_id == 0) && ((++s_nn % 100) == 1)) {
+                          const auto &grp = state->rsp->extended.modelMatrixIdStack[state->rsp->extended.modelMatrixIdStackSize - 1];
+                          std::fprintf(stderr, "[flat-noid] lastMV=%08X grp=%08X stack=%d count=%d\n", s_mv_last_w1, grp.matrixId, state->rsp->extended.modelMatrixIdStackSize, s_nn); } }
+                    if (s_flat_vtx && (s_mv_candidate_id != 0)) {
+                        static std::unordered_map<uint32_t, uint32_t> s_flat_ord;
+                        static uint64_t s_flat_task = ~0ull;
+                        if (state->displayListCounter != s_flat_task) {
+                            s_flat_task = state->displayListCounter;
+                            s_flat_ord.clear();
+                        }
+                        const uint32_t ord = s_flat_ord[s_mv_candidate_id]++;
+                        const uint32_t id = 0x70000000u | ((s_mv_candidate_id * 0x9E3779B1u + ord * 0x85EBCA6Bu) & 0x0FFFFFFFu);
+                        state->rsp->matrixId(id, /*push*/true, /*proj*/false, /*decompose*/true,
+                            G_EX_COMPONENT_INTERPOLATE, G_EX_COMPONENT_INTERPOLATE, G_EX_COMPONENT_INTERPOLATE, G_EX_COMPONENT_INTERPOLATE, G_EX_COMPONENT_INTERPOLATE,
+                            G_EX_COMPONENT_AUTO, G_EX_COMPONENT_SKIP, G_EX_COMPONENT_AUTO, G_EX_COMPONENT_AUTO,
+                            G_EX_ORDER_LINEAR, G_EX_ASPECT_AUTO, G_EX_EDIT_NONE, /*idIsAddress*/false, /*editGroup*/false);
+                        state->rsp->modelViewProjChanged = true;
+                        flatGroup = true;
+                    }
+                    state->rsp->setVertex(0x80000000u | (F5_VTX_SCRATCH + F5_FACE_SLOT * sizeof(RSP::Vertex)), n, F5_FACE_SLOT);
+                    state->rdp->setOtherMode(state->rdp->otherMode.H, savedL & ~0x04u);
+                    flattened = true;
+                    { static const bool s_lg = env_on("ROGUESQ_LOG_INTERP_PAIR", false); static int s_nf = 0;
+                      if (s_lg && ((++s_nf % 200) == 1)) {
+                          const auto &ps = state->ext.workloadQueue->workloads[state->ext.workloadQueue->writeCursor].drawData.posScreen;
+                          float err = 0.0f;
+                          for (int k = 0; k < n; ++k) err = std::max(err, std::fabs((float)ps[state->rsp->indices[F5_FACE_SLOT + k]][2] - flatDepth));
+                          std::fprintf(stderr, "[flatten] n=%d depth=%.5f maxErr=%.6f game=%d count=%d\n", n, flatDepth, err, (int)s_prim_depth_from_game, s_nf); } }
+                }
+                else if (s_flatten && (flatDepth >= 0.0f) && (n <= 8)) {
+                    // Flatten refused (vertex behind the camera, extreme scale): load the verts again anyway so the face's vertex count matches frames where it succeeded, or vertex interpolation drops for that frame and the face snaps.
+                    state->rsp->setVertex(0x80000000u | (F5_VTX_SCRATCH + F5_FACE_SLOT * sizeof(RSP::Vertex)), n, F5_FACE_SLOT);
+                    { static const bool s_lg = env_on("ROGUESQ_LOG_INTERP_PAIR", false); static int s_nr = 0;
+                      if (s_lg && ((++s_nr % 50) == 1)) std::fprintf(stderr, "[flatten-refused] n=%d depth=%.5f count=%d\n", n, flatDepth, s_nr); }
+                }
+                f5_count_auto(state, 3);
                 state->rsp->drawIndexedTri(F5_FACE_SLOT, F5_FACE_SLOT + 1, F5_FACE_SLOT + 2);
                 if (n == 4) state->rsp->drawIndexedTri(F5_FACE_SLOT, F5_FACE_SLOT + 2, F5_FACE_SLOT + 3);
+                if (flattened) {
+                    state->rdp->setOtherMode(state->rdp->otherMode.H, savedL);
+                }
+                if (flatGroup) {
+                    state->rsp->popMatrixId(1, false);
+                    state->rsp->modelViewProjChanged = true;
+                }
+                if (bakedGroup) {
+                    state->rsp->popMatrixId(1, false);
+                    state->rsp->modelViewProjChanged = true;
+                }
             }
             ++s_task_faces;
         }

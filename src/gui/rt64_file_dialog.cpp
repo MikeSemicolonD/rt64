@@ -6,6 +6,17 @@
 
 #include <cassert>
 
+#if defined(__ANDROID__)
+namespace RT64 {
+    // No native file dialogs on Android.
+    std::atomic<bool> FileDialog::isOpen = false;
+    void FileDialog::initialize() { }
+    void FileDialog::finish() { }
+    std::filesystem::path FileDialog::getDirectoryPath() { return {}; }
+    std::filesystem::path FileDialog::getOpenFilename(const std::vector<FileFilter> &) { return {}; }
+    std::filesystem::path FileDialog::getSaveFilename(const std::vector<FileFilter> &) { return {}; }
+};
+#else
 #include <nfd.h>
 
 namespace RT64 {
@@ -77,3 +88,4 @@ namespace RT64 {
         return path;
     }
 };
+#endif

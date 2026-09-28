@@ -661,6 +661,32 @@ namespace RT64 {
         }
     }
 
+    void PresentQueue::suspendSurface() {
+        // threadMutex is held for a whole present, so taking it waits out any frame still using the swap chain.
+        std::unique_lock<std::mutex> threadLock(threadMutex);
+        if (surfaceSuspended) {
+            return;
+        }
+        surfaceSuspended = true;
+        ext.presentGraphicsWorker->commandList->begin();
+        ext.presentGraphicsWorker->commandList->end();
+        ext.presentGraphicsWorker->execute();
+        ext.presentGraphicsWorker->wait();
+        swapChainFramebuffers.clear();
+        ext.swapChain->setWindow({});
+    }
+
+    void PresentQueue::resumeSurface(RenderWindow renderWindow) {
+        std::unique_lock<std::mutex> threadLock(threadMutex);
+        if (!surfaceSuspended) {
+            return;
+        }
+        ext.swapChain->setWindow(renderWindow);
+        swapChainFramebuffers.clear();
+        surfaceRestored = true;
+        surfaceSuspended = false;
+    }
+
     void PresentQueue::skipInterpolation() {
         {
             std::unique_lock<std::mutex> interpolatedLock(ext.sharedResources->interpolatedMutex);
@@ -720,7 +746,12 @@ namespace RT64 {
 
             if (processCursor >= 0) {
                 std::unique_lock<std::mutex> threadLock(threadMutex);
-                const bool needsResize = ext.swapChain->needsResize() || !swapChainValid;
+                const bool suspended = surfaceSuspended;
+                if (surfaceRestored) {
+                    surfaceRestored = false;
+                    swapChainValid = false;
+                }
+                const bool needsResize = !suspended && (ext.swapChain->needsResize() || !swapChainValid);
                 if (needsResize) {
                     ext.presentGraphicsWorker->commandList->begin();
                     ext.presentGraphicsWorker->commandList->end();
@@ -739,12 +770,12 @@ namespace RT64 {
                     }
                 }
 
-                if (needsResize || ext.appWindow->detectWindowMoved()) {
+                if (!suspended && (needsResize || ext.appWindow->detectWindowMoved())) {
                     ext.appWindow->detectRefreshRate();
                     ext.sharedResources->setSwapChainRate(std::min(ext.appWindow->getRefreshRate(), displayTimingRate));
                 }
 
-                if (displayTiming) {
+                if (displayTiming && !suspended && !ext.swapChain->isEmpty()) {
                     uint32_t newDisplayTimingRate = ext.swapChain->getRefreshRate();
                     if (newDisplayTimingRate == 0) {
                         newDisplayTimingRate = UINT32_MAX;
@@ -756,7 +787,7 @@ namespace RT64 {
                     }
                 }
 
-                skipPresent = skipPresent || ext.swapChain->isEmpty();
+                skipPresent = skipPresent || suspended || ext.swapChain->isEmpty();
 
                 Present &present = presents[processCursor];
                 ext.workloadQueue->waitForWorkloadId(present.workloadId);

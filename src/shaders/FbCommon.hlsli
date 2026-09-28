@@ -8,7 +8,8 @@
 #include "Formats.hlsli"
 
 uint EndianSwapUINT16(uint i) {
-    return ((i << 8) & 0xFF00) | ((i >> 8) & 0xFF);
+    // XOR, not OR: the Adreno 750 stock driver rejects the OR form in vkCreateComputePipelines. Disjoint masks, same result.
+    return ((i << 8) & 0xFF00) ^ ((i >> 8) & 0xFF);
 }
 
 // This endian swapping function generates a DXC-LLVM code generation bug when optimizations are enabled. All files that include this 

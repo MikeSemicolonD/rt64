@@ -7,6 +7,13 @@
 #include "rt64_sampler_library.h"
 
 namespace RT64 {
+    // Android swap chains offer RGBA8 but not BGRA8.
+#if defined(__ANDROID__)
+    static const RenderFormat SwapChainFormat = RenderFormat::R8G8B8A8_UNORM;
+#else
+    static const RenderFormat SwapChainFormat = RenderFormat::B8G8R8A8_UNORM;
+#endif
+
     struct ShaderRecord {
         std::unique_ptr<RenderPipeline> pipeline;
         std::unique_ptr<RenderPipelineLayout> pipelineLayout;

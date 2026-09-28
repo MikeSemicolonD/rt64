@@ -57,6 +57,13 @@ namespace RT64 {
         Timestamp presentTimestamp;
         VIHistory viHistory;
         bool presentWaitEnabled = false;
+        std::atomic<bool> surfaceSuspended = false;
+        bool surfaceRestored = false;
+
+        // Android lifecycle: stop touching the swap chain before the OS destroys the window (waits out a present in
+        // progress), and move it to the new window when the app returns.
+        void suspendSurface();
+        void resumeSurface(RenderWindow renderWindow);
 
         PresentQueue();
         ~PresentQueue();

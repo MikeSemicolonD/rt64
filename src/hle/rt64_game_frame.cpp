@@ -3,6 +3,7 @@
 //
 
 #include "common/rt64_math.h"
+#include "common/rt64_diag_bounds.h"
 
 #include <cstdio>
 #include <cstdlib>
@@ -33,6 +34,87 @@ namespace RT64 {
     static float f5InterpMaxPosFrac() {
         static const float v = [](){ const char *e = std::getenv("ROGUESQ_INTERP_MAX_POS"); float f = (e && e[0]) ? (float)atof(e) : 0.25f; return f > 0.0f ? f : 0.25f; }();
         return v;
+    }
+
+    static uint32_t s_pairJumpRejects = 0;
+    // Paired transforms with vertex interpolation on: [0] vertex counts matched (velocity computed), [1] counts differed (no vertex interpolation this frame).
+    static uint32_t s_vtxInterpStats[2] = {};
+
+    // ROGUESQ_LOG_INTERP_PAIR=1: per real frame, paired/total transforms per id class (top nibble, A = AUTO) and ids whose paired state flipped since the previous frame.
+    static void logPairing(const GameFrame &frame, const WorkloadQueue &workloadQueue) {
+        static const bool s_on = [](){ const char *e = std::getenv("ROGUESQ_LOG_INTERP_PAIR"); return e && e[0] == '1'; }();
+        if (!s_on) {
+            return;
+        }
+        struct Seen { uint64_t frame; bool mapped; };
+        static rt64diag::BoundedMap<uint32_t, Seen> s_seen;
+        static uint64_t s_frame = 0;
+        s_frame++;
+        uint32_t total[17] = {}, mapped[17] = {}, flips[17] = {}, dups[17] = {}, dupUnmapped[17] = {};
+        static std::unordered_map<uint32_t, uint32_t> s_count;
+        s_count.clear();
+        char detail[512];
+        int detailLen = 0;
+        detail[0] = '\0';
+        for (uint32_t w : frame.workloads) {
+            const Workload &workload = workloadQueue.workloads[w];
+            const GameFrameMap::WorkloadMap &workloadMap = frame.frameMap.workloads[w];
+            if (!workloadMap.mapped) {
+                continue;
+            }
+            const DrawData &drawData = workload.drawData;
+            for (size_t t = 0; (t < drawData.worldTransforms.size()) && (t < workloadMap.transforms.size()); t++) {
+                const uint32_t id = drawData.transformGroups[drawData.worldTransformGroups[t]].matrixId;
+                if (id == G_EX_ID_IGNORE) {
+                    continue;
+                }
+                const bool isMapped = workloadMap.transforms[t].mapped;
+                if ((id == G_EX_ID_AUTO) && (drawData.worldTransformVertexCount(uint32_t(t)) == 0)) {
+                    continue;
+                }
+                if (id == G_EX_ID_AUTO) {
+                    static uint32_t s_autoSample = 0;
+                    if ((++s_autoSample % 50) == 1) {
+                        const hlslpp::float4x4 &am = drawData.worldTransforms[t];
+                        const uint32_t vi = drawData.worldTransformVertexIndices[t];
+                        std::fprintf(stderr, "[autoxf] verts=%u mapped=%d pos=(%.0f,%.0f,%.0f) scale=%.3f v0=(%.0f,%.0f,%.0f) phys=%08X\n", drawData.worldTransformVertexCount(uint32_t(t)), (int)workloadMap.transforms[t].mapped,
+                            (float)am[3][0], (float)am[3][1], (float)am[3][2], (float)hlslpp::length(am[0].xyz), drawData.posFloats[vi * 3 + 0], drawData.posFloats[vi * 3 + 1], drawData.posFloats[vi * 3 + 2],
+                            (t < drawData.worldTransformPhysicalAddresses.size()) ? drawData.worldTransformPhysicalAddresses[t] : 0u);
+                    }
+                }
+                const int cls = (id == G_EX_ID_AUTO) ? 16 : int(id >> 28);
+                total[cls]++;
+                mapped[cls] += isMapped ? 1 : 0;
+                if (cls == 16) {
+                    continue;
+                }
+                if (s_count[id]++ > 0) {
+                    dups[cls]++;
+                    dupUnmapped[cls] += isMapped ? 0 : 1;
+                }
+                Seen &s = s_seen[id];
+                if ((s.frame + 1 == s_frame) && (s.mapped != isMapped)) {
+                    flips[cls]++;
+                    if (detailLen < 400) {
+                        const hlslpp::float4x4 &m = drawData.worldTransforms[t];
+                        const hlslpp::float3 p = m[3].xyz;
+                        detailLen += std::snprintf(detail + detailLen, sizeof(detail) - detailLen, " %08X:%d@(%.0f,%.0f,%.0f)", id, (int)isMapped, (float)p.x, (float)p.y, (float)p.z);
+                    }
+                }
+                s.frame = s_frame;
+                s.mapped = isMapped;
+            }
+        }
+        char line[1024];
+        int len = std::snprintf(line, sizeof(line), "[pair] f=%llu jumpRej=%u vtx=%u/%u", (unsigned long long)s_frame, s_pairJumpRejects, s_vtxInterpStats[0], s_vtxInterpStats[0] + s_vtxInterpStats[1]);
+        s_pairJumpRejects = 0;
+        s_vtxInterpStats[0] = s_vtxInterpStats[1] = 0;
+        for (int c = 0; c < 17; c++) {
+            if (total[c] > 0) {
+                len += std::snprintf(line + len, sizeof(line) - len, " %c:%u/%u/f%u/d%u/du%u", (c == 16) ? 'A' : "0123456789ABCDEF"[c], mapped[c], total[c], flips[c], dups[c], dupUnmapped[c]);
+            }
+        }
+        std::fprintf(stderr, "%s%s\n", line, detail);
     }
 
     // GameFrame
@@ -364,13 +446,8 @@ namespace RT64 {
                     prevIt++;
                 }
                 else {
-                    // Distance guard for id-matched (LINEAR) transforms: an id can be reused across
-                    // frames for a different instance (F5's pooled effect nodes keep a stable pointer
-                    // but represent a new sprite), which teleports the matrix. Interpolating that jump
-                    // slides/flickers; skip the match so it pops instead. Only rejects gross jumps
-                    // relative to camera distance, so continuous fast motion still interpolates.
-                    // ROGUESQ_INTERP_ID_MAXJUMP=<frac> (default 0.6); <=0 disables the guard.
-                    static const float s_maxJump = [](){ const char* e = std::getenv("ROGUESQ_INTERP_ID_MAXJUMP"); float f = (e && e[0]) ? (float)atof(e) : 0.6f; return f; }();
+                    // ROGUESQ_INTERP_ID_MAXJUMP=<frac>: skip id matches that moved more than frac * camera distance in one frame. Off by default: it only ever rejected steady close flybys, which then drew a frame ahead.
+                    static const float s_maxJump = [](){ const char* e = std::getenv("ROGUESQ_INTERP_ID_MAXJUMP"); float f = (e && e[0]) ? (float)atof(e) : 0.0f; return f; }();
                     bool reject = false;
                     if (s_maxJump > 0.0f) {
                         const hlslpp::float4x4 &curM = curWorkload.drawData.worldTransforms[curIt->second];
@@ -383,6 +460,15 @@ namespace RT64 {
                     }
                     if (!reject) {
                         matchTransform(curWorkload, prevWorkload, curWorkloadMap, prevWorkloadMap, curIt->second, prevIt->second, modifiedBuffers);
+                    }
+                    else {
+                        s_pairJumpRejects++;
+                        static const bool s_log = [](){ const char *e = std::getenv("ROGUESQ_LOG_INTERP_PAIR"); return e && e[0] == '1'; }();
+                        if (s_log) {
+                            const hlslpp::float4x4 &cm = curWorkload.drawData.worldTransforms[curIt->second];
+                            const hlslpp::float4x4 &pm = prevWorkload.drawData.worldTransforms[prevIt->second];
+                            std::fprintf(stderr, "[jumprej] id=%08X cam=%.0f diff=%.0f\n", curIt->first, (float)hlslpp::length(cm[3].xyz), (float)hlslpp::length(cm[3].xyz - pm[3].xyz));
+                        }
                     }
                     curIt++;
                     prevIt++;
@@ -448,6 +534,7 @@ namespace RT64 {
 
         matchScenes(perspectiveScenes, prevFrame.perspectiveScenes);
         matchScenes(orthographicScenes, prevFrame.orthographicScenes);
+        logPairing(*this, workloadQueue);
 
         if (!workloadsModified.empty()) {
             thread_local std::vector<BufferUploader::Upload> uploads;
@@ -818,6 +905,9 @@ namespace RT64 {
         uint32_t curVertexCount = curWorkload.drawData.worldTransformVertexCount(curTransformIndex);
         uint32_t prevVertexIndex = prevWorkload.drawData.worldTransformVertexIndices[prevTransformIndex];
         uint32_t prevVertexCount = prevWorkload.drawData.worldTransformVertexCount(prevTransformIndex);
+        if (curGroup.vertexInterpolation != G_EX_COMPONENT_SKIP) {
+            s_vtxInterpStats[(curVertexCount != prevVertexCount) ? 1 : 0]++;
+        }
         if (((curGroup.vertexInterpolation != G_EX_COMPONENT_SKIP) || (curGroup.texcoordInterpolation == G_EX_COMPONENT_AUTO)) && (curVertexCount == prevVertexCount)) {
             const std::vector<float> &curPosFloats = curWorkload.drawData.posFloats;
             const std::vector<float> &prevPosFloats = prevWorkload.drawData.posFloats;

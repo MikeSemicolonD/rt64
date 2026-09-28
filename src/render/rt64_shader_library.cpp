@@ -599,7 +599,7 @@ namespace RT64 {
             RenderGraphicsPipelineDesc pipelineDesc;
             pipelineDesc.vertexShader = fullScreenVertexShader.get();
             pipelineDesc.pixelShader = regularShader.get();
-            pipelineDesc.renderTargetFormat[0] = RenderFormat::B8G8R8A8_UNORM; // TODO: Use whatever format the swap chain was created with.
+            pipelineDesc.renderTargetFormat[0] = SwapChainFormat;
             pipelineDesc.renderTargetBlend[0] = RenderBlendDesc::Copy();
             pipelineDesc.renderTargetCount = 1;
             pipelineDesc.pipelineLayout = videoInterfaceNearest.pipelineLayout.get();
