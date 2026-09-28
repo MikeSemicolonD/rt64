@@ -75,6 +75,18 @@ if (ANDROID)
     set(ZSTD_BUILD_DICTBUILDER OFF)
 endif()
 
+if (APPLE)
+    if (CMAKE_HOST_APPLE)
+        set(RT64_METAL_COMPILE_DEFAULT ON)
+    else()
+        set(RT64_METAL_COMPILE_DEFAULT OFF)
+    endif()
+    option(RT64_METAL_COMPILE "Compile Metal shaders to metallibs (needs xcrun metal)" ${RT64_METAL_COMPILE_DEFAULT})
+    if (NOT RT64_METAL_COMPILE)
+        message(WARNING "RT64: Metal shaders embedded as MSL source, not metallibs; this build cannot render.")
+    endif()
+endif()
+
 if (CMAKE_CROSSCOMPILING)
     set(RT64_HOST_FILE_TO_C "" CACHE FILEPATH "Host-built file_to_c used when cross-compiling")
     if (NOT EXISTS "${RT64_HOST_FILE_TO_C}")
@@ -159,6 +171,15 @@ function(build_shader_msl_impl TARGETOBJ FILENAME TARGET_NAME OUTNAME)
     add_custom_command(OUTPUT ${OUTNAME}.metal
             COMMAND spirv_cross_msl ${OUTNAME}.spv ${OUTNAME}.metal
             DEPENDS ${OUTNAME}.spv spirv_cross_msl)
+    # No Metal compiler off macOS: embed the MSL source in place of the metallib. The build links but cannot render.
+    if (NOT RT64_METAL_COMPILE)
+        add_custom_command(OUTPUT ${OUTNAME}.metal.c
+                COMMAND file_to_c ${OUTNAME}.metal ${TARGET_NAME}BlobMSL ${OUTNAME}.metal.c ${OUTNAME}.metal.h
+                DEPENDS ${OUTNAME}.metal file_to_c
+                BYPRODUCTS ${OUTNAME}.metal.h)
+        target_sources(${TARGETOBJ} PRIVATE ${OUTNAME}.metal.c)
+        return()
+    endif()
     add_custom_command(OUTPUT ${OUTNAME}.ir
             COMMAND xcrun -sdk macosx metal -o ${OUTNAME}.ir -c ${OUTNAME}.metal $<$<CONFIG:Debug>:-frecord-sources>
             DEPENDS ${OUTNAME}.metal)
@@ -477,7 +498,16 @@ endif()
 
 # Add any Apple-specific source files and libraries
 if (APPLE)
-    add_subdirectory(src/tools/spirv_cross_msl)
+    if (CMAKE_CROSSCOMPILING)
+        set(RT64_HOST_SPIRV_CROSS_MSL "" CACHE FILEPATH "Host-built spirv_cross_msl used when cross-compiling for Apple")
+        if (NOT EXISTS "${RT64_HOST_SPIRV_CROSS_MSL}")
+            message(FATAL_ERROR "Cross-compiling RT64 for Apple needs -DRT64_HOST_SPIRV_CROSS_MSL=<host spirv_cross_msl executable>")
+        endif()
+        add_executable(spirv_cross_msl IMPORTED GLOBAL)
+        set_target_properties(spirv_cross_msl PROPERTIES IMPORTED_LOCATION "${RT64_HOST_SPIRV_CROSS_MSL}")
+    else()
+        add_subdirectory(src/tools/spirv_cross_msl)
+    endif()
 
     target_sources(rt64 PRIVATE
         "${PROJECT_SOURCE_DIR}/src/apple/rt64_apple.mm"
