@@ -4,6 +4,7 @@
 
 #pragma once
 
+#include <atomic>
 #include <mutex>
 
 #include "common/rt64_common.h"
@@ -51,6 +52,7 @@ namespace RT64 {
         uint32_t viOriginalRate = 0;
         std::vector<uint32_t> colorImageAddressVector;
         std::unordered_set<uint32_t> colorImageAddressSet;
+        std::atomic<uint64_t> colorImageWorkloadId{ 0 };
         std::vector<std::unique_ptr<RenderTarget>> interpolatedColorTargets;
         InterpolatedFrameCounters interpolatedFrames[2];
         uint32_t interpolatedFramesIndex = 0;

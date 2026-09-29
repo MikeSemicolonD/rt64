@@ -942,10 +942,20 @@ namespace RT64 {
                     std::unordered_set<uint32_t> &colorSet = ext.sharedResources->colorImageAddressSet;
                     colorVector.clear();
                     colorSet.clear();
+                    ext.sharedResources->colorImageWorkloadId.store(workload.workloadId, std::memory_order_release);
                     for (int32_t f = workload.fbPairCount - 1; f >= 0; f--) {
                         const FramebufferPair &fbPair = workload.fbPairs[f];
                         bool interpolationCandidate = fbPair.earlyPresentCandidate();
                         if (fbPair.drawColorRect.isEmpty()) {
+                            continue;
+                        }
+
+                        // A pair whose color image is the Z buffer is a depth clear, never a presentable color buffer.
+                        static const bool s_keepZClear = []() {
+                            const char *v = std::getenv("ROGUESQ_FOLLOW_DRAW_KEEP_ZCLEAR");
+                            return v && v[0] && v[0] != '0';
+                        }();
+                        if (!s_keepZClear && fbPair.fillRectOnly && (fbPair.depthImage.address != 0) && (fbPair.colorImage.address == fbPair.depthImage.address)) {
                             continue;
                         }
 

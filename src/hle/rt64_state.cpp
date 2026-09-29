@@ -2,6 +2,7 @@
 // RT64
 //
 
+#include <unordered_map>
 #include <unordered_set>
 #include "rt64_state.h"
 
@@ -23,6 +24,7 @@
 #include "rt64_application.h"
 #include "rt64_interpreter.h"
 #include "rhi/rt64_render_hooks.h"
+#include "rt64_rs64_transition.h"
 
 #include <atomic>
 // Per-frame RT64 workload accumulators feeding the F5 profiler HUD's RDP slots
@@ -644,6 +646,47 @@ namespace RT64 {
         workload.fbPairSubmitted++;
     }
     
+    // ROGUESQ_LOG_TRANSITION=1 helper: fraction (0-100) of near-white RGBA16 pixels sampled on a 32x24 grid of a framebuffer's RDRAM.
+    static int rs64WhitePercent(const uint8_t *RDRAM, uint32_t address, uint32_t width, uint32_t height) {
+        if ((RDRAM == nullptr) || (width == 0) || (height == 0)) {
+            return 0;
+        }
+
+        int white = 0;
+        for (uint32_t gy = 0; gy < 24; gy++) {
+            for (uint32_t gx = 0; gx < 32; gx++) {
+                const uint32_t x = (gx * width) / 32, y = (gy * height) / 24;
+                const uint32_t a = address + (y * width + x) * 2;
+                const uint32_t px = (uint32_t(RDRAM[a ^ 3]) << 8) | RDRAM[(a + 1) ^ 3];
+                const uint32_t r = (px >> 11) & 31, g = (px >> 6) & 31, b = (px >> 1) & 31;
+                if ((r >= 28) && (g >= 28) && (b >= 28)) {
+                    white++;
+                }
+            }
+        }
+
+        return (white * 100) / (32 * 24);
+    }
+
+    // Throttles write-back white logs per framebuffer address so boot-logo spam doesn't use up the budget before later transitions.
+    static bool rs64WhiteLogDue(uint32_t address, uint64_t workloadId) {
+        static std::unordered_map<uint32_t, uint64_t> s_last;
+        auto it = s_last.find(address);
+        if ((it != s_last.end()) && (workloadId < it->second + 120)) {
+            return false;
+        }
+        s_last[address] = workloadId;
+        return true;
+    }
+
+    static bool rs64LogTransition() {
+        static const bool s_on = []() {
+            const char *v = std::getenv("ROGUESQ_LOG_TRANSITION");
+            return v && v[0] && v[0] != '0';
+        }();
+        return s_on;
+    }
+
     void State::checkRDRAM() {
         if (!rdramCheckPending) {
             return;
@@ -1577,6 +1620,18 @@ namespace RT64 {
                         const bool colorFbPlausible = !s_wbStrict || (colorFb->addressStart & 0x3F) == 0;
                         if (colorFbPlausible && colorFb->addressStart >= kFbMinAddr && colorFb->addressStart < kFbMaxAddr) {
                             colorFb->copyNativeToRAM(&(writeBackRDRAM ? writeBackRDRAM : RDRAM)[colorFb->addressStart], colorWriteWidth, colorRowStart, std::min(colorRowEnd, colorFb->height));
+                            if (rs64LogTransition() && (colorFb->siz == G_IM_SIZ_16b)) {
+                                const uint8_t *wbRAM = writeBackRDRAM ? writeBackRDRAM : RDRAM;
+                                const int whitePct = rs64WhitePercent(wbRAM, colorFb->addressStart, colorFb->width, colorFb->height);
+                                if ((whitePct >= 50) && rs64WhiteLogDue(colorFb->addressStart, workloadId)) {
+                                    const FramebufferPair &wbPair = workload.fbPairs[pairCursor];
+                                    std::fprintf(stderr, "[transition] rdp-wrote-white fb=0x%06X w=%u h=%u white=%d%% rows=%u..%u fillOnly=%d calls=%u proj=%u zimg=0x%06X workload=%llu\n",
+                                        colorFb->addressStart, colorFb->width, colorFb->height, whitePct, colorRowStart, colorRowEnd,
+                                        wbPair.fillRectOnly ? 1 : 0, (unsigned)wbPair.gameCallCount, (unsigned)wbPair.projectionCount, wbPair.depthImage.address,
+                                        (unsigned long long)workloadId);
+                                    std::fflush(stderr);
+                                }
+                            }
                         }
 
                         static const bool s_wbLog = [](){ const char* e = std::getenv("ROGUESQ_RT64_WB_LOG"); return e && e[0] && e[0] != '0'; }();
@@ -2916,6 +2971,7 @@ namespace RT64 {
 
     void State::advanceWorkload(Workload &workload, bool paused) {
         workload.workloadId = ++workloadId;
+        g_rs64_last_workload_id.store(workloadId, std::memory_order_release);
         workload.presentId = presentId;
         workload.debuggerCamera = debuggerInspector.camera;
         workload.debuggerRenderer = debuggerInspector.renderer;

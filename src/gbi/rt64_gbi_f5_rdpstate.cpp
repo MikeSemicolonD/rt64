@@ -493,6 +493,36 @@ namespace RT64 {
             GBI_RDP::fillRect(state, dl);
         }
 
+        // ROGUESQ_F5_TEXRECT_FOLLOWUP_AS_CMD=1 restores the old walk (texrect second word dispatched as a command) for A/B.
+        static const bool s_texrect_consume = [](){ const char* v = std::getenv("ROGUESQ_F5_TEXRECT_FOLLOWUP_AS_CMD"); return !(v && *v && v[0] != '0'); }();
+
+        // ROGUESQ_LOG_DL_HEALTH=1: every 10 s, texrect follow-up words whose top byte is a nonzero opcode (by op) and garbage color-image rejects (the walk-desync signal).
+        struct DlHealth { uint64_t fu = 0, fuOp = 0, op[256] = {}, cimgHi = 0, cimgLow = 0, cimgPast = 0, cimgWidth = 0, cimgWindow = 0; };
+        static DlHealth s_dlh;
+        static const bool s_dlhOn = [](){ const char* v = std::getenv("ROGUESQ_LOG_DL_HEALTH"); return v && *v && v[0] != '0'; }();
+        static void dlh_tick() {
+            static auto s_last = std::chrono::steady_clock::now();
+            const auto now = std::chrono::steady_clock::now();
+            if (now - s_last < std::chrono::seconds(10)) return;
+            s_last = now;
+            std::string ops;
+            char buf[32];
+            for (int i = 1; i < 256; i++) {
+                if (s_dlh.op[i]) { std::snprintf(buf, sizeof(buf), " %02X:%llu", i, (unsigned long long)s_dlh.op[i]); ops += buf; }
+            }
+            std::fprintf(stderr, "[dl-health] consume=%d texrect=%llu followupOp=%llu cimgReject hi=%llu low=%llu past=%llu width=%llu window=%llu ops:%s\n",
+                s_texrect_consume ? 1 : 0, (unsigned long long)s_dlh.fu, (unsigned long long)s_dlh.fuOp, (unsigned long long)s_dlh.cimgHi,
+                (unsigned long long)s_dlh.cimgLow, (unsigned long long)s_dlh.cimgPast, (unsigned long long)s_dlh.cimgWidth, (unsigned long long)s_dlh.cimgWindow, ops.c_str());
+            std::fflush(stderr);
+        }
+        static void dlh_followup(const DisplayList* dl) {
+            if (!s_dlhOn) return;
+            s_dlh.fu++;
+            const uint32_t op = dl[1].w0 >> 24;
+            if (op != 0) { s_dlh.fuOp++; s_dlh.op[op]++; }
+            dlh_tick();
+        }
+
         void texrectLLE_guarded(State *state, DisplayList **dl) {
             // Track per-color-buffer draw ACTIVITY with exponential decay → publish the
             // most-active buffer as g_most_drawn_fb. This is the buffer the game is
@@ -853,7 +883,12 @@ namespace RT64 {
                     }
                 }
             }
+            dlh_followup(*dl);
             GBI_RDP::texrectLLE(state, dl);
+            // The ucode consumes all 16 bytes. Left in the stream, the S/T/DsDx/DtDy word runs as a command whenever S >= 0x100 (e.g. 0x0D = SETOTHERMODE_H forcing copy mode: the white flash on the game-over fade).
+            if (s_texrect_consume) {
+                (*dl)++;
+            }
         }
 
         void texrectFlipLLE_guarded(State *state, DisplayList **dl) {
@@ -861,7 +896,11 @@ namespace RT64 {
                 (*dl)++;
                 return;
             }
+            dlh_followup(*dl);
             GBI_RDP::texrectFlipLLE(state, dl);
+            if (s_texrect_consume) {
+                (*dl)++;
+            }
         }
 
         // loadTLUT / loadTile / loadBlock guards.
@@ -1212,6 +1251,7 @@ namespace RT64 {
                 const uint8_t hi = (uint8_t)(w1 >> 24);
                 if (hi != 0x80 && hi != 0x00) {
                     rt64_f5_desync_dump("setCIMG garbage-high-byte", w1);
+                    s_dlh.cimgHi++;
                 }
             }
             const uint32_t fmt = (w0 >> 21) & 0x7;
@@ -1222,6 +1262,7 @@ namespace RT64 {
             // them and derefs null in recordOperations (AV reading 0x10). Real frame-
             // buffers live high in RDRAM; keep the previous valid color image instead.
             if ((w1 & 0x00FFFFFFu) < 0x100000u) {
+                s_dlh.cimgLow++;
                 if (gbi_log_enabled()) {
                     static int s_lo = 0;
                     if (++s_lo <= 8) { std::fprintf(stderr, "[gbi-f5] setCIMG reject low-addr w1=0x%08X\n", w1); std::fflush(stderr); }
@@ -1235,6 +1276,7 @@ namespace RT64 {
             // crash). A real framebuffer can't live past RDRAM. Same out-of-RDRAM class as the
             // op_b5 DL-walk bound. Keep the previous valid color image instead.
             if ((w1 & 0x00FFFFFFu) >= 0x800000u) {
+                s_dlh.cimgPast++;
                 if (gbi_log_enabled()) {
                     static int s_hi = 0;
                     if (++s_hi <= 8) { std::fprintf(stderr, "[gbi-f5] setCIMG reject high-addr (past RDRAM) w1=0x%08X\n", w1); std::fflush(stderr); }
@@ -1247,7 +1289,10 @@ namespace RT64 {
             {
                 const uint32_t cw = (w0 & 0xFFFu) + 1;
                 const uint32_t ca = w1 & 0x00FFFFFFu;
-                if (cw <= 1u || ca < 0x400000u || ca >= 0x800000u) rt64_f5_desync_dump("setCIMG w<=1 or out-of-window", w1);
+                if (cw <= 1u || ca < 0x400000u || ca >= 0x800000u) {
+                    rt64_f5_desync_dump("setCIMG w<=1 or out-of-window", w1);
+                    s_dlh.cimgWindow++;
+                }
             }
             // Reject garbage-WIDTH color images (fb-registry showed widths 3477/3924).
             // RT64 builds a huge/bad render target and createTileCopyRecord derefs null
@@ -1261,6 +1306,7 @@ namespace RT64 {
                 const uint32_t cimgWidth0 = (w0 & 0xFFFu) + 1;
                 static const bool s_strict = [](){ const char* e = std::getenv("ROGUESQ_F5_CIMG_STRICT"); return !(e && e[0] == '0'); }();
                 if (s_strict && (cimgWidth0 < 16u || ((w1 & 0x3Fu) != 0u))) {
+                    s_dlh.cimgWidth++;
                     if (gbi_log_enabled()) {
                         static int s_gw = 0;
                         if (++s_gw <= 8) { std::fprintf(stderr, "[gbi-f5] setCIMG reject garbage width=%u addr=0x%08X\n", cimgWidth0, w1); std::fflush(stderr); }

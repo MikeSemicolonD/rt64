@@ -39,6 +39,17 @@ namespace RT64 {
             HookedApplicationWindow = nullptr;
         }
 
+        // Restore the previous SDL event filter; left installed, SDL would call into this deleted window (e.g. after a renderer rebuild).
+        if (sdlEventFilterInstalled) {
+            SDL_EventFilter currentFilter = nullptr;
+            void *currentUserdata = nullptr;
+            if (SDL_GetEventFilter(&currentFilter, &currentUserdata) && (currentFilter == &ApplicationWindow::sdlEventFilter) && (currentUserdata == this)) {
+                SDL_SetEventFilter(sdlEventFilterStored, sdlEventFilterUserdata);
+            }
+
+            sdlEventFilterInstalled = false;
+        }
+
 #   ifdef _WIN32
         if (windowHook != nullptr) {
             UnhookWindowsHookEx(windowHook);

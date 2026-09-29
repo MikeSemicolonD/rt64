@@ -5,18 +5,35 @@
 #include "rt64_present_queue.h"
 
 #include <atomic>
+#include <chrono>
 #include <cstdio>
 #include <cstdlib>
+#include <string>
 
 #include "common/rt64_thread.h"
 #include "rhi/rt64_render_hooks.h"
 
+#include "rt64_rs64_transition.h"
 #include "rt64_workload_queue.h"
 
 // Most draw-active color buffer, published by the F3DFACTOR5 GBI module. Present
 // mode 4 presents it so offscreen-rendered content (e.g. the cinematic explosion
 // in 0x290000) reaches the screen.
 extern "C" volatile unsigned g_most_drawn_fb;
+
+// ROGUESQ_LOG_SWAPCHAIN=1: surface suspend/resume and swapchain resize events (the Vulkan backend logs acquire/present results).
+static bool rs64LogSwapChain() {
+    static const bool enabled = []() {
+        const char *v = std::getenv("ROGUESQ_LOG_SWAPCHAIN");
+        return (v != nullptr) && (v[0] != '\0') && (v[0] != '0');
+    }();
+    return enabled;
+}
+
+std::atomic<uint32_t> g_rs64_cpu_cleared_fb{ 0 };
+std::atomic<uint64_t> g_rs64_cpu_cleared_wid{ 0 };
+std::atomic<uint32_t> g_rs64_transition_gate_fb{ 0 };
+std::atomic<uint64_t> g_rs64_last_workload_id{ 0 };
 
 namespace RT64 {
     // PresentQueue
@@ -336,6 +353,105 @@ namespace RT64 {
 
             Framebuffer *presentFb = viFb;
 
+            // The first buffer of a new video mode is CPU-zeroed (black on hardware) but RT64 still holds an older target there.
+            static const bool s_tr_gate = []() {
+                const char *v = std::getenv("ROGUESQ_NO_TRANSITION_BLANK");
+                return !(v && v[0] && v[0] != '0');
+            }();
+            static rs64transition::Gate s_trGate;
+            const uint32_t trArmed = g_rs64_cpu_cleared_fb.exchange(0, std::memory_order_acq_rel);
+            bool transitionBlack = false;
+            uint64_t trDrawnWid = 0;
+            if (s_tr_gate) {
+                if (trArmed != 0) {
+                    s_trGate.arm(trArmed, g_rs64_cpu_cleared_wid.load(std::memory_order_acquire));
+                }
+
+                // The vector is rebuilt by the workload thread without a lock here; only trust a hit when its workload id is unchanged across the scan.
+                if (s_trGate.armedFb() != 0) {
+                    const uint64_t widBefore = ext.sharedResources->colorImageWorkloadId.load(std::memory_order_acquire);
+                    bool hit = false;
+                    for (uint32_t a : ext.sharedResources->colorImageAddressVector) {
+                        if (rs64transition::viShowsBuffer(a, s_trGate.armedFb())) {
+                            hit = true;
+                            break;
+                        }
+                    }
+
+                    const uint64_t widAfter = ext.sharedResources->colorImageWorkloadId.load(std::memory_order_acquire);
+                    if (hit && (widBefore == widAfter)) {
+                        trDrawnWid = widAfter;
+                    }
+                }
+
+                transitionBlack = s_trGate.shouldBlack(present.screenVI.fbAddress(), trDrawnWid);
+                g_rs64_transition_gate_fb.store(s_trGate.armedFb(), std::memory_order_release);
+            }
+
+            // A zero-height VI (the game's mode-change blank, vStart == vEnd) gives fbSize (0,0); the VI pass would divide by it and paint the whole swapchain.
+            static const bool s_zeroSizeDraw = []() {
+                const char *v = std::getenv("ROGUESQ_VI_ZERO_SIZE_DRAW");
+                return v && v[0] && v[0] != '0';
+            }();
+            const hlslpp::uint2 trFbSize = present.screenVI.fbSize();
+            const bool zeroSizeVI = (trFbSize.x == 0) || (trFbSize.y == 0);
+            if (zeroSizeVI && !s_zeroSizeDraw) {
+                transitionBlack = true;
+            }
+
+            // ROGUESQ_LOG_TRANSITION=1: every present for 120 presents after each mode-change buffer clear.
+            static const bool s_tr_log = []() {
+                const char *v = std::getenv("ROGUESQ_LOG_TRANSITION");
+                return v && v[0] && v[0] != '0';
+            }();
+            if (s_tr_log) {
+                static uint32_t s_lastArm = 0;
+                static int s_left = 0;
+                if (trArmed != 0) {
+                    s_lastArm = trArmed;
+                    s_left = 120;
+                }
+
+                if (zeroSizeVI) {
+                    std::fprintf(stderr, "[transition] zero-size VI present vi=0x%08X w=%u vRegion=0x%08X hRegion=0x%08X presentWid=%llu drawn=%d\n",
+                        present.screenVI.fbAddress(), (unsigned)present.screenVI.width, (unsigned)present.screenVI.vRegion.word, (unsigned)present.screenVI.hRegion.word,
+                        (unsigned long long)present.workloadId, s_zeroSizeDraw ? 1 : 0);
+                    std::fflush(stderr);
+                }
+
+                // Presents before a clear go to a ring that is dumped when the clear arrives.
+                constexpr int kRing = 160;
+                static std::string s_ring[kRing];
+                static int s_head = 0;
+                if (trArmed != 0) {
+                    std::fprintf(stderr, "[transition] ---- last %d presents before clear 0x%06X ----\n", kRing, trArmed);
+                    for (int i = 0; i < kRing; i++) {
+                        const std::string &e = s_ring[(s_head + i) % kRing];
+                        if (!e.empty()) {
+                            std::fprintf(stderr, "%s\n", e.c_str());
+                        }
+                    }
+
+                    std::fprintf(stderr, "[transition] ---- end ring ----\n");
+                }
+
+                const long long ms = (long long)(std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now().time_since_epoch()).count() % 100000);
+                char line[320];
+                std::snprintf(line, sizeof(line), "[transition] present t=%05lld vi=0x%08X w=%u size=%ux%u chosen=0x%08X lastWrite=%d branch=%s armed=0x%06X black=%d armWid=%llu drawnWid=%llu presentWid=%llu",
+                    ms, present.screenVI.fbAddress(), (unsigned)present.screenVI.width, (unsigned)trFbSize.x, (unsigned)trFbSize.y, (presentFb != nullptr) ? presentFb->addressStart : 0u,
+                    (presentFb != nullptr) ? (int)presentFb->lastWriteType : -1, (viFb != nullptr) ? "A" : "B", s_lastArm, transitionBlack ? 1 : 0,
+                    (unsigned long long)s_trGate.armWorkloadId, (unsigned long long)trDrawnWid, (unsigned long long)present.workloadId);
+                if (s_left > 0) {
+                    --s_left;
+                    std::fprintf(stderr, "%s\n", line);
+                    std::fflush(stderr);
+                }
+                else {
+                    s_ring[s_head] = line;
+                    s_head = (s_head + 1) % kRing;
+                }
+            }
+
             // Diagnostic: which branch + storage stats.
             static const bool s_pq_log = [](){
                 const char *v = std::getenv("ROGUESQ_LOG_PRESENT_EARLY");
@@ -367,7 +483,10 @@ namespace RT64 {
                 }
             }
             
-            if ((presentFb != nullptr) && (viFb != nullptr)) {
+            if (transitionBlack) {
+                // colorTarget stays null, so the swapchain is cleared to black.
+            }
+            else if ((presentFb != nullptr) && (viFb != nullptr)) {
                 for (uint32_t colorAddress : ext.sharedResources->colorImageAddressVector) {
                     Framebuffer *colorFb = fbManager.find(colorAddress);
                     if (colorFb == nullptr) {
@@ -420,9 +539,17 @@ namespace RT64 {
                         std::fflush(stderr);
                     }
                 }
+                static const bool s_depthAsColor = []() {
+                    const char *v = std::getenv("ROGUESQ_PRESENT_DEPTH_AS_COLOR");
+                    return v && v[0] && v[0] != '0';
+                }();
                 if (!colorTarget->isEmpty()) {
+                    // A buffer last written as depth is a stale Z buffer at a reused address; show black, not Z-as-RGBA16 white.
+                    if (!s_depthAsColor && (presentFb->lastWriteType == Framebuffer::Type::Depth)) {
+                        colorTarget = nullptr;
+                    }
                     // If a depth framebuffer is about to be shown, convert it to color.
-                    if (presentFb->isLastWriteDifferent(Framebuffer::Type::Color)) {
+                    else if (presentFb->isLastWriteDifferent(Framebuffer::Type::Color)) {
                         RenderTargetKey otherColorTargetKey(presentFb->addressStart, presentFb->width, presentFb->siz, presentFb->lastWriteType);
                         RenderTarget &otherColorTarget = targetManager.get(otherColorTargetKey, true);
                         if (!otherColorTarget.isEmpty()) {
@@ -667,6 +794,9 @@ namespace RT64 {
         if (surfaceSuspended) {
             return;
         }
+        if (rs64LogSwapChain()) {
+            std::fprintf(stderr, "[swapchain] surface suspended\n");
+        }
         surfaceSuspended = true;
         ext.presentGraphicsWorker->commandList->begin();
         ext.presentGraphicsWorker->commandList->end();
@@ -680,6 +810,9 @@ namespace RT64 {
         std::unique_lock<std::mutex> threadLock(threadMutex);
         if (!surfaceSuspended) {
             return;
+        }
+        if (rs64LogSwapChain()) {
+            std::fprintf(stderr, "[swapchain] surface resumed\n");
         }
         ext.swapChain->setWindow(renderWindow);
         swapChainFramebuffers.clear();
@@ -753,6 +886,10 @@ namespace RT64 {
                 }
                 const bool needsResize = !suspended && (ext.swapChain->needsResize() || !swapChainValid);
                 if (needsResize) {
+                    if (rs64LogSwapChain()) {
+                        std::fprintf(stderr, "[swapchain] resize: needsResize=%d swapChainValid=%d\n", ext.swapChain->needsResize() ? 1 : 0, swapChainValid ? 1 : 0);
+                    }
+
                     ext.presentGraphicsWorker->commandList->begin();
                     ext.presentGraphicsWorker->commandList->end();
                     ext.presentGraphicsWorker->execute();
