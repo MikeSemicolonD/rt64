@@ -4,6 +4,8 @@
 
 #pragma once
 
+#include <atomic>
+
 #include "common/rt64_user_configuration.h"
 #include "hle/rt64_vi.h"
 
@@ -11,6 +13,9 @@
 #include "rt64_shader_library.h"
 
 namespace RT64 {
+    // Fraction of the window height the presented picture is moved up by (the host sets it while an on-screen keyboard covers the bottom).
+    extern std::atomic<float> presentShiftY;
+
     struct VIRenderer {
         std::unique_ptr<VideoInterfaceDescriptorSet> descriptorSet;
         const RenderSampler *descriptorSetSampler = nullptr;

@@ -35,6 +35,10 @@ namespace RT64 {
         // The shader compilation thread should have idle priority by default as the application can use the ubershader in the meantime.
         Thread::setCurrentThreadPriority(Thread::Priority::Idle);
 
+#if defined(ENABLE_OPTIMIZED_SHADER_GENERATION) && defined(_WIN32)
+        shaderCompiler = std::make_unique<ShaderCompiler>();
+#endif
+
         threadRunning = true;
 
         while (threadRunning) {
@@ -62,7 +66,7 @@ namespace RT64 {
                 assert((shaderCache->shaderUber != nullptr) && "Ubershader should've been created by the time a new shader is submitted to the cache.");
                 const RenderPipelineLayout *uberPipelineLayout = shaderCache->shaderUber->pipelineLayout.get();
                 const RenderMultisampling multisampling = shaderCache->multisampling;
-                std::unique_ptr<RasterShader> newShader = std::make_unique<RasterShader>(shaderCache->device, shaderDesc, uberPipelineLayout, shaderCache->shaderFormat, multisampling, shaderCache->shaderCompiler.get(), &shaderCache->optimizerCacheSPIRV);
+                std::unique_ptr<RasterShader> newShader = std::make_unique<RasterShader>(shaderCache->device, shaderDesc, uberPipelineLayout, shaderCache->shaderFormat, multisampling, shaderCompiler.get(), &shaderCache->optimizerCacheSPIRV);
 
                 {
                     const std::unique_lock<std::mutex> lock(shaderCache->GPUShadersMutex);
@@ -81,10 +85,6 @@ namespace RT64 {
         this->ubershaderThreadCount = ubershaderThreadCount;
 
 #ifdef ENABLE_OPTIMIZED_SHADER_GENERATION
-#   ifdef _WIN32
-        shaderCompiler = std::make_unique<ShaderCompiler>();
-#   endif
-
         descQueueActiveCount = threadCount;
 
         for (uint32_t t = 0; t < threadCount; t++) {

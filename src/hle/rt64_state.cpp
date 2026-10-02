@@ -30,9 +30,9 @@
 // Per-frame RT64 workload accumulators feeding the F5 profiler HUD's RDP slots
 // (no real RDP on the PC path). Summed in State::flush(); read-and-cleared by
 // osDpGetCounters_recomp. tris->white(pipe), draws->magenta(cmd), texloads->green(tmem).
-extern "C" std::atomic<uint32_t> g_rs64_frame_tris{0};
-extern "C" std::atomic<uint32_t> g_rs64_frame_draws{0};
-extern "C" std::atomic<uint32_t> g_rs64_frame_texloads{0};
+extern "C" { std::atomic<uint32_t> g_rs64_frame_tris{0}; }
+extern "C" { std::atomic<uint32_t> g_rs64_frame_draws{0}; }
+extern "C" { std::atomic<uint32_t> g_rs64_frame_texloads{0}; }
 
 //#define ASSERT_ON_BLENDER_EMULATION
 #define SYNC_ON_EVERY_FB_PAIR 0
@@ -239,12 +239,10 @@ namespace RT64 {
         {
             static int s_skyFix = -1;
             if (s_skyFix < 0) { const char *e = std::getenv("ROGUESQ_F5_SKY_NO_ZWRITE"); s_skyFix = (e && e[0] == '0') ? 0 : 1; }
-            // Matches the game's sky state (zSource=PRIM, Z_UPD, no Z_CMP, primDepth near max) on every sky draw, including the single-sided horizon part; ROGUESQ_F5_SKY_PIN_ALL=1 = old cull=BOTH rule.
-            static const bool s_pinAll = [](){ const char *e = std::getenv("ROGUESQ_F5_SKY_PIN_ALL"); return e && e[0] == '1'; }();
+            // Matches the game's sky state (zSource=PRIM, Z_UPD, no Z_CMP, primDepth near max) on every sky draw, including the single-sided horizon part.
             const uint32_t skyL = rdp->otherMode.L;
             const bool gameSkyPin = (skyL & G_ZS_PRIM) && (skyL & Z_UPD) && !(skyL & Z_CMP) && rdp->primDepthStack[rdp->primDepthStackSize - 1].x >= 0.99f;
-            const bool cullBoth = rsp->cullBothMask != 0 && (drawCall.geometryMode & rsp->cullBothMask) == rsp->cullBothMask;
-            if (s_skyFix && (s_pinAll ? cullBoth : gameSkyPin)) {
+            if (s_skyFix && gameSkyPin) {
                 drawCall.otherMode.L |= (uint32_t)(G_ZS_PRIM | Z_UPD);
                 drawCall.rdpParams.primDepth = { 0.99999f, 0.0f };   // just under the 1.0 clear; remap T (0.995) stays well below
             }

@@ -199,53 +199,6 @@ namespace RT64 {
                     s_count, tile, fmt, siz, line, tmem, palette);
                 std::fflush(stderr);
             }
-            // ROGUESQ_CI4_FROM_I4=1: Factor 5 declares the cinematic render tile as
-            // I4 (fmt=4 siz=0) but loads a 16-color TLUT and does the palette lookup
-            // via the 0xFC11FE23 combiner. RT64's pipeline sees I4 → decodes as
-            // intensity, ignoring the TLUT → garbled/blocky color. When a CI4-sized
-            // TLUT loaded just before this render-tile setup, rewrite fmt I4 -> CI
-            // (fmt bits w0[23:21] = 2) so RT64 applies the palette. Scoped by the
-            // recent-TLUT flag to avoid touching genuine I4 (font) textures.
-            {
-                static int s_ci4 = -1;
-                if (s_ci4 < 0) { const char* v = std::getenv("ROGUESQ_CI4_FROM_I4"); s_ci4 = (v && *v && v[0] != '0') ? 1 : 0; }
-                const uint8_t rtile = (*dl)->p1(24, 3);
-                const uint8_t rfmt  = (*dl)->p0(21, 3);
-                const uint8_t rsiz  = (*dl)->p0(19, 2);
-                if (s_ci4 && s_ci4_tlut_recent > 0) {
-                    // DIAG: show every setTile inside the TLUT window so we can see the
-                    // cinematic's actual render-tile params (not gated by LOG_GBI).
-                    static int s_dl = 0;
-                    if (++s_dl <= 24) { std::fprintf(stderr, "[ci4-diag] in-TLUT-window setTile tile=%u fmt=%u siz=%u recent=%d\n", rtile, rfmt, rsiz, s_ci4_tlut_recent); std::fflush(stderr); }
-                    // Reinterpret a 4-bit render tile (any tile) declared as I -> CI so
-                    // RT64 applies the loaded palette.
-                    if (rfmt == 4 && rsiz == 0) {
-                        (*dl)->w0 = ((*dl)->w0 & ~(0x7u << 21)) | (0x2u << 21);  // fmt I(4) -> CI(2)
-                        static int s_rl = 0;
-                        if (++s_rl <= 6) { std::fprintf(stderr, "[gbi-f5] reinterpret render tile %u I4 -> CI4 (TLUT-active)\n", rtile); std::fflush(stderr); }
-                    }
-                    // ROGUESQ_CI4_TILESIZE=1: synthesize a setTileSize for the render
-                    // tile. TMEM-dump proved the load is correct, so the garble is
-                    // RT64 mapping tex-coords with a wrong W×H. Derive W from the tile
-                    // line (line 64-bit words -> 16 texels/word for 4b), H from the
-                    // loaded block. Emit AFTER the game's setTile so it takes effect.
-                    static int s_ts = -1;
-                    if (s_ts < 0) { const char* v = std::getenv("ROGUESQ_CI4_TILESIZE"); s_ts = (v && *v && v[0] != '0') ? 1 : 0; }
-                    if (s_ts && rfmt == 4 && rsiz == 0 && s_ci4_last_block_words > 0) {
-                        const uint16_t rline = (*dl)->p0(9, 9);
-                        int W = rline > 0 ? (int)rline * 16 : 32;          // 4b: 16 texels per 64-bit word
-                        int H = (s_ci4_last_block_words * 4) / (W > 0 ? W : 32); // 16b words *4 = CI4 texels
-                        if (H < 1) H = 1;
-                        // Apply to the game's setTile first, then override size.
-                        GBI_RDP::setTile(state, dl);
-                        state->rdp->setTileSize(rtile, 0, 0, (uint16_t)((W - 1) << 2), (uint16_t)((H - 1) << 2));
-                        static int s_tl = 0;
-                        if (++s_tl <= 6) { std::fprintf(stderr, "[gbi-f5] synth setTileSize tile=%u W=%d H=%d (blkwords=%d line=%u)\n", rtile, W, H, s_ci4_last_block_words, rline); std::fflush(stderr); }
-                        if (s_ci4_tlut_recent > 0) --s_ci4_tlut_recent;
-                        return;  // already issued setTile
-                    }
-                }
-            }
             if (s_ci4_tlut_recent > 0) --s_ci4_tlut_recent;  // bound the CI4 window
             GBI_RDP::setTile(state, dl);
         }
@@ -463,21 +416,6 @@ namespace RT64 {
                     (*dl)->p0(12, 12), (*dl)->p0(0, 12));
                 std::fflush(stderr);
             }
-            // ROGUESQ_FILL_WHITE_TO_BLACK=1: the game clears the presented buffer
-            // (0x76A000) to WHITE (0xFFFCFFFC) then renders the scene on top; our
-            // HLE no-ops the op_02 scene geometry, so only the white survives = white
-            // screen. Force the white clear to black so any faint sprite/geometry that
-            // DOES render becomes visible. Diagnostic for the white-bg symptom.
-            {
-                static int s_w2b = -1;
-                if (s_w2b < 0) { const char* v = std::getenv("ROGUESQ_FILL_WHITE_TO_BLACK"); s_w2b = (v && *v && v[0] != '0') ? 1 : 0; }
-                if (s_w2b) {
-                    const uint32_t fc = state->rdp->fillColorStack[state->rdp->fillColorStackSize - 1];
-                    if (fc == 0xFFFCFFFCu || fc == 0xFFFEFFFEu || fc == 0xFFFFFFFFu) {
-                        state->rdp->setFillColor(0x00010001u);  // RGBA5551 black, alpha=1
-                    }
-                }
-            }
             // DIAG (ROGUESQ_LOG_FILL=1): sample the actual clear color + rect size +
             // target buffer across the whole run, to see what the cinematic/logo
             // buffers are cleared to (chasing the white-bg-not-black symptom).
@@ -493,9 +431,6 @@ namespace RT64 {
             GBI_RDP::fillRect(state, dl);
         }
 
-        // ROGUESQ_F5_TEXRECT_FOLLOWUP_AS_CMD=1 restores the old walk (texrect second word dispatched as a command) for A/B.
-        static const bool s_texrect_consume = [](){ const char* v = std::getenv("ROGUESQ_F5_TEXRECT_FOLLOWUP_AS_CMD"); return !(v && *v && v[0] != '0'); }();
-
         // ROGUESQ_LOG_DL_HEALTH=1: every 10 s, texrect follow-up words whose top byte is a nonzero opcode (by op) and garbage color-image rejects (the walk-desync signal).
         struct DlHealth { uint64_t fu = 0, fuOp = 0, op[256] = {}, cimgHi = 0, cimgLow = 0, cimgPast = 0, cimgWidth = 0, cimgWindow = 0; };
         static DlHealth s_dlh;
@@ -510,8 +445,8 @@ namespace RT64 {
             for (int i = 1; i < 256; i++) {
                 if (s_dlh.op[i]) { std::snprintf(buf, sizeof(buf), " %02X:%llu", i, (unsigned long long)s_dlh.op[i]); ops += buf; }
             }
-            std::fprintf(stderr, "[dl-health] consume=%d texrect=%llu followupOp=%llu cimgReject hi=%llu low=%llu past=%llu width=%llu window=%llu ops:%s\n",
-                s_texrect_consume ? 1 : 0, (unsigned long long)s_dlh.fu, (unsigned long long)s_dlh.fuOp, (unsigned long long)s_dlh.cimgHi,
+            std::fprintf(stderr, "[dl-health] texrect=%llu followupOp=%llu cimgReject hi=%llu low=%llu past=%llu width=%llu window=%llu ops:%s\n",
+                (unsigned long long)s_dlh.fu, (unsigned long long)s_dlh.fuOp, (unsigned long long)s_dlh.cimgHi,
                 (unsigned long long)s_dlh.cimgLow, (unsigned long long)s_dlh.cimgPast, (unsigned long long)s_dlh.cimgWidth, (unsigned long long)s_dlh.cimgWindow, ops.c_str());
             std::fflush(stderr);
         }
@@ -562,35 +497,6 @@ namespace RT64 {
                     }
                 }
             }
-            // ROGUESQ_MEASURE_FB=1: decisive mesh-vs-billboard test. If a texrect is
-            // consuming a flipbook-range texture (0x4Cxxxx-0x52xxxx), the explosion is
-            // 2D BILLBOARDS (texrects), and we log its on-screen px size. If this never
-            // fires while the flipbook loads, the explosion is triangle/mesh geometry.
-            {
-                static int s_mf = -1;
-                if (s_mf == -1) { const char* v = std::getenv("ROGUESQ_MEASURE_FB"); s_mf = (v && *v && v[0] != '0') ? 0 : -2; }
-                const uint32_t tsrc = state->rdp->texture.address & 0x00FFFFFFu;
-                if (s_mf >= 0 && s_mf < 24 && tsrc >= 0x4C0000u && tsrc < 0x520000u) {
-                    ++s_mf;
-                    const int32_t ulx = (*dl)[0].p1(12, 12), uly = (*dl)[0].p1(0, 12);
-                    const int32_t lrx = (*dl)[0].p0(12, 12), lry = (*dl)[0].p0(0, 12);
-                    const uint8_t rtile = (*dl)[0].p1(24, 3);
-                    const int32_t s  = (*dl)[1].p0(16, 16), t = (*dl)[1].p0(0, 16);
-                    const int32_t ds = (*dl)[1].p1(16, 16), dtv = (*dl)[1].p1(0, 16);
-                    const auto& T = state->rdp->tiles[rtile];
-                    const auto& prim = state->rdp->primColorStack[state->rdp->primColorStackSize - 1];
-                    const auto& env  = state->rdp->envColorStack[state->rdp->envColorStackSize - 1];
-                    const auto& comb = state->rdp->colorCombinerStack[state->rdp->colorCombinerStackSize - 1];
-                    std::fprintf(stderr, "[measure-fb] FLIPBOOK texrect tex=0x%06X cimg=0x%06X px=(%d,%d %dx%d) tile=%u st=(%d,%d) dsdt=(%d,%d) | tileFmt=%u siz=%u line=%u th=%u tw=%u | prim=(%.2f %.2f %.2f %.2f) env=(%.2f %.2f %.2f %.2f) combL=0x%08X combH=0x%08X otherL=0x%08X\n",
-                        tsrc, state->rdp->colorImage.address & 0x00FFFFFFu,
-                        ulx >> 2, uly >> 2, (lrx - ulx) >> 2, (lry - uly) >> 2,
-                        rtile, s, t, ds, dtv, T.fmt, T.siz, T.line, T.uls, T.lrs,
-                        (float)prim.x, (float)prim.y, (float)prim.z, (float)prim.w,
-                        (float)env.x, (float)env.y, (float)env.z, (float)env.w,
-                        comb.L, comb.H, state->rdp->otherMode.L);
-                    std::fflush(stderr);
-                }
-            }
             // ROGUESQ_FX_PROBE: RGBA32 (fmt0/siz3) effect texrects — the animated sprite
             // billboards if they take the texrect path. Format-keyed, address-independent.
             {
@@ -622,54 +528,6 @@ namespace RT64 {
                             std::fflush(stderr);
                         }
                     }
-                }
-            }
-            // ROGUESQ_DECODE_PPM=1: manually decode the flipbook CI4 (source bytes +
-            // TMEM TLUT) to an RGB PPM file. Ground truth: if MY decode is a coherent
-            // flame, the data+palette are good and RT64's sampler is the only bug.
-            {
-                static int s_pp = -1;
-                if (s_pp == -1) { const char* v = std::getenv("ROGUESQ_DECODE_PPM"); s_pp = (v && *v && v[0] != '0') ? 0 : -2; }
-                const uint32_t tsrc = state->rdp->texture.address & 0x00FFFFFFu;
-                const bool isScratch = (tsrc >= 0x713000u && tsrc < 0x71B000u);  // de-swizzled scratch
-                if (s_pp >= 0 && s_pp < 6 && ((tsrc >= 0x4C0000u && tsrc < 0x520000u) || isScratch)) {
-                    const int W = 64, H = 64;
-                    const uint8_t* ram = state->RDRAM;
-                    // Read the 16-color palette from its RDRAM SOURCE (captured at
-                    // loadTLUT; TMEM is deferred). 16 RGBA16 entries, big-endian.
-                    uint16_t pal[16];
-                    for (int i = 0; i < 16; ++i) {
-                        uint32_t pa = (s_last_tlut_src + (uint32_t)i * 2) & 0x00FFFFFFu;
-                        pal[i] = (uint16_t)((ram[(pa) ^ 3] << 8) | ram[(pa + 1) ^ 3]);
-                    }
-                    char path[256]; std::snprintf(path, sizeof(path), "E:/Projects/RogueSquadron64Recomp/flip_%d_%06X.ppm", s_pp, tsrc);
-                    FILE* fp = std::fopen(path, "wb");
-                    if (fp) {
-                        std::fprintf(fp, "P6\n%d %d\n255\n", W, H);
-                        // ROGUESQ_DECODE_SWAP=1: apply the N64 odd-row 32-bit word
-                        // interleave (XOR byte offset with 4 on odd rows) to un-swizzle
-                        // a TMEM-formatted source. Tests whether that yields a clean frame.
-                        static int s_sw = -1;
-                        if (s_sw < 0) { const char* v = std::getenv("ROGUESQ_DECODE_SWAP"); s_sw = (v && *v && v[0] != '0') ? 1 : 0; }
-                        for (int y = 0; y < H; ++y) for (int x = 0; x < W; ++x) {
-                            uint32_t byteoff = (uint32_t)(y * W + x) / 2;
-                            // Scratch is already de-swizzled — read it linearly. For the
-                            // raw source, apply the swap when ROGUESQ_DECODE_SWAP=1.
-                            if (!isScratch && s_sw && (y & 1)) byteoff ^= 4;
-                            uint8_t b = ram[(tsrc + byteoff) ^ 3];
-                            int idx = (x & 1) ? (b & 0xF) : (b >> 4);
-                            uint16_t rgba = pal[idx];
-                            uint8_t r = (uint8_t)(((rgba >> 11) & 0x1F) << 3);
-                            uint8_t g = (uint8_t)(((rgba >> 6) & 0x1F) << 3);
-                            uint8_t bl = (uint8_t)(((rgba >> 1) & 0x1F) << 3);
-                            std::fputc(r, fp); std::fputc(g, fp); std::fputc(bl, fp);
-                        }
-                        std::fclose(fp);
-                        std::fprintf(stderr, "[decode-ppm] wrote %s (palSrc=0x%06X pal[0,1,15]=%04X,%04X,%04X)\n",
-                            path, s_last_tlut_src, pal[0], pal[1], pal[15]);
-                        std::fflush(stderr);
-                    }
-                    ++s_pp;
                 }
             }
             if (texrect_copy_undefined_tile(state, dl)) {
@@ -765,9 +623,7 @@ namespace RT64 {
                     std::fflush(stderr);
                 }
             }
-            // ROGUESQ_HLE_FORCE_FILLRECT — convert every texrect into a
-            // fillRect at the same coords. Pure existence test: if magenta
-            // appears, RT64 IS presenting; just our texrect path is wrong.
+            // ROGUESQ_HLE_FORCE_VISIBLE: draw every texrect as a magenta fillRect at the same coords to tell "not presenting" from "texrect path wrong".
             if (force_visible_enabled()) {
                 state->rdp->setFillColor(0xF80FF80F);  // RGBA5551 magenta opaque
                 // Use the original texrect bounds. drawTexRect cycles to
@@ -781,114 +637,20 @@ namespace RT64 {
                 (*dl)++;  // consume the LLE texrect follow-up word
                 return;
             }
-            // ROGUESQ_FIRE_MAGENTA=1: existence test for the explosion fire. Convert
-            // every texrect targeting a CINEMATIC buffer (not the 0x76A000 menu) into
-            // a magenta fillRect. If magenta appears where the fire should be, the
-            // texrect coords + presented-buffer targeting are CORRECT and the problem
-            // is texture decode/blend (root cause C). If nothing shows, the fire
-            // texrects render into a non-presented offscreen buffer (root cause B).
-            {
-                static int s_fm = -1;
-                if (s_fm < 0) { const char* v = std::getenv("ROGUESQ_FIRE_MAGENTA"); s_fm = (v && *v && v[0] != '0') ? 1 : 0; }
-                const uint32_t cimg = state->rdp->colorImage.address & 0x00FFFFFFu;
-                if (s_fm && cimg != 0x76A000u && cimg >= 0x200000u) {
-                    state->rdp->setFillColor(0xF80FF80F);  // RGBA5551 magenta opaque
-                    int32_t ulx = (*dl)[0].p1(12, 12), uly = (*dl)[0].p1(0, 12);
-                    int32_t lrx = (*dl)[0].p0(12, 12), lry = (*dl)[0].p0(0, 12);
-                    state->rdp->fillRect(ulx, uly, lrx, lry);
-                    (*dl)++;  // consume the LLE texrect follow-up word
-                    return;
-                }
-            }
-            // Explosion-buffer texrects: measure or override the blend.
-            // ROGUESQ_FIRE_PROBE=1 logs the REAL blender (otherMode.L) + combiner the
-            // game set, so we honor it instead of guessing. ROGUESQ_FIRE_ADDITIVE=1
-            // forces an additive blender — but additive over the WHITE cinematic bg
-            // washes to white (confirmed), so it's off by default now.
-            {
-                const uint32_t cimg = state->rdp->colorImage.address & 0x00FFFFFFu;
-                const bool fireBuf = (cimg >= 0x200000u && cimg != 0x76A000u);
-                static int s_fprobe = -1;
-                if (s_fprobe < 0) { const char* v = std::getenv("ROGUESQ_FIRE_PROBE"); s_fprobe = (v && *v && v[0] != '0') ? 1 : 0; }
-                if (s_fprobe) {
-                    int ci = state->rdp->colorCombinerStackSize - 1;
-                    uint32_t cL = (ci >= 0) ? state->rdp->colorCombinerStack[ci].L : 0;
-                    uint32_t cH = (ci >= 0) ? state->rdp->colorCombinerStack[ci].H : 0;
-                    // Key distinct (cimg, otherL, otherH, comb) tuples so a single
-                    // config (e.g. attribution text) takes one slot and we see variety.
-                    static std::unordered_set<uint64_t> s_seen;
-                    uint64_t key = (uint64_t)cimg ^ ((uint64_t)state->rdp->otherMode.L << 8)
-                                 ^ ((uint64_t)cL << 20) ^ ((uint64_t)cH << 40);
-                    const char* ph =
-                        (cimg == 0x66A000 || cimg == 0x5D4000) ? "ATTRIB" :
-                        (cimg == 0x6DD000 || cimg == 0x6BA000) ? "N64LOGO" :
-                        (cimg == 0x62B800 || cimg == 0x695C00) ? "CINEMATIC" :
-                        (cimg == 0x290000 || cimg == 0x795C00 || cimg == 0x240000) ? "OFFSCREEN" : "OTHER";
-                    if (s_seen.size() < 80 && s_seen.insert(key).second) {
-                        std::fprintf(stderr,
-                            "[fire-probe] %s cimg=0x%06X otherL=0x%08X otherH=0x%08X comb=0x%08X%08X\n",
-                            ph, cimg, state->rdp->otherMode.L, state->rdp->otherMode.H, cH, cL);
-                        std::fflush(stderr);
-                    }
-                }
-                static int s_fadd = -1;
-                if (s_fadd < 0) { const char* v = std::getenv("ROGUESQ_FIRE_ADDITIVE"); s_fadd = (v && *v && v[0] != '0') ? 1 : 0; }
-                if (s_fadd && fireBuf) {
-                    state->rdp->setOtherMode(0x00584040u, 0x0C084000u);
-                }
-            }
-            // ROGUESQ_TEXRECT_PROBE=1: log each medal/insignia texrect (fmt4 src 0x62xxxx) that
-            // actually REACHES RT64's draw, with the real colorImage target. Distinguishes
-            // "interpreter never reaches it" (no log) from "drawn to a non-menu buffer" (log w/ odd cimg).
-            {
-                static const bool s_trp = []{ const char* v = std::getenv("ROGUESQ_TEXRECT_PROBE"); return v && *v && v[0] != '0'; }();
-                if (s_trp) {
-                    const uint32_t tsrc = state->rdp->texture.address & 0x00FFFFFFu;
-                    if (tsrc >= 0x620000u && tsrc < 0x628000u) {
-                        static int s_tn = 0;
-                        // Per-frame medal-draw count: log once per displayListCounter so a run shows
-                        // whether the medals draw EVERY frame (gap==1) or intermittently (gap>>1).
-                        static uint32_t s_lastDl = 0xFFFFFFFFu; static int s_perFrame = 0;
-                        if (state->displayListCounter != s_lastDl) {
-                            if (s_lastDl != 0xFFFFFFFFu && s_tn < 200)
-                                std::fprintf(stderr, "[texrect-frame] dl#%u medalRects=%d cimg=0x%08X\n", s_lastDl, s_perFrame, state->rdp->colorImage.address);
-                            s_lastDl = state->displayListCounter; s_perFrame = 0;
-                        }
-                        ++s_perFrame;
-                        if (++s_tn <= 12) {
-                            const int32_t ulx = (*dl)[0].p1(12,12)>>2, uly = (*dl)[0].p1(0,12)>>2;
-                            const int32_t lrx = (*dl)[0].p0(12,12)>>2, lry = (*dl)[0].p0(0,12)>>2;
-                            std::fprintf(stderr, "[texrect-probe] #%d dl#%u DREW medal tex=0x%06X -> cimg=0x%08X w=%u px=(%d,%d)-(%d,%d)\n",
-                                s_tn, (unsigned)state->displayListCounter, tsrc, state->rdp->colorImage.address, state->rdp->colorImage.width, ulx, uly, lrx, lry);
-                            std::fflush(stderr);
-                        }
-                    }
-                }
-            }
-            // ROGUESQ_MEDAL_FORCE=1: decisive visibility test — draw each medal/insignia texrect
-            // (fmt4 0x62xxxx) as a bright OPAQUE green fillRect at its own coords. If green blocks
-            // appear where the medals belong, the geometry/target/present is fine and the medal
-            // texture/blend is the bug. If nothing shows, the layer is overwritten / not presented.
-            {
-                static const bool s_mforce = []{ const char* v = std::getenv("ROGUESQ_MEDAL_FORCE"); return v && *v && v[0] != '0'; }();
-                if (s_mforce) {
-                    const uint32_t tsrc = state->rdp->texture.address & 0x00FFFFFFu;
-                    if (tsrc >= 0x620000u && tsrc < 0x628000u) {
-                        state->rdp->setFillColor(0x07C107C1u);  // RGBA5551 bright green, opaque
-                        int32_t ulx = (*dl)[0].p1(12,12), uly = (*dl)[0].p1(0,12);
-                        int32_t lrx = (*dl)[0].p0(12,12), lry = (*dl)[0].p0(0,12);
-                        state->rdp->fillRect(ulx, uly, lrx, lry);
-                        (*dl)++;  // consume the LLE texrect follow-up word
-                        return;
-                    }
-                }
-            }
             dlh_followup(*dl);
+            {
+                const uint32_t w0 = (*dl)->w0, w1 = (*dl)->w1;
+                const float lrx = ((w0 >> 12) & 0xFFFu) / 4.0f, lry = (w0 & 0xFFFu) / 4.0f;
+                const float ulx = ((w1 >> 12) & 0xFFFu) / 4.0f, uly = (w1 & 0xFFFu) / 4.0f;
+                f5_hud_probe(state, "texrect", 0.5f * (ulx + lrx), 0.5f * (uly + lry), lrx - ulx, lry - uly);
+            }
+            if (f5_crosshair_quad(state, *dl)) {
+                (*dl)++;
+                return;
+            }
             GBI_RDP::texrectLLE(state, dl);
             // The ucode consumes all 16 bytes. Left in the stream, the S/T/DsDx/DtDy word runs as a command whenever S >= 0x100 (e.g. 0x0D = SETOTHERMODE_H forcing copy mode: the white flash on the game-over fade).
-            if (s_texrect_consume) {
-                (*dl)++;
-            }
+            (*dl)++;
         }
 
         void texrectFlipLLE_guarded(State *state, DisplayList **dl) {
@@ -898,9 +660,7 @@ namespace RT64 {
             }
             dlh_followup(*dl);
             GBI_RDP::texrectFlipLLE(state, dl);
-            if (s_texrect_consume) {
-                (*dl)++;
-            }
+            (*dl)++;
         }
 
         // loadTLUT / loadTile / loadBlock guards.
@@ -998,28 +758,9 @@ namespace RT64 {
             uint16_t ult = (*dl)->p0(0, 12);
             uint16_t lrs = (*dl)->p1(12, 12);
             uint16_t dxt = (*dl)->p1(0, 12);
-            // ROGUESQ_CI4_FIXDXT=<hex>: the cinematic flipbook CI4 loadBlocks pass
-            // dxt=0 (no per-row interleave). RT64's tile sampler applies the standard
-            // odd-row 32-bit swap, so a dxt=0 load samples back as garbled noise.
-            // Override dxt with the proper interleave value (default 0x400 = 2048/2
-            // words-per-row for a 32-texel CI4 row) while a CI4 TLUT is active.
-            {
-                static int s_fixdxt = -1;
-                if (s_fixdxt == -1) { const char* v = std::getenv("ROGUESQ_CI4_FIXDXT"); s_fixdxt = (v && *v) ? (int)strtoul(v, nullptr, 0) : -2; }
-                // Scope to the FLIPBOOK range only (0x4Cxxxx-0x52xxxx) so the logo
-                // (also CI4, renders clean with dxt=0) is untouched. 0x200 = the
-                // odd-row interleave for a 64-wide CI4 loaded as 16b (2048/4 words).
-                const uint32_t srcDx = state->rdp->texture.address & 0x00FFFFFFu;
-                const bool fbRange = (srcDx >= 0x4C0000u && srcDx < 0x520000u);
-                if (s_fixdxt >= 0 && fbRange && dxt == 0) {
-                    dxt = (uint16_t)(s_fixdxt ? s_fixdxt : 0x200);
-                }
-            }
             if (lrs < uls) std::swap(uls, lrs);
             // Cap the block size at 2048 texels (max valid in 12-bit field).
             if (lrs - uls > 2048) lrs = uls + 2048;
-            // Remember the block size (16b words loaded) for setTileSize synthesis.
-            if (s_ci4_tlut_recent > 0) s_ci4_last_block_words = (int)(lrs - uls) + 1;
             static int s_count = 0;
             if (gbi_log_enabled() && (++s_count <= 8)) {
                 std::fprintf(stderr,
@@ -1325,40 +1066,6 @@ namespace RT64 {
                 }
             }
 
-            // PHASE MARKER (ROGUESQ_FIRE_PROBE=1): classify the draw-target buffer
-            // into a named boot phase and log a timestamped/frame-counted line on each
-            // transition, so probe output can be anchored to attribution vs N64 logo vs
-            // cinematic instead of guessing. Buffer families from prior RE notes.
-            {
-                static int s_pm = -1;
-                if (s_pm < 0) { const char* v = std::getenv("ROGUESQ_FIRE_PROBE"); s_pm = (v && *v && v[0] != '0') ? 1 : 0; }
-                if (s_pm) {
-                    const uint32_t a = w1 & 0x00FFFFFFu;
-                    auto classify = [](uint32_t a) -> const char* {
-                        if (a == 0x66A000 || a == 0x5D4000) return "ATTRIBUTION";
-                        if (a == 0x6DD000 || a == 0x6BA000) return "BOOT/N64LOGO";
-                        if (a == 0x62B800 || a == 0x695C00) return "CINEMATIC";
-                        if (a == 0x290000 || a == 0x795C00 || a == 0x240000) return "OFFSCREEN-CONTENT";
-                        return "OTHER";
-                    };
-                    const char* ph = classify(a);
-                    static const char* s_lastPh = nullptr;
-                    static uint32_t s_lastAddr = 0;
-                    static auto s_t0 = std::chrono::steady_clock::now();
-                    static long s_frame = 0;
-                    s_frame++;
-                    if (ph != s_lastPh || a != s_lastAddr) {
-                        double secs = std::chrono::duration<double>(
-                            std::chrono::steady_clock::now() - s_t0).count();
-                        std::fprintf(stderr,
-                            "[PHASE] t=%.1fs frame=%ld -> %s (cimg=0x%06X)\n",
-                            secs, s_frame, ph, a);
-                        std::fflush(stderr);
-                        s_lastPh = ph; s_lastAddr = a;
-                    }
-                }
-            }
-
             // Raw per-call dump of the first 40 setCIMG (ROGUESQ_LOG_CIMG=1) to
             // see the exact color-image address the game emits — used to check
             // whether the attribution buffer is 0x66A000 vs a bit-20-corrupted
@@ -1417,24 +1124,6 @@ namespace RT64 {
                 return;
             }
 
-            // ROGUESQ_REDIRECT_SCRATCH=1: the cinematic renders the explosion into a
-            // SCRATCH framebuffer 0x795C00 (640x264) then copies it to the displayed
-            // buffer 0x62B800/0x695C00 via a CPU/RSP op our HLE doesn't reproduce, so
-            // the explosion never reaches the screen. Redirect setColorImage(0x795C00)
-            // -> 0x62B800 so RT64 renders the explosion DIRECTLY into a presented
-            // buffer. Existence test for whether the content is real + renderable.
-            {
-                static int s_rs = -1;
-                if (s_rs < 0) { const char* v = std::getenv("ROGUESQ_REDIRECT_SCRATCH"); s_rs = (v && *v && v[0] != '0') ? 1 : 0; }
-                if (s_rs && (w1 & 0x00FFFFFFu) == 0x795C00u) {
-                    (*dl)->w1 = (w1 & 0xFF000000u) | 0x0062B800u;
-                    if (gbi_log_enabled()) {
-                        static int s_rl = 0;
-                        if (++s_rl <= 6) { std::fprintf(stderr, "[gbi-f5] redirect scratch 0x795C00 -> 0x62B800\n"); std::fflush(stderr); }
-                    }
-                }
-            }
-
             // Attribution per-frame glyph-draw count (see s_attrib_glyphs_frame).
             // Logs how many glyph texrects landed in 0x76A000 in the frame that
             // just ended — to see if text persists or stops after the fade-in.
@@ -1456,19 +1145,6 @@ namespace RT64 {
             // to B. Without this flush they'd all dump into a later pass's fullSync
             // (was: pending=256 leaking across buffers). Now each pass's models
             // land in their own buffer.
-            // Per-buffer flush (ROGUESQ_GR_PERBUF=1): render accumulated models into
-            // the CURRENT (old) color image before switching, so each multi-pass
-            // target gets its own models instead of all leaking into a later fullSync
-            // (was: pending=256). CORRECT for buffer assignment, but it makes RT64
-            // start tracking/reading-back the cinematic intermediates → trips the
-            // RGBA8-readback assert (rt64_native_target.cpp:168). Off by default; the
-            // generic path keeps fullSync-only flush (stabler) until the offscreen→
-            // display composite is solved. Only flush into a plausible FB (>=0x200000):
-            // the game briefly sets garbage CIMGs (0x1410A6 = matpool corruption) that
-            // would scribble into the matrix pool and stall the loop.
-            // PHASE D: the per-buffer render_scene_objects flush (ROGUESQ_GR_PERBUF) and the
-            // cartridge-transform validation hook were DELETED with the host-side model
-            // renderers — models render via the interpreted DL stream (docs/f5-model-dl-spec.md).
             GBI_F3D::setColorImage(state, dl);
 
             // After setColorImage, log the final CIMG width/fmt/siz for the

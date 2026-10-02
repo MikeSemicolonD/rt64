@@ -21,6 +21,8 @@ namespace RT64 {
             RasterShaderCache *shaderCache;
             std::unique_ptr<std::thread> thread;
             std::atomic<bool> threadRunning;
+            // One DXC compiler per thread: IDxcCompiler/IDxcUtils are not safe to use from several threads at once.
+            std::unique_ptr<ShaderCompiler> shaderCompiler;
 
             CompilationThread(RasterShaderCache *shaderCache);
             ~CompilationThread();
@@ -42,7 +44,6 @@ namespace RT64 {
         uint32_t threadCount;
         uint32_t ubershaderThreadCount;
         RenderShaderFormat shaderFormat;
-        std::unique_ptr<ShaderCompiler> shaderCompiler;
         RenderMultisampling multisampling;
         bool usesHDR = false;
         

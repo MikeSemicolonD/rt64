@@ -10,6 +10,8 @@
 #include "shared/rt64_video_interface.h"
 
 namespace RT64 {
+    std::atomic<float> presentShiftY{ 0.0f };
+
     // VIRenderer
 
     VIRenderer::VIRenderer() { }
@@ -160,7 +162,8 @@ namespace RT64 {
         topLeftScissor = fromHDtoWindow(topLeftScissor, hdSize, windowSize);
         bottomRightScissor = fromHDtoWindow(bottomRightScissor, hdSize, windowSize);
 
-        viewport = RenderViewport(topLeftViewport.x, topLeftViewport.y, bottomRightViewport.x - topLeftViewport.x, bottomRightViewport.y - topLeftViewport.y);
-        scissor = RenderRect(lround(topLeftScissor.x), lround(topLeftScissor.y), lround(bottomRightScissor.x), lround(bottomRightScissor.y));
+        const float shift = presentShiftY.load(std::memory_order_relaxed) * windowSize.y;
+        viewport = RenderViewport(topLeftViewport.x, topLeftViewport.y - shift, bottomRightViewport.x - topLeftViewport.x, bottomRightViewport.y - topLeftViewport.y);
+        scissor = RenderRect(lround(topLeftScissor.x), std::max(0L, lround(topLeftScissor.y - shift)), lround(bottomRightScissor.x), lround(bottomRightScissor.y - shift));
     }
 };

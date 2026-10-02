@@ -1185,8 +1185,8 @@ namespace RT64 {
         // re-transform reproduces the exact clipped position because MVP is affine). Triggered only for
         // triangles that actually leave the guard band (any vertex w<=near, or |x|,|y| > kGuard*w), so
         // normal on-screen geometry keeps its exact prior path and the GPU guard band handles mild
-        // edge-straddling. Z planes are left alone so RT64's manual depth clamp (which the terrain relies
-        // on) is untouched. See plans/skybox-not-rendering-plan.md.
+        // edge-straddling. The far plane z <= w is clipped too, as the F5 ucode does (trivial reject + clipper overlay);
+        // the GPU's own depth clip sits at ndc 513/511 with the 1/1024 depth mapping, so geometry past the far plane survived. ROGUESQ_F5_FAR_CLIP=0 disables.
         {
             constexpr float kNearW = 1e-4f;
             constexpr float kGuard = 2.0f;   // clip only when a vertex leaves this NDC band (GPU guard band is larger)
@@ -1194,47 +1194,53 @@ namespace RT64 {
             static int s_clip = -1;
             if (s_clip < 0) { const char* e = std::getenv("ROGUESQ_F5_NO_NEAR_CLIP"); s_clip = (e && e[0] == '1') ? 0 : 1; }
 
+            static const bool s_farClip = [](){ const char *e = std::getenv("ROGUESQ_F5_FAR_CLIP"); return !(e && e[0] == '0'); }();
             bool extreme = false;
             bool anyNear = false;
+            int farCount = 0;
             if (s_clip && !degenerate) {
                 for (int i = 0; i < 3; i++) {
                     const hlslpp::float4 p = workload.drawData.posTransformed[globalIndices[i]];
                     const float pw = p.w, px = p.x, py = p.y;
-                    if (pw <= kNearW) { extreme = true; anyNear = true; break; }
+                    if (s_farClip && p.z > pw) farCount++;
+                    if (pw <= kNearW) { extreme = true; anyNear = true; }
                     const float apx = px < 0.0f ? -px : px;
                     const float apy = py < 0.0f ? -py : py;
-                    if (apx > kGuard * pw || apy > kGuard * pw) { extreme = true; break; }
+                    if (apx > kGuard * pw || apy > kGuard * pw) extreme = true;
                 }
             }
+            if (farCount == 3) return;
+            if (farCount > 0) extreme = true;
             // The skybox dome (the only cull=BOTH geometry) is pinned to a flat far-plane primDepth in
             // State::loadDrawState. Its back hemisphere (101 of 149 tris sit behind the camera) would then
             // draw its near-plane cap at the far plane. The front hemisphere alone covers the whole view,
             // so drop any dome tri that touches the near plane, matching the RSP's hardware near-clip.
             // Only the game-pinned sky (zSource=PRIM) is flattened; other cull=BOTH geometry keeps real depth.
-            static const bool s_pinAll = [](){ const char *e = std::getenv("ROGUESQ_F5_SKY_PIN_ALL"); return e && e[0] == '1'; }();
             const bool isDomeTri = cullBothMask != 0 && (geometryMode & cullBothMask) == cullBothMask &&
-                                   (s_pinAll || (state->rdp->otherMode.L & G_ZS_PRIM) != 0);
+                                   (state->rdp->otherMode.L & G_ZS_PRIM) != 0;
             // ROGUESQ_F5_DOME_NEAR_DROP=0 near-clips these tris instead of dropping them.
             static const bool s_domeNearDrop = [](){ const char *e = std::getenv("ROGUESQ_F5_DOME_NEAR_DROP"); return !(e && e[0] == '0'); }();
             if (anyNear && isDomeTri && s_domeNearDrop) return;
 
             if (extreme) {
                 // Signed distance to near and the guard-band lateral planes; clipping at |x| = w cut the sky at the 4:3 edge once widescreen widens the view.
-                auto planeDist = [kNearW, kGuard](const hlslpp::float4 &p, int plane) -> float {
-                    const float x = p.x, y = p.y, w = p.w;
+                auto planeDist = [](const hlslpp::float4 &p, int plane) -> float {
+                    const float x = p.x, y = p.y, z = p.z, w = p.w;
                     switch (plane) {
                         case 0:  return w - kNearW;
                         case 1:  return kGuard * w + x;
                         case 2:  return kGuard * w - x;
                         case 3:  return kGuard * w + y;
-                        default: return kGuard * w - y;
+                        case 4:  return kGuard * w - y;
+                        default: return w - z;
                     }
                 };
-                uint32_t poly[10];
+                uint32_t poly[12];
                 poly[0] = globalIndices[0]; poly[1] = globalIndices[1]; poly[2] = globalIndices[2];
                 int polyN = 3;
-                for (int pl = 0; pl < 5 && polyN > 0; pl++) {
-                    uint32_t out[10];
+                const int planeCount = (farCount > 0) ? 6 : 5;
+                for (int pl = 0; pl < planeCount && polyN > 0; pl++) {
+                    uint32_t out[12];
                     int outCnt = 0;
                     for (int i = 0; i < polyN; i++) {
                         const uint32_t gA = poly[i];
@@ -1243,8 +1249,8 @@ namespace RT64 {
                         const float dB = planeDist(workload.drawData.posTransformed[gB], pl);
                         const bool inA = dA >= 0.0f;
                         const bool inB = dB >= 0.0f;
-                        if (inA && outCnt < 10) out[outCnt++] = gA;
-                        if ((inA != inB) && outCnt < 10) {
+                        if (inA && outCnt < 12) out[outCnt++] = gA;
+                        if ((inA != inB) && outCnt < 12) {
                             const float t = dA / (dA - dB);
                             out[outCnt++] = appendClippedVertex(gA, gB, t);
                         }

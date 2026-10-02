@@ -14,7 +14,7 @@
 //    0x100 payload. The ucode never executes a header (0x80 dispatches to IMEM 0),
 //    so a header reached by walking linearly means the sub-DL ran off its chunk.
 //  - B5(0) ends a list (a full chunk has it in the last slot; the bytes after a mid-chunk
-//    B5(0) are stale). ROGUESQ_OP_B5_ENDDL=0 restores the last-slot-only rule.
+//    B5(0) are stale).
 //  - 0x05: `05 05 .. ..` = 40-byte sprite record, `05 00 .. ..` = 8-byte command.
 //  - 0xBD / 0xBE: 16-byte state commands (payload FFxxxxxx ........).
 //  - 0x03: 24-byte inline lookat/light block (`03 82 ...`), viewport form is 8 bytes.
@@ -31,6 +31,8 @@
 #include "hle/rt64_state.h"
 #include "hle/rt64_rdp.h"
 #include "hle/rt64_rsp.h"
+#include "hle/rt64_rs64_cable.h"
+#include "hle/rt64_rs64_crosshair.h"
 
 #include "rt64_gbi_f3dex.h"
 #include "rt64_gbi_f3d.h"
@@ -48,15 +50,16 @@
 #include <cmath>
 #include <chrono>
 
-extern "C" volatile unsigned g_most_drawn_fb = 0;
-extern "C" volatile unsigned g_most_drawn_fb_width = 0;  // width of g_most_drawn_fb's color image
-extern "C" volatile unsigned long long g_most_drawn_fb_ms = 0;  // steady-clock ms of its last texrect
-extern "C" volatile unsigned g_f5_task_hops = 0;    // previous task's chunk transitions (diagnostic)
-extern "C" volatile unsigned g_f5_task_faces = 0;   // previous task's emitted faces
+// g_most_drawn_fb_width: width of its color image. g_most_drawn_fb_ms: steady-clock ms of its last texrect. g_f5_task_hops/faces: previous task's chunk transitions and emitted faces (diagnostic).
+extern "C" { volatile unsigned g_most_drawn_fb = 0; }
+extern "C" { volatile unsigned g_most_drawn_fb_width = 0; }
+extern "C" { volatile unsigned long long g_most_drawn_fb_ms = 0; }
+extern "C" { volatile unsigned g_f5_task_hops = 0; }
+extern "C" { volatile unsigned g_f5_task_faces = 0; }
 // Heuristic firing counts (ROGUESQ_LOG_HEURISTICS): 0 = op 0x0A seen, 1 = op_01 shape rule
 // disagrees with byte1 bit0, 2 = B4 filler guard fired, 3 = attribution de-flicker skip.
-extern "C" volatile unsigned g_f5_heur[4] = {};
-extern "C" volatile int g_explosion_hold = 0;
+extern "C" { volatile unsigned g_f5_heur[4] = {}; }
+extern "C" { volatile int g_explosion_hold = 0; }
 
 namespace RT64 {
     namespace GBI_F3DFACTOR5 {
@@ -373,6 +376,13 @@ namespace RT64 {
         }
         static constexpr uint32_t F5_NODE_MAP_SLOTS = 256;
         static uint32_t s_node_map[4][F5_NODE_MAP_SLOTS] = {};   // [buffer][slot] = stamped id (0 = leave AUTO)
+        // Per ring slot: id that replaces the node id (0 = none). Set for tow cable segments.
+        static uint32_t s_node_alias[4][F5_NODE_MAP_SLOTS] = {};
+        static rs64cable::CableRoles s_cable_roles;
+        static bool f5_cable_ids_enabled() {
+            static const bool s = env_on("ROGUESQ_F5_CABLE_IDS", true);
+            return s;
+        }
         // A node only gets an interpolation id if it existed last frame (stable). Transient nodes
         // (per-frame terrain tessellation, just-spawned objects) are not paired by id — they fall
         // back to AUTO geometric matching, which handles deforming terrain far better than a
@@ -429,15 +439,23 @@ namespace RT64 {
             if (buf != s_last_buf[ring]) {
                 s_last_buf[ring] = buf;
                 for (uint32_t i = 0; i < F5_NODE_MAP_SLOTS; ++i) s_node_map[buf][i] = 0;
+                for (uint32_t i = 0; i < F5_NODE_MAP_SLOTS; ++i) s_node_alias[buf][i] = 0;
                 if (ring == 0) {
                     s_nodes_prev.swap(s_nodes_cur);
                     s_nodes_cur.clear();
+                    s_cable_roles.onFrame();
                 }
             }
             s_nodes_cur.insert(nodeId);
             // With ROGUESQ_F5_NODE_STABLE_ONLY=1 a node gets an id only once it existed last frame; off by default, since an id from the first frame lets a new object pair one frame sooner (measured fewer unpaired draws).
             static const bool s_stable_only = env_on("ROGUESQ_F5_NODE_STABLE_ONLY", false);
             s_node_map[buf][slot] = (!s_stable_only || s_nodes_prev.count(nodeId)) ? nodeId : 0u;
+            s_node_alias[buf][slot] = (f5_cable_ids_enabled() && (ring == 0)) ? s_cable_roles.aliasFor(nodeId) : 0u;
+            { static const bool s_lg = env_on("ROGUESQ_LOG_INTERP_PAIR", false);
+              static uint32_t s_frames = 0, s_hits = 0, s_subs = 0;
+              if (s_lg && (ring == 0) && (s_node_alias[buf][slot] != 0)) s_hits++;
+              if (s_lg && (ring == 0) && (slot == 0)) s_subs += (s_cable_roles.framesSinceSubmit <= 1) ? s_cable_roles.n : 0;
+              if (s_lg && (ring == 0) && (slot == 0) && (++s_frames % 60) == 0) { std::fprintf(stderr, "[cable] submitted/60f=%u matched/60f=%u\n", s_subs, s_hits); s_hits = 0; s_subs = 0; } }
         }
         // Moves each vertex along its view ray onto the plane whose screen depth is `depth` (posScreen.z units), so a zSource=PRIM face can draw with per-vertex depth that follows frame interpolation.
         // Screen x/y are unchanged. Returns false (leaving the verts alone) when the projection's origin is not the eye or a vertex is behind the camera.
@@ -614,6 +632,36 @@ namespace RT64 {
         }
 
         // ROGUESQ_LOG_INTERP_PAIR: draws made while the transform group is AUTO (no interpolation id), per draw site, summed over 60 frames.
+        void f5_hud_probe(State* state, const char* tag, float cx, float cy, float w, float h) {
+            static const bool s_on = env_on("ROGUESQ_LOG_HUD_PROBE", false);
+            if (!s_on) {
+                return;
+            }
+            const uint64_t f = state->displayListCounter;
+            if ((f < 600) || (f > 600 + 90 * 20) || ((f % 90) > 2)) {
+                return;
+            }
+            std::fprintf(stderr, "[hud] f=%llu %s c=(%.1f,%.1f) sz=(%.1f,%.1f) tex=%06X mv=%08X\n", (unsigned long long)f, tag, cx, cy, w, h, state->rdp->texture.address & 0xFFFFFFu, s_mv_last_w1);
+        }
+
+        // Screen centre and size of the verts just loaded into the face slot.
+        static void f5_hud_probe_slot(State* state, const char* tag, int base, int n) {
+            static const bool s_on = env_on("ROGUESQ_LOG_HUD_PROBE", false);
+            if (!s_on) {
+                return;
+            }
+            const auto &ps = state->ext.workloadQueue->workloads[state->ext.workloadQueue->writeCursor].drawData.posScreen;
+            float x0 = 1e9f, x1 = -1e9f, y0 = 1e9f, y1 = -1e9f;
+            for (int k = 0; k < n; ++k) {
+                const auto &p = ps[state->rsp->indices[base + k]];
+                x0 = std::min(x0, (float)p[0]);
+                x1 = std::max(x1, (float)p[0]);
+                y0 = std::min(y0, (float)p[1]);
+                y1 = std::max(y1, (float)p[1]);
+            }
+            f5_hud_probe(state, tag, 0.5f * (x0 + x1), 0.5f * (y0 + y1), x1 - x0, y1 - y0);
+        }
+
         static void f5_count_auto(State* state, int site) {
             static const bool s_on = env_on("ROGUESQ_LOG_INTERP_PAIR", false);
             if (!s_on) {
@@ -685,6 +733,12 @@ namespace RT64 {
             s_sprite_map_face[i] = face;
             s_sprite_map_addr[i] = phys;
         }
+        void f5_cable_submit_impl(uint32_t pool, uint32_t meshInstance, uint32_t stateWord) {
+            const rs64cable::CableState s = rs64cable::CableState::fromWord(stateWord);
+            if (rs64cable::isDrawnSlot(rs64cable::slotIndex(pool, meshInstance), s)) {
+                s_cable_roles.onSubmit(rs64cable::sceneNodeOf(meshInstance), s);
+            }
+        }
         static uint32_t f5_lookup_sprite_face(uint32_t phys) {
             const uint32_t i = (phys >> 3) & (F5_SPRITE_MAP_SIZE - 1);
             return (s_sprite_map_addr[i] == phys) ? s_sprite_map_face[i] : 0u;
@@ -698,6 +752,13 @@ namespace RT64 {
             if (slot < 0) return 0;
             return s_node_map[buf][slot];
         }
+        static uint32_t f5_lookup_node_alias(uint32_t w1) {
+            const uint32_t off = w1 & 0x00FFFFFFu;
+            const int buf = f5_ring_buffer(off);
+            const int slot = f5_ring_slot(off);
+            if ((buf < 0) || (slot < 0)) return 0;
+            return s_node_alias[buf][slot];
+        }
 
         // Kept for the sibling modules' declarations (the software MVP composer is gone).
         bool f5_compose_mvp(const uint8_t*, float Mout[12]) {
@@ -710,7 +771,6 @@ namespace RT64 {
 
         // Shared with rt64_gbi_f5_rdpstate.cpp (declared in the internal header).
         int s_ci4_tlut_recent = 0;
-        int s_ci4_last_block_words = 0;
         uint32_t s_last_tlut_src = 0;
         int s_attrib_glyphs_frame = 0;
         int s_attrib_fills_frame = 0;
@@ -1019,7 +1079,7 @@ namespace RT64 {
         //   word7.lo = texcoord span s (S10.5, stored as-is)   word8 = (x, y>>4)   word9 = (z, size)
         //   corners: v0=(x,y+h0,z) v1=(x+size,y+h1,z) v2=(x,y+h2,z+size) v3=(x+size,y+h3,z+size)
         //   UVs: v0 (0,s) v1 (s,s) v2 (0,0) v3 (s,0); tris (v0,v3,v2) (v0,v1,v3), current MVP.
-        // The `05 05 00 xx` form DMAs a height/color grid and tessellates it (overlays 0x14/0x18): not yet.
+        // The `05 05 00 xx` form DMAs a height/color grid and tessellates it (overlays 0x14/0x18); see f5_tile_grid.
         static void f5_tile_quad(State* state, DisplayList* rec) {
             if (!f5_native_active()) return;
             static bool s_tiles = env_on("ROGUESQ_F5_TILES", true);
@@ -1397,17 +1457,8 @@ namespace RT64 {
             const uint32_t addr = state->rsp->fromSegmentedMasked(w1);
             if (addr + 64 > RDRAMSize) return;
             // Ucode (IMEM 0x1484): byte1 bit0 selects projection (DMEM 0x590) vs modelview (0x5D0).
-            // ROGUESQ_F5_PROJ_SHAPE=1 restores the old matrix-shape guess, which read segmented
-            // addresses unresolved and misrouted the main menu's segment-4 modelviews as projections.
-            static const bool s_shape = env_on("ROGUESQ_F5_PROJ_SHAPE", false);
             const uint8_t* ram = state->RDRAM;
-            bool proj = ((w0 >> 16) & 1u) != 0;
-            if (s_shape) {
-                const int m33 = rd_be_s16(ram, w1 + 2 * 15), m23 = rd_be_s16(ram, w1 + 2 * 11);
-                const bool shape = (((w0 >> 16) & 0xFF) == 0x03) || (m33 == 0 && m23 != 0);
-                if (shape != proj) ++g_f5_heur[1];
-                proj = shape;
-            }
+            const bool proj = ((w0 >> 16) & 1u) != 0;
             if (!f5_native_active()) return;
             f5_ensure_viewport(state);
 
@@ -1498,6 +1549,12 @@ namespace RT64 {
                               }
                           }
                       }
+                  }
+                  // Tow cable segments: an id by position from the ship end replaces the node or terrain id.
+                  const uint32_t cableAlias = f5_lookup_node_alias(w1);
+                  if (cableAlias != 0) {
+                      id = cableAlias;
+                      isTerrain = false;
                   }
                   if (id == 0) {
                       static int s_slotid = -1; if (s_slotid < 0) { const char* e = std::getenv("ROGUESQ_F5_SLOT_ID"); s_slotid = (e && e[0] == '1') ? 1 : 0; }
@@ -1620,7 +1677,6 @@ namespace RT64 {
         // record color + bound texture, GPU-projected. Gated ROGUESQ_F5_SPRITES (off until validated).
         void op_bd_sprite(State* state, DisplayList** dl) {
             static bool s_on = env_on("ROGUESQ_F5_SPRITES", true);   // F5 billboard sprites (fire/smoke/explosion); ROGUESQ_F5_SPRITES=0 disables
-            static const bool s_bd16 = env_on("ROGUESQ_F5_BD16", false);
             const uint32_t w0 = (*dl)->w0, w1 = (*dl)->w1;
             if (s_on && f5_native_active()) {
                 const uint32_t slot = ((w0 >> 5) & 0x7F8u) / 0x28u;
@@ -1630,29 +1686,21 @@ namespace RT64 {
                     // 24-byte record (overlay 0x2C): w2 = fog color, w3 = half-extent (x hi, y lo),
                     // w4 = texture extent (S hi, T lo, 10.5). w0 bit0 swaps the axes (texrect-flip),
                     // bit1 / bit2 reverse S / T. The ucode's texrect starts S/T 0x10 (half a texel) early.
-                    // ROGUESQ_F5_BD16=1 restores the old reading (16-byte walk, single half-size from
-                    // w3 lo, UVs spanning tile 0, flags ignored) for A/B.
                     const uint32_t w3 = (*dl)[1].w1, w4 = (*dl)[2].w0;
-                    const bool swap = !s_bd16 && (w0 & 1u) != 0;
-                    int16_t halfX = (int16_t)(s_bd16 ? (w3 & 0xFFFFu) : (w3 >> 16)), halfY = (int16_t)(w3 & 0xFFFFu);
+                    const bool swap = (w0 & 1u) != 0;
+                    int16_t halfX = (int16_t)(w3 >> 16), halfY = (int16_t)(w3 & 0xFFFFu);
                     if (swap) std::swap(halfX, halfY);
                     if (halfX <= 0 || halfX > 4000) halfX = 40;
                     if (halfY <= 0 || halfY > 4000) halfY = 40;
-                    float texS = (float)(int16_t)(w4 >> 16), texT = (float)(int16_t)(w4 & 0xFFFFu), uvOff = 16.0f;
-                    if (s_bd16) {
-                        const LoadTile& T = state->rdp->tiles[0];
-                        texS = (float)((((T.lrs - T.uls) >> 2) + 1) << 5);
-                        texT = (float)((((T.lrt - T.ult) >> 2) + 1) << 5);
-                        uvOff = 0.0f;
-                    }
+                    const float texS = (float)(int16_t)(w4 >> 16), texT = (float)(int16_t)(w4 & 0xFFFFu), uvOff = 16.0f;
                     RSP::Vertex* tmp = reinterpret_cast<RSP::Vertex*>(state->fromRDRAM(F5_VTX_SCRATCH + F5_FACE_SLOT * sizeof(RSP::Vertex)));
                     int16_t us[4], vt[4];
                     const float sgx[4] = { -1, 1, -1, 1 }, sgy[4] = { -1, -1, 1, 1 };
                     for (int k = 0; k < 4; ++k) {
                         const float ax = (sgx[k] + 1.0f) * 0.5f, ay = (sgy[k] + 1.0f) * 0.5f;
                         float sf = swap ? ay : ax, tf = swap ? ax : ay;
-                        if (!s_bd16 && (w0 & 2u)) sf = 1.0f - sf;
-                        if (!s_bd16 && (w0 & 4u)) tf = 1.0f - tf;
+                        if (w0 & 2u) sf = 1.0f - sf;
+                        if (w0 & 4u) tf = 1.0f - tf;
                         us[k] = (int16_t)(sf * texS - uvOff);
                         vt[k] = (int16_t)(tf * texT - uvOff);
                     }
@@ -1716,11 +1764,9 @@ namespace RT64 {
                     // center's own projected NDC depth below -- otherwise the sprite inherits a STALE
                     // primDepth from the last DL command (near on the first cinematic pass, far after the
                     // attract demo runs) which is the loop-dependent "behind terrain" bug.
-                    // ROGUESQ_F5_SPRITE_NODEPTH=1 restores the no-depth-test band-aid for A/B.
-                    static const bool s_nodepth = env_on("ROGUESQ_F5_SPRITE_NODEPTH", false);
                     // The quad is screen-parallel, so per-vertex depth equals primDepth on real frames and, unlike primDepth, follows frame interpolation (a constant primDepth sinks glows into the surfaces they sit on). ROGUESQ_F5_SPRITE_PIXEL_Z=0 restores zSource=PRIM.
                     static const bool s_pixelz = env_on("ROGUESQ_F5_SPRITE_PIXEL_Z", true);
-                    state->rdp->setOtherMode(state->rdp->otherMode.H, s_nodepth ? 0x00504A44u : (s_pixelz ? 0x00504A50u : 0x00504A54u));
+                    state->rdp->setOtherMode(state->rdp->otherMode.H, s_pixelz ? 0x00504A50u : 0x00504A54u);
                     // Billboards are UNLIT (hw draws them as screen-space texrects). Force lighting off
                     // so the scene's environment light doesn't modulate the sprite (white-scene -> white,
                     // dark-scene -> black). Restore the mode after.
@@ -1803,6 +1849,10 @@ namespace RT64 {
                         state->rdp->setPrimDepth((uint16_t)(z * 32767.0f), 0);
                     }
                     f5_count_auto(state, 2);
+                    {
+                        const int rb = f5_ring_buffer(s_mv_last_w1 & 0x00FFFFFFu);
+                        f5_hud_probe_slot(state, (rb < 0) ? "sprite-fixedmtx" : (rb > 1) ? "sprite-ring2" : "sprite-ring0", F5_FACE_SLOT, 4);
+                    }
                     state->rsp->drawIndexedTri(F5_FACE_SLOT, F5_FACE_SLOT + 3, F5_FACE_SLOT + 2);
                     state->rsp->drawIndexedTri(F5_FACE_SLOT, F5_FACE_SLOT + 1, F5_FACE_SLOT + 3);
                     if (s_sprite_xform) {
@@ -1824,7 +1874,114 @@ namespace RT64 {
                 }
             }
             // 24-byte record: the ucode dispatcher consumes w0/w1 and overlay 0x2C another 0x10.
-            (*dl) += s_bd16 ? 1 : 2;
+            (*dl) += 2;
+        }
+
+        // Crosshair rings are texrects, which RT64 never interpolates. A texrect that matches a ring element of the HUD struct draws instead as a camera-space quad on its own transform id. ROGUESQ_F5_XHAIR_QUAD=0 keeps the texrect.
+        bool f5_crosshair_quad(State* state, const DisplayList* dl) {
+            static const bool s_on = env_on("ROGUESQ_F5_XHAIR_QUAD", true);
+            if (!s_on || !f5_native_active() || (((state->rdp->otherMode.H >> 20) & 3u) != 0)) {
+                return false;
+            }
+            const uint32_t w0 = dl[0].w0, w1 = dl[0].w1;
+            const rs64xhair::Rect r{ ((w1 >> 12) & 0xFFFu) / 4.0f, (w1 & 0xFFFu) / 4.0f, ((w0 >> 12) & 0xFFFu) / 4.0f, (w0 & 0xFFFu) / 4.0f };
+            const uint8_t tile = (uint8_t)((w1 >> 24) & 7u);
+            const int16_t uls = (int16_t)(dl[1].w0 >> 16), ult = (int16_t)(dl[1].w0 & 0xFFFFu);
+            const int16_t dsdx = (int16_t)(dl[1].w1 >> 16), dtdy = (int16_t)(dl[1].w1 & 0xFFFFu);
+            const auto &t = state->rdp->tiles[tile];
+            const rs64xhair::TexSize tex{ (uint32_t)((t.lrs - t.uls) >> 2) + 1u, (uint32_t)((t.lrt - t.ult) >> 2) + 1u };
+            const auto &sc = state->rdp->scissorRectStack[state->rdp->scissorStackSize - 1];
+            const rs64xhair::Rect clip{ sc.ulx / 4.0f, sc.uly / 4.0f, sc.lrx / 4.0f, sc.lry / 4.0f };
+            rs64xhair::Element els[2];
+            for (int i = 0; i < 2; i++) {
+                const uint32_t b = rs64xhair::kHudBase + rs64xhair::kElementOffsets[i];
+                union { uint32_t u; float f; } x, y;
+                x.u = rd_be_u32(state->RDRAM, b + rs64xhair::kPosOffset);
+                y.u = rd_be_u32(state->RDRAM, b + rs64xhair::kPosOffset + 4);
+                els[i] = { x.f, y.f, rd_be_u32(state->RDRAM, b + rs64xhair::kFlagsOffset) };
+            }
+            const int ring = rs64xhair::ringOf(els, r, tex, dsdx, dtdy, clip);
+            if (ring < 0) {
+                return false;
+            }
+
+            // Un-project the rect corners onto a plane of constant screen depth through the current projection and viewport.
+            const hlslpp::float4x4 proj = state->rsp->viewProjMatrixStack[state->rsp->projectionMatrixStackSize - 1];
+            const auto &vp = state->rsp->viewportStack[state->rsp->viewportStackSize - 1];
+            const hlslpp::float4x4 inv = hlslpp::inverse(proj);
+            constexpr float ScreenDepth = 0.1f;
+            auto unproject = [&](float sx, float sy, float out[3]) {
+                const float nx = (sx - (float)vp.translate.x) / (float)vp.scale.x;
+                const float ny = -(sy - (float)vp.translate.y) / (float)vp.scale.y;
+                const float nz = (ScreenDepth - (float)vp.translate.z) / (float)vp.scale.z;
+                float p[4];
+                hlslpp::store(hlslpp::mul(hlslpp::float4(nx, ny, nz, 1.0f), inv), p);
+                if (std::fabs(p[3]) < 1e-12f) {
+                    return false;
+                }
+                out[0] = p[0] / p[3];
+                out[1] = p[1] / p[3];
+                out[2] = p[2] / p[3];
+                return std::isfinite(out[0]) && std::isfinite(out[1]) && std::isfinite(out[2]);
+            };
+            const float sx[4] = { r.ulx, r.lrx, r.ulx, r.lrx }, sy[4] = { r.uly, r.uly, r.lry, r.lry };
+            float corner[4][3], centre[3] = { 0.0f, 0.0f, 0.0f };
+            for (int k = 0; k < 4; k++) {
+                if (!unproject(sx[k], sy[k], corner[k])) {
+                    return false;
+                }
+                for (int a = 0; a < 3; a++) {
+                    centre[a] += 0.25f * corner[k][a];
+                }
+            }
+            // Vertices are int16, so build the quad at a fixed size and carry the real size in the transform scale.
+            float extent = 0.0f;
+            for (int k = 0; k < 4; k++) {
+                for (int a = 0; a < 3; a++) {
+                    extent = std::max(extent, std::fabs(corner[k][a] - centre[a]));
+                }
+            }
+            if (!(extent > 0.0f)) {
+                return false;
+            }
+            constexpr float QuadRefSize = 1024.0f;
+            const float scale = extent / QuadRefSize;
+
+            RSP::Vertex* tmp = reinterpret_cast<RSP::Vertex*>(state->fromRDRAM(F5_VTX_SCRATCH + F5_FACE_SLOT * sizeof(RSP::Vertex)));
+            for (int k = 0; k < 4; k++) {
+                RSP::Vertex v = {};
+                v.x = (int16_t)std::lround((corner[k][0] - centre[0]) / scale);
+                v.y = (int16_t)std::lround((corner[k][1] - centre[1]) / scale);
+                v.z = (int16_t)std::lround((corner[k][2] - centre[2]) / scale);
+                v.s = (int16_t)(uls + (int32_t)std::lround((sx[k] - r.ulx) * dsdx / 32.0f));
+                v.t = (int16_t)(ult + (int32_t)std::lround((sy[k] - r.uly) * dtdy / 32.0f));
+                v.color.r = v.color.g = v.color.b = v.color.a = 0xFF;
+                tmp[k] = v;
+            }
+
+            const auto savedTex = state->rsp->textureState;
+            state->rsp->setTexture(tile, 0, 1, 0xFFFF, 0xFFFF);
+            uint32_t &gm = state->rsp->geometryModeStack[state->rsp->geometryModeStackSize - 1];
+            const uint32_t savedGM = gm;
+            gm &= ~(uint32_t)(G_LIGHTING | G_FOG | G_TEXTURE_GEN | state->rsp->cullBothMask);
+            state->rsp->matrixId(0x80000000u | (uint32_t)ring, /*push*/true, /*proj*/false, /*decompose*/true,
+                G_EX_COMPONENT_INTERPOLATE, G_EX_COMPONENT_INTERPOLATE, G_EX_COMPONENT_INTERPOLATE, G_EX_COMPONENT_INTERPOLATE, G_EX_COMPONENT_INTERPOLATE,
+                G_EX_COMPONENT_SKIP, G_EX_COMPONENT_SKIP, G_EX_COMPONENT_AUTO, G_EX_COMPONENT_AUTO,
+                G_EX_ORDER_LINEAR, G_EX_ASPECT_AUTO, G_EX_EDIT_NONE, /*idIsAddress*/false, /*editGroup*/false);
+            auto &modelTop = state->rsp->modelMatrixStack[state->rsp->modelMatrixStackSize - 1];
+            const hlslpp::float4x4 savedModel = modelTop;
+            modelTop = hlslpp::float4x4(scale, 0, 0, 0, 0, scale, 0, 0, 0, 0, scale, 0, centre[0], centre[1], centre[2], 1);
+            state->rsp->modelViewProjChanged = true;
+            state->rsp->setVertex(0x80000000u | (F5_VTX_SCRATCH + F5_FACE_SLOT * sizeof(RSP::Vertex)), 4, F5_FACE_SLOT);
+            f5_hud_probe_slot(state, ring ? "xhair-quad-in" : "xhair-quad-out", F5_FACE_SLOT, 4);
+            state->rsp->drawIndexedTri(F5_FACE_SLOT, F5_FACE_SLOT + 2, F5_FACE_SLOT + 3);
+            state->rsp->drawIndexedTri(F5_FACE_SLOT, F5_FACE_SLOT + 3, F5_FACE_SLOT + 1);
+            modelTop = savedModel;
+            state->rsp->popMatrixId(1, false);
+            state->rsp->modelViewProjChanged = true;
+            gm = savedGM;
+            state->rsp->textureState = savedTex;
+            return true;
         }
 
         // raw UV * 16.16 scale -> S10.5, as the ucode's vmudn/vmadh pair (result clamped to int16).
@@ -2070,6 +2227,9 @@ namespace RT64 {
                       if (s_lg && ((++s_nr % 50) == 1)) std::fprintf(stderr, "[flatten-refused] n=%d depth=%.5f count=%d\n", n, flatDepth, s_nr); }
                 }
                 f5_count_auto(state, 3);
+                if (f5_ring_buffer(s_mv_last_w1 & 0x00FFFFFFu) > 1 || f5_ring_buffer(s_mv_last_w1 & 0x00FFFFFFu) < 0) {
+                    f5_hud_probe_slot(state, (f5_ring_buffer(s_mv_last_w1 & 0x00FFFFFFu) < 0) ? "face-fixedmtx" : "face-ring2", F5_FACE_SLOT, n);
+                }
                 state->rsp->drawIndexedTri(F5_FACE_SLOT, F5_FACE_SLOT + 1, F5_FACE_SLOT + 2);
                 if (n == 4) state->rsp->drawIndexedTri(F5_FACE_SLOT, F5_FACE_SLOT + 2, F5_FACE_SLOT + 3);
                 if (flattened) {
@@ -2271,4 +2431,9 @@ extern "C" void rs64_f5_map_node(uint32_t ringDst, uint32_t nodeId) {
 // Game-side hook in renderLitMeshFaceGroup at each 0xBD emission: dlAddr = the command's DL address, face = the emitting mesh face.
 extern "C" void rs64_f5_map_sprite(uint32_t dlAddr, uint32_t face) {
     RT64::GBI_F3DFACTOR5::f5_map_sprite_impl(dlAddr, face);
+}
+
+// Every addNpcToVisibilityBucket call: a1 = submitted mesh instance, pool = the tow cable pool pointer (0x8010B6E0), state = the cable state word (0x8010B6E8). Cable segments arrive ship end first.
+extern "C" void rs64_f5_cable_submit(uint32_t pool, uint32_t meshInstance, uint32_t state) {
+    RT64::GBI_F3DFACTOR5::f5_cable_submit_impl(pool, meshInstance, state);
 }

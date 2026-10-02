@@ -1,7 +1,6 @@
 cmake_minimum_required(VERSION 3.20)
 project(rt64 LANGUAGES C CXX)
 set(CMAKE_CXX_STANDARD 17)
-set(CMAKE_CXX_VISIBILITY_PRESET hidden)
 
 if (APPLE)
     enable_language(OBJC OBJCXX)
@@ -15,6 +14,7 @@ option(RT64_SDL_WINDOW_VULKAN "Build RT64 to expect an SDL Window outside of Win
 
 if (NOT ${RT64_STATIC})
     set(CMAKE_POSITION_INDEPENDENT_CODE ON)
+    set(CMAKE_CXX_VISIBILITY_PRESET hidden)
 endif()
 
 function(preprocess INFILE OUTFILE OPTIONS)
@@ -368,7 +368,6 @@ set (SOURCES
     "${PROJECT_SOURCE_DIR}/src/gbi/rt64_gbi_f3dex.cpp"
     "${PROJECT_SOURCE_DIR}/src/gbi/rt64_gbi_f3dex2.cpp"
     "${PROJECT_SOURCE_DIR}/src/gbi/rt64_gbi_f3dfactor5.cpp"
-    "${PROJECT_SOURCE_DIR}/src/gbi/rt64_gbi_f5_diag.cpp"
     "${PROJECT_SOURCE_DIR}/src/gbi/rt64_gbi_f5_rdpstate.cpp"
     "${PROJECT_SOURCE_DIR}/src/gbi/rt64_gbi_f3dgolden.cpp"
     "${PROJECT_SOURCE_DIR}/src/gbi/rt64_gbi_f3dpd.cpp"

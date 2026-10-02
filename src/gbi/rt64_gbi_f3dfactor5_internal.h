@@ -51,12 +51,7 @@ enum F5Scene { F5_SCENE_NONE = -1, F5_SCENE_ATTRIBUTION = 9 };
 namespace RT64 {
     namespace GBI_F3DFACTOR5 {
 
-        // --- N64 fixed-point matrix decode → RT64 hlslpp::float4x4 + thin transform adapters.
-        //     (Replaced the hand-rolled N64Matrix4x4 + mat_mul_* reinvention with RT64's own
-        //     matrix type. Numerically proven identical via ROGUESQ_F5_MVP_XCHECK: row-vector,
-        //     column-vector, and element extraction all matched to 0.) N64 layout: 32 bytes int16
-        //     integer parts, then 32 bytes uint16 frac; combined (int<<16)|frac → s15.16. Built
-        //     row-major so hlslpp::mul's convention matches RT64 (rt64_rsp.cpp:343).
+        // N64 fixed-point matrix: 32 bytes int16 integer parts, then 32 bytes uint16 frac, (int<<16)|frac = s15.16. Row-major so hlslpp::mul matches RT64 (rt64_rsp.cpp).
         inline hlslpp::float4x4 decode_n64_f4x4(const uint8_t* rdram, uint32_t addr) {
             const uint32_t phys = addr & 0x00FFFFFF;
             auto be16 = [&](uint32_t off) -> uint16_t {
@@ -102,14 +97,6 @@ namespace RT64 {
         // Unified-pipeline screen-space vertex cache entry.
         struct F5UVert { float sx, sy, sz, invw, cw; uint8_t r, g, b, a; uint8_t valid; };
 
-        // --- Phase-0 probes (ROGUESQ_F5_PROBE) — defined in rt64_gbi_f5_diag.cpp.
-        //     Called from the experimental op handlers (gated by f5_probe_enabled()).
-        //     Log-only; no effect on the rendered output.
-        void f5_probe_op01(uint32_t w0, uint32_t w1, const uint8_t* ram);
-        void f5_probe_op03(DisplayList** dl, const uint8_t* ram);
-        void f5_probe_op04(uint32_t w0, uint32_t w1, const uint8_t* ram);
-        void f5_probe_tri(const char* tag, DisplayList** dl, State* state);
-
         // --- PHASE D (docs/f5-model-dl-spec.md): the host-side model renderers and
         //     texture loaders (rt64_gbi_f5_model.cpp / rt64_gbi_f5_textures.cpp —
         //     render_one_model, render_scene_objects, render_cartridge_general,
@@ -117,6 +104,11 @@ namespace RT64 {
         //     DELETED. Models render through the interpreted F5 DL stream: op_01
         //     matrices, op_04/0x14 vertex batches, 0x13/0xBF/0xB4 tris/quads, and
         //     cached per-material sub-DLs (pure standard RDP ops) via G_DL.
+
+        // ROGUESQ_LOG_HUD_PROBE: logs one draw (screen centre and size in N64 pixels) on a few sampled frames.
+        void f5_hud_probe(State *state, const char *tag, float cx, float cy, float w, float h);
+        // Draws a crosshair-ring texrect (dl points at its 16 bytes) as an interpolated quad; false leaves it to the texrect path.
+        bool f5_crosshair_quad(State *state, const DisplayList *dl);
 
         // --- RDP-state / raster handlers (rt64_gbi_f5_rdpstate.cpp): Factor-5 wrappers
         //     around the base GBI_F3D/GBI_RDP handlers (logging, guards, CI4 reinterpret).
@@ -139,7 +131,6 @@ namespace RT64 {
         // CI4-track state shared across the rdpstate handlers (loadTLUT/loadBlock write,
         // setTile/setTextureImage read) — extern during the incremental split.
         extern int s_ci4_tlut_recent;
-        extern int s_ci4_last_block_words;
         extern uint32_t s_last_tlut_src;
         // FORCE_VISIBLE debug gate (def in core during the split) + its forced
         // G_CC_PRIMITIVE-mux combiner words, shared by setFillColor/setCombine/texrect.
