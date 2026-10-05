@@ -15,6 +15,7 @@
 #include "shared/rt64_rsp_viewport.h"
 
 #include "rt64_command_warning.h"
+#include "rt64_rs64_lights.h"
 #include "rt64_draw_call.h"
 #include "rt64_framebuffer_changes.h"
 #include "rt64_framebuffer_manager.h"
@@ -219,6 +220,16 @@ namespace RT64 {
         std::vector<CommandWarning> commandWarnings;
         std::vector<SpriteCommand> spriteCommands;
         std::vector<interop::PointLight> pointLights;
+        std::vector<rs64lights::Candidate> rs64Lights;
+        rs64lights::Sun rs64Sun;
+        rs64lights::TerrainFrame rs64Terrain;
+        std::vector<uint32_t> rs64NoCast;
+        // Glow-card transforms: their cutout faces never cast (opaque parts on the transform still do).
+        std::vector<uint32_t> rs64NoCastCutout;
+        // Flying craft transforms (rs64lights::movingCraft): they cast every frame but stay out of the history snapshots.
+        std::vector<uint32_t> rs64Craft;
+        // Per game call (callIndex): render-tile TMEM average rgb, w = 1 when valid. Recorded only for GI / reflections hit colours.
+        std::vector<hlslpp::float4> rs64CallTex;
         uint32_t fbPairCount;
         uint32_t fbPairSubmitted;
         uint32_t gameCallCount;

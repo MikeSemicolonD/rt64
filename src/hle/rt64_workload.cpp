@@ -26,6 +26,17 @@ namespace RT64 {
         commandWarnings.clear();
         spriteCommands.clear();
         pointLights.clear();
+        rs64Lights.clear();
+        rs64Sun = rs64lights::Sun{};
+        rs64Terrain.map.reset();
+        rs64Terrain.samples.clear();
+        rs64Terrain.transformIndex = UINT32_MAX;
+        rs64Terrain.transforms.clear();
+        rs64NoCast.clear();
+        rs64NoCastCutout.clear();
+        rs64Craft.clear();
+        rs64CallTex.clear();
+        rs64Terrain.mixed = false;
         fbChangePool.reset();
         fbStorage.reset();
         physicalAddressTransformMap.clear();

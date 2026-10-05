@@ -25,6 +25,7 @@
 #include "rt64_interpreter.h"
 #include "rhi/rt64_render_hooks.h"
 #include "rt64_rs64_transition.h"
+#include "rt64_rs64_lights.h"
 
 #include <atomic>
 // Per-frame RT64 workload accumulators feeding the F5 profiler HUD's RDP slots
@@ -500,6 +501,20 @@ namespace RT64 {
         drawCall.NoN = rsp->NoN;
         drawCall.drawStatusChanges = drawStatus.changed;
         drawCall.callIndex = workload.gameCallCount++;
+
+        // Hit colours for ray-traced bounce light and reflections: the render tile's TMEM average while it is still loaded, only when the combiner samples it
+        // (TMEM still holds whatever was loaded last, e.g. the menu font).
+        if (rs64lights::config().gi || rs64lights::config().reflections) {
+            const LoadTile &t0 = rdp->tiles[0];
+            float tex[3] = {};
+            float cov = 0.0f;
+            const bool sampled = drawCall.colorCombiner.usesTexture(drawCall.otherMode, 0, drawCall.otherMode.cycleType() == G_CYC_1CYCLE);
+            const bool ok = sampled && rs64lights::tmemAverage(reinterpret_cast<const uint8_t *>(rdp->TMEM), t0.fmt, t0.siz, t0.tmem, t0.line, uint32_t(((t0.lrs - t0.uls) >> 2) + 1), uint32_t(((t0.lrt - t0.ult) >> 2) + 1), t0.palette, tex, cov);
+            if (workload.rs64CallTex.size() <= size_t(drawCall.callIndex)) {
+                workload.rs64CallTex.resize(size_t(drawCall.callIndex) + 1, hlslpp::float4(0.0f, 0.0f, 0.0f, 0.0f));
+            }
+            workload.rs64CallTex[drawCall.callIndex] = ok ? hlslpp::float4(tex[0], tex[1], tex[2], 1.0f) : hlslpp::float4(0.0f, 0.0f, 0.0f, 0.0f);
+        }
 
         // Add the draw call to the FB pair.
         GameCall gameCall;

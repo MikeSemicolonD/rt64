@@ -32,6 +32,7 @@
 #include "hle/rt64_rdp.h"
 #include "hle/rt64_rsp.h"
 #include "hle/rt64_rs64_cable.h"
+#include "hle/rt64_rs64_lights.h"
 #include "hle/rt64_rs64_crosshair.h"
 
 #include "rt64_gbi_f3dex.h"
@@ -44,7 +45,10 @@
 #include <cstdlib>
 #include <cstring>
 #include <vector>
+#include <string>
+#include <algorithm>
 #include <utility>
+#include <set>
 #include <unordered_set>
 #include <unordered_map>
 #include <cmath>
@@ -221,6 +225,14 @@ namespace RT64 {
                 s_mv_off_x = e.lx;
                 s_mv_off_z = e.lz;
             }
+            if (rs64lights::config().shadows && rs64lights::config().log) {
+                static uint32_t s_sunLog = 0;
+                const auto& sun = state->ext.workloadQueue->workloads[state->ext.workloadQueue->writeCursor].rs64Sun;
+                if (sun.valid && ((++s_sunLog % 120) == 1)) {
+                    std::fprintf(stderr, "[rt-shadows] sun cam=(%.3f,%.3f,%.3f) rootRows x=(%.3f,%.3f,%.3f) y=(%.3f,%.3f,%.3f) z=(%.3f,%.3f,%.3f)\n",
+                        sun.dir[0], sun.dir[1], sun.dir[2], (float)m[0][0], (float)m[0][1], (float)m[0][2], (float)m[1][0], (float)m[1][1], (float)m[1][2], (float)m[2][0], (float)m[2][1], (float)m[2][2]);
+                }
+            }
             if ((e.k > 0.0f) || (e.gen != 0)) {
                 s_world_from_view = hlslpp::inverse(m);
                 s_world_task = state->displayListCounter;
@@ -384,7 +396,7 @@ namespace RT64 {
             return s;
         }
         // A node only gets an interpolation id if it existed last frame (stable). Transient nodes
-        // (per-frame terrain tessellation, just-spawned objects) are not paired by id — they fall
+        // (per-frame terrain tessellation, just-spawned objects) are not paired by id â€” they fall
         // back to AUTO geometric matching, which handles deforming terrain far better than a
         // never-matching linear id (that would drop interpolation and stutter).
         static std::unordered_set<uint32_t> s_nodes_prev, s_nodes_cur;
@@ -939,6 +951,486 @@ namespace RT64 {
             const uint32_t d = f5_depth(state);
             return d < (uint32_t)F5_MAX_DEPTH && s_chunk_base[d] != 0 && off >= s_chunk_base[d] + 0x108u;
         }
+        // HOB mesh registry: per-mesh DL chunk -> mesh index, meshdef1 -> mesh index, and per-mesh light templates.
+        struct F5MeshRegistry {
+            std::unordered_map<uint32_t, uint32_t> chunkMesh, md1Mesh;
+            std::vector<std::string> names;
+            std::vector<rs64lights::Candidate> laser;
+            std::vector<uint8_t> noCast;
+            // Engine-glow table key for a chunk draw of this mesh (exact glow-card part) and for an inline draw identified by it (its part's glow card); nullptr = none.
+            std::vector<const char*> exhaust;
+            std::vector<const char*> exhaustPart;
+            // Flying craft (rs64lights::movingCraft): kept out of shadow history.
+            std::vector<uint8_t> craft;
+            uint64_t sig = 0;
+            uint64_t task = ~0ull;
+        };
+        static F5MeshRegistry s_mesh_registry;
+        // ROGUESQ_LOG_MESH_ID=1: classify each face command as inside a model's precompiled per-mesh DL (HOB meshdef1 +0x3C/+0x40, reached by a 0x06 call) or emitted inline, and whether a scene-node modelview is active.
+        struct F5MeshProbe {
+            std::unordered_map<uint32_t, uint64_t> inlineByMesh;
+            std::unordered_map<uint64_t, uint64_t> unresolved;
+            uint64_t cls[4][4] = {};
+            std::unordered_map<uint32_t, uint64_t> cutoutByMesh, cutoutModes;
+            uint64_t task = ~0ull;
+            uint32_t lastMv = 0;
+            uint32_t tasks = 0;
+            uint64_t mesh = 0, meshNode = 0, terrain = 0, sprite = 0, other = 0, otherNode = 0, vtxMesh = 0, vtxInline = 0, calls = 0, callsMesh = 0, frameMeshSum = 0, frameMeshMax = 0;
+            std::unordered_set<uint32_t> frameMeshes, runMeshes;
+            std::unordered_set<uint32_t> tileH;
+            std::unordered_map<uint64_t, uint32_t> tileAt;
+            uint64_t tileSame = 0, tileDiff = 0;
+            uint32_t hMin = ~0u, hMax = 0;
+        };
+        static F5MeshProbe s_mesh_probe;
+        static bool f5_vaddr_ok(uint32_t a, uint32_t n) {
+            return (a >= 0x80000000u) && ((a & 0x00FFFFFFu) + n <= 0x800000u);
+        }
+        static void f5_mesh_registry_rebuild(const uint8_t* ram, F5MeshRegistry& p) {
+            p.chunkMesh.clear();
+            p.md1Mesh.clear();
+            p.names.clear();
+            p.laser.clear();
+            p.noCast.clear();
+            p.exhaust.clear();
+            p.exhaustPart.clear();
+            p.craft.clear();
+            for (uint32_t b = 0; b < 25; ++b) {
+                uint32_t idx = rd_be_u16(ram, 0x801394B0u + b * 2);
+                for (int hops = 0; (idx != 0xFFFFu) && (hops < 1024); ++hops) {
+                    const uint32_t e = 0x80139020u + idx * 12u;
+                    const uint32_t obj = rd_be_u32(ram, e + 4);
+                    idx = rd_be_u16(ram, e);
+                    if (!f5_vaddr_ok(obj, 0x74)) continue;
+                    char name[17] = {};
+                    for (int i = 0; i < 16; ++i) name[i] = (char)ram[((obj & 0x00FFFFFFu) + i) ^ 3];
+                    for (uint32_t si = 0; si < 4; ++si) {
+                        const uint32_t t = rd_be_u32(ram, obj + 0x18 + si * 4);
+                        if (!f5_vaddr_ok(t, 8)) continue;
+                        const uint32_t cnt = rd_be_u16(ram, t);
+                        if ((cnt == 0) || (cnt > 128)) continue;
+                        uint32_t a = t + 4;
+                        for (uint32_t part = 0; part < cnt; ++part) {
+                            for (uint32_t j = 0; (j < 64) && f5_vaddr_ok(a, 4); ++j) {
+                                const uint32_t md = rd_be_u32(ram, a);
+                                a += 4;
+                                if (md == 0) break;
+                                if (!f5_vaddr_ok(md, 0x60)) continue;
+                                const uint32_t meshIdx = (uint32_t)p.names.size();
+                                char key[64];
+                                std::snprintf(key, sizeof key, "%s#s%u.p%u.%u", name, si, part, j);
+                                p.names.emplace_back(key);
+                                rs64lights::Candidate lc;
+                                if (!rs64lights::laserLight(key, rs64lights::config().laserRadius, lc) && !rs64lights::torpedoLight(key, rs64lights::config().torpedoRadius, lc)
+                                    && !rs64lights::pickupLight(key, rs64lights::config().pickupRadius, rs64lights::config().pickupGain, lc)) {
+                                    lc = rs64lights::Candidate{};
+                                }
+                                p.laser.push_back(lc);
+                                p.noCast.push_back(lc.emissive ? 1 : (rs64lights::cutoutDenied(key) ? 2 : 0));
+                                const char* part = rs64lights::exhaustKeyForPart(key);
+                                p.exhaust.push_back(((part != nullptr) && (std::strcmp(part, key) == 0)) ? part : nullptr);
+                                p.exhaustPart.push_back(part);
+                                p.craft.push_back(rs64lights::movingCraft(key) ? 1 : 0);
+                                p.md1Mesh.emplace(md, meshIdx);
+                                for (uint32_t off : { 0x3Cu, 0x40u }) {
+                                    uint32_t c = rd_be_u32(ram, md + off);
+                                    for (int k = 0; (k < 64) && f5_vaddr_ok(c, 0x108); ++k) {
+                                        p.chunkMesh.emplace(c & 0x00FFFFFFu, meshIdx);
+                                        const uint32_t nx = rd_be_u32(ram, c);
+                                        if (!f5_vaddr_ok(nx, 0x108) || (rd_be_u32(ram, nx + 4) != (0x80000000u | (c & 0x00FFFFFFu)))) break;
+                                        c = nx;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            if (rs64lights::config().log) {
+                std::string objs;
+                std::string last;
+                for (const std::string& k : p.names) {
+                    const std::string base = k.substr(0, k.find('#'));
+                    if (base != last) {
+                        objs += base + " ";
+                        last = base;
+                    }
+                }
+                std::fprintf(stderr, "[rt-lights] mesh registry: %zu meshes, objects: %s\n", p.names.size(), objs.c_str());
+            }
+        }
+        static F5MeshRegistry& f5_mesh_registry(State* state) {
+            F5MeshRegistry& r = s_mesh_registry;
+            if (state->displayListCounter == r.task) {
+                return r;
+            }
+            r.task = state->displayListCounter;
+            const uint8_t* ram = state->RDRAM;
+            uint64_t sig = 1469598103934665603ull;
+            for (uint32_t i = 0; i < 50 + 12 * 128; ++i) {
+                const uint32_t a = (i < 50) ? (0x1394B0u + i) : (0x139020u + i - 50);
+                sig = (sig ^ ram[a ^ 3]) * 1099511628211ull;
+            }
+            if (sig != r.sig) {
+                r.sig = sig;
+                f5_mesh_registry_rebuild(ram, r);
+                static const bool s_lg = env_on("ROGUESQ_LOG_MESH_ID", false);
+                if (s_lg) {
+                    std::fprintf(stderr, "[mesh-id] HOB table changed: %zu meshes, %zu DL chunks mapped\n", r.names.size(), r.chunkMesh.size());
+                }
+            }
+            return r;
+        }
+        // Level sun: light list head at 0x80138D24 (first type-1 record, dir +0x18, colour +0x24), view rotation at 0x80138D4C.
+        static void f5_capture_sun(State* state) {
+            const uint8_t* ram = state->RDRAM;
+            auto rdf = [ram](uint32_t a) {
+                union { uint32_t u; float f; } c;
+                c.u = rd_be_u32(ram, a);
+                return c.f;
+            };
+            rs64lights::Sun sun;
+            uint32_t rec = rd_be_u32(ram, 0x80138D24u);
+            for (int i = 0; (i < 8) && f5_vaddr_ok(rec, 0x58); ++i) {
+                if (ram[((rec & 0x00FFFFFFu) + 8) ^ 3] == 1) {
+                    const float Lrec[3] = { rdf(rec + 0x18), rdf(rec + 0x1C), rdf(rec + 0x20) };
+                    float L[3];
+                    rs64lights::levelSunWorld(Lrec, L);
+                    float R[9];
+                    for (int k = 0; k < 9; ++k) {
+                        R[k] = rdf(0x80138D4Cu + 4 * k);
+                    }
+                    sun.valid = rs64lights::sunCameraDir(L, R, sun.dir);
+                    sun.color[0] = rdf(rec + 0x24);
+                    sun.color[1] = rdf(rec + 0x28);
+                    sun.color[2] = rdf(rec + 0x2C);
+                    break;
+                }
+                rec = rd_be_u32(ram, rec);
+            }
+            // The briefing room and the hangar have no game light and an unrotated menu camera: use authored lights.
+            const uint32_t missionRoot = rd_be_u32(ram, 0x80138D20u);
+            const rs64lights::MenuScene menu = rs64lights::menuScene(missionRoot, rd_be_u32(ram, 0x800CE730u), ram[0xCE734u ^ 3], rd_be_u16(ram, 0x800CFF50u), rs64lights::activeOverlay().load(std::memory_order_relaxed) == 1);
+            if (rs64lights::introScene(sun.valid, missionRoot, menu)) {
+                static const float identity[9] = { 1, 0, 0, 0, 1, 0, 0, 0, 1 };
+                sun.valid = rs64lights::sunCameraDir(rs64lights::menuSunDir(), identity, sun.dir);
+                sun.color[0] = sun.color[1] = sun.color[2] = 1.0f;
+                sun.worldAuthored = true;
+            }
+            if (menu != rs64lights::MenuSceneNone) {
+                static const float identity[9] = { 1, 0, 0, 0, 1, 0, 0, 0, 1 };
+                sun.valid = rs64lights::sunCameraDir((menu == rs64lights::MenuSceneHangar) ? rs64lights::hangarSunDir() : rs64lights::menuSunDir(), identity, sun.dir);
+                sun.color[0] = sun.color[1] = sun.color[2] = 1.0f;
+                if (menu == rs64lights::MenuSceneHangar) {
+                    sun.fromModel = true;
+                }
+                if (rs64lights::config().enabled && (menu == rs64lights::MenuSceneMissionSelect)) {
+                    auto& lights = state->ext.workloadQueue->workloads[state->ext.workloadQueue->writeCursor].rs64Lights;
+                    rs64lights::Candidate holo;
+                    rs64lights::menuHoloLight(rs64lights::menuHoloPos(), rs64lights::config().menuHoloRadius, rs64lights::config().menuHoloGain, rs64lights::config().menuHoloFalloff, holo);
+                    lights.push_back(holo);
+                    // Table ring in the same fixed camera space: centre, in-plane axes and normal measured from the table-top geometry.
+                    static const float kCenter[3] = { 0.0f, 1080.0f, 11216.0f };
+                    static const float kAxisX[3] = { 1.0f, 0.0f, 0.0f };
+                    static const float kAxisD[3] = { 0.0f, -0.139f, 0.990f };
+                    static const float kUp[3] = { 0.0f, -0.990f, -0.139f };
+                    rs64lights::Candidate ring[6];
+                    const uint32_t n = rs64lights::menuRingLights(kCenter, kAxisX, kAxisD, kUp, 2900.0f, 150.0f, 6, 2500.0f, rs64lights::config().menuRingGain, ring, 6);
+                    lights.insert(lights.end(), ring, ring + n);
+                }
+            }
+            state->ext.workloadQueue->workloads[state->ext.workloadQueue->writeCursor].rs64Sun = sun;
+        }
+        // HMP map (descriptor 0x80136DC0) for terrain shadow casters; re-snapshotted when the tile-index array, table or size changes.
+        static std::shared_ptr<const rs64lights::TerrainMap> s_terrain_map;
+        static uint64_t s_terrain_hash = 0;
+        static uint64_t s_terrain_version = 0;
+        static uint32_t s_terrain_tab = 0;
+        static void f5_capture_terrain(State* state) {
+            const uint8_t* ram = state->RDRAM;
+            const uint32_t D = 0x80136DC0u;
+            const uint32_t idxArr = rd_be_u32(ram, D), tab = rd_be_u32(ram, D + 4);
+            const uint32_t W = rd_be_u16(ram, D + 0x38), H = rd_be_u16(ram, D + 0x3A);
+            if ((W == 0) || (H == 0) || (W > 256) || (H > 256) || !f5_vaddr_ok(idxArr, W * H * 2) || !f5_vaddr_ok(tab, 0x1E)) {
+                return;
+            }
+            thread_local std::vector<uint16_t> tiles;
+            tiles.resize(size_t(W) * H);
+            for (uint32_t c = 0; c < W * H; ++c) {
+                tiles[c] = (uint16_t)(rd_be_u16(ram, idxArr + c * 2) & 0x1FFFu);
+            }
+            const uint32_t maxTile = *std::max_element(tiles.begin(), tiles.end());
+            const uint32_t tableBytes = (maxTile + 1u) * 0x1Eu;
+            if (!f5_vaddr_ok(tab, tableBytes)) {
+                return;
+            }
+            const uint64_t h = rs64lights::terrainMapKey(tiles.data(), tiles.size(), ram + (tab & 0x00FFFFFFu), tableBytes, tab, W, H);
+            if (!s_terrain_map || (h != s_terrain_hash)) {
+                auto m = std::make_shared<rs64lights::TerrainMap>();
+                m->width = W;
+                m->height = H;
+                m->heights.assign(size_t(W) * H * 25, 0);
+                m->present.assign(size_t(W) * H, 0);
+                for (uint32_t c = 0; c < W * H; ++c) {
+                    const uint32_t a = tab + uint32_t(tiles[c]) * 0x1Eu + 5u;
+                    if (!f5_vaddr_ok(a, 25)) {
+                        continue;
+                    }
+                    for (uint32_t k = 0; k < 25; ++k) {
+                        m->heights[size_t(c) * 25 + k] = (int8_t)ram[((a + k) & 0x00FFFFFFu) ^ 3];
+                    }
+                    m->present[c] = 1;
+                }
+                rs64lights::buildTileCells(tiles.data(), tiles.size(), m->tileCell);
+                m->heightScale = rs64lights::envFloat("ROGUESQ_F5_TERRAIN_HSCALE", 1.0f);
+                m->version = ++s_terrain_version;
+                s_terrain_map = m;
+                s_terrain_hash = h;
+                s_terrain_tab = tab;
+                if (rs64lights::config().log) {
+                    std::fprintf(stderr, "[rt-terrain] map %ux%u tab=%08X version=%llu\n", W, H, tab, (unsigned long long)m->version);
+                }
+            }
+            state->ext.workloadQueue->workloads[state->ext.workloadQueue->writeCursor].rs64Terrain.map = s_terrain_map;
+        }
+        // Every terrain record notes its transform; heightfield records also note their record-space corner and HMP tile.
+        static void f5_note_terrain_tile(State* state, const DisplayList* rec, bool flat) {
+            auto& t = state->ext.workloadQueue->workloads[state->ext.workloadQueue->writeCursor].rs64Terrain;
+            const uint32_t ti = state->rsp->curTransformIndex;
+            bool same = true;
+            if ((t.transformIndex != UINT32_MAX) && (t.transformIndex != ti)) {
+                const auto& wt = state->ext.workloadQueue->workloads[state->ext.workloadQueue->writeCursor].drawData.worldTransforms;
+                same = (ti < wt.size()) && (t.transformIndex < wt.size()) && (memcmp(&wt[ti], &wt[t.transformIndex], sizeof(wt[ti])) == 0);
+            }
+            rs64lights::noteTerrainTransform(t, ti, same);
+            if (flat || (s_terrain_tab == 0)) {
+                return;
+            }
+            const int64_t rel = (int64_t)((rec[1].w0 & 0x00FFFFFFu) | 0x80000000u) - 5 - (int64_t)s_terrain_tab;
+            if ((rel < 0) || ((rel % 0x1E) != 0)) {
+                return;
+            }
+            rs64lights::TerrainSample s;
+            s.x = (int16_t)(rec[4].w0 >> 16) + s_mv_off_x;
+            s.z = (int16_t)(rec[4].w1 >> 16) + s_mv_off_z;
+            s.tile = (uint32_t)(rel / 0x1E);
+            t.samples.push_back(s);
+        }
+        static uint64_t s_sun_task = ~0ull;
+        static rs64lights::Candidate s_pending_laser;
+        static bool s_pending_laser_valid = false;
+        // 1 = never casts (laser bolt), 2 = its cutout faces never cast (light-source glow card).
+        static uint8_t s_pending_nocast = 0;
+        // Engine-glow table key whose lights are emitted at the next vertex load (that part's transform); nullptr = none.
+        static const char* s_pending_exhaust = nullptr;
+        static bool s_pending_craft = false;
+        static void f5_push_light(State* state, const rs64lights::Candidate& c) {
+            auto& lights = state->ext.workloadQueue->workloads[state->ext.workloadQueue->writeCursor].rs64Lights;
+            if (lights.size() < 512) {
+                lights.push_back(c);
+                lights.back().viewIndex = state->rsp->curViewProjIndex;
+            }
+            static uint64_t s_task = ~0ull;
+            static uint32_t s_tasks = 0, s_sprites = 0, s_lasers = 0;
+            if (rs64lights::config().log) {
+                if (state->displayListCounter != s_task) {
+                    s_task = state->displayListCounter;
+                    if ((++s_tasks % 300) == 0) {
+                        std::fprintf(stderr, "[rt-lights] 300 tasks: sprite candidates=%u laser candidates=%u\n", s_sprites, s_lasers);
+                        s_sprites = 0;
+                        s_lasers = 0;
+                    }
+                }
+                ++((c.kind == rs64lights::KindLaser) ? s_lasers : s_sprites);
+            }
+        }
+        // ROGUESQ_DUMP_MESH_VERTS=<mesh name prefix>: unique (part, model-space position, colour) of that mesh's vertices, written once to dumps/mesh-verts-<prefix>.txt after 300 tasks.
+        static void f5_mesh_vertex_dump(State* state, const RSP::Vertex* v, uint32_t n) {
+            static const std::string s_prefix = []() { const char* e = std::getenv("ROGUESQ_DUMP_MESH_VERTS"); return std::string((e != nullptr) ? e : ""); }();
+            static bool s_done = false;
+            if (s_prefix.empty() || s_done) {
+                return;
+            }
+            static std::set<std::string> s_rows;
+            static uint64_t s_task = ~0ull;
+            static uint32_t s_tasks = 0;
+            if (state->displayListCounter != s_task) {
+                s_task = state->displayListCounter;
+                if (!s_rows.empty() && ((++s_tasks % 300) == 0)) {
+                    const std::string path = "dumps/mesh-verts-" + s_prefix + ".txt";
+                    if (FILE* f = std::fopen(path.c_str(), "w")) {
+                        for (const std::string& r : s_rows) {
+                            std::fprintf(f, "%s\n", r.c_str());
+                        }
+                        std::fclose(f);
+                        std::fprintf(stderr, "[mesh-verts] wrote %zu vertices to %s\n", s_rows.size(), path.c_str());
+                    }
+                    s_done = true;
+                    return;
+                }
+            }
+            F5MeshRegistry& reg = f5_mesh_registry(state);
+            const uint32_t d = f5_depth(state);
+            const uint32_t base = (d < (uint32_t)F5_MAX_DEPTH) ? (s_chunk_base[d] & 0x00FFFFFFu) : 0u;
+            const auto it = reg.chunkMesh.find(base);
+            if ((it == reg.chunkMesh.end()) || (reg.names[it->second].compare(0, s_prefix.size(), s_prefix) != 0) || (s_rows.size() >= 20000)) {
+                return;
+            }
+            for (uint32_t i = 0; i < n; ++i) {
+                char row[128];
+                std::snprintf(row, sizeof row, "%s %d %d %d %02X%02X%02X%02X", reg.names[it->second].c_str(), v[i].x, v[i].y, v[i].z, v[i].color.r, v[i].color.g, v[i].color.b, v[i].color.a);
+                s_rows.insert(row);
+            }
+        }
+
+        template <int OP>
+        static void f5_mesh_probe(State* state, const DisplayList* dl) {
+            static const bool s_on = env_on("ROGUESQ_LOG_MESH_ID", false);
+            if (!s_on) return;
+            F5MeshProbe& p = s_mesh_probe;
+            F5MeshRegistry& reg = f5_mesh_registry(state);
+            const uint8_t* ram = state->RDRAM;
+            if (state->displayListCounter != p.task) {
+                p.task = state->displayListCounter;
+                p.frameMeshSum += p.frameMeshes.size();
+                p.frameMeshMax = std::max<uint64_t>(p.frameMeshMax, p.frameMeshes.size());
+                p.frameMeshes.clear();
+                if (++p.tasks % 300 == 0) {
+                    const uint64_t faces = p.mesh + p.terrain + p.sprite + p.other;
+                    std::fprintf(stderr, "[mesh-id] 300 tasks: faces=%llu mesh-DL=%llu (%.1f%%, under node %.1f%%) terrain=%llu sprite=%llu other-inline=%llu (under node %.1f%%) | calls=%llu into mesh DL=%llu | vtx loads mesh=%llu inline=%llu | meshes/frame avg=%.1f max=%llu, distinct this run=%zu\n",
+                        (unsigned long long)faces, (unsigned long long)p.mesh, faces ? 100.0 * p.mesh / faces : 0.0, p.mesh ? 100.0 * p.meshNode / p.mesh : 0.0,
+                        (unsigned long long)p.terrain, (unsigned long long)p.sprite, (unsigned long long)p.other, p.other ? 100.0 * p.otherNode / p.other : 0.0,
+                        (unsigned long long)p.calls, (unsigned long long)p.callsMesh, (unsigned long long)p.vtxMesh, (unsigned long long)p.vtxInline,
+                        p.frameMeshSum / 300.0, (unsigned long long)p.frameMeshMax, p.runMeshes.size());
+                    {
+                        std::vector<std::pair<uint64_t, uint32_t>> v;
+                        for (const auto& kv : p.inlineByMesh) v.emplace_back(kv.second, kv.first);
+                        std::sort(v.rbegin(), v.rend());
+                        std::fprintf(stderr, "[mesh-id] inline faces by node mesh:");
+                        for (size_t k = 0; k < v.size() && k < 10; ++k) std::fprintf(stderr, " %s=%llu", (v[k].second == 0xFFFFFFFFu) ? "no-node" : (v[k].second == 0xFFFFFFFEu) ? "node-unresolved" : reg.names[v[k].second].c_str(), (unsigned long long)v[k].first);
+                        std::fprintf(stderr, "\n");
+                        p.inlineByMesh.clear();
+                        std::vector<std::pair<uint64_t, uint64_t>> u;
+                        for (const auto& kv : p.unresolved) u.emplace_back(kv.second, kv.first);
+                        std::sort(u.rbegin(), u.rend());
+                        std::fprintf(stderr, "[mesh-id] unresolved node:drawable:");
+                        for (size_t k = 0; k < u.size() && k < 8; ++k) std::fprintf(stderr, " %08X:%08X=%llu", (uint32_t)(u[k].second >> 32), (uint32_t)u[k].second, (unsigned long long)u[k].first);
+                        std::fprintf(stderr, "\n");
+                        p.unresolved.clear();
+                    }
+                    std::fprintf(stderr, "[mesh-id] terrain: distinct height ptrs=%zu range %08X-%08X, tile positions seen=%zu, same pos -> same heights %llu / different %llu\n",
+                        p.tileH.size(), p.hMin, p.hMax, p.tileAt.size(), (unsigned long long)p.tileSame, (unsigned long long)p.tileDiff);
+                    std::fflush(stderr);
+                    {
+                        static const char* const kSrc[4] = { "mesh-DL", "inline", "terrain", "sprite" };
+                        std::fprintf(stderr, "[mesh-id] render class (opaque/cutout/xlu/no-zupd):");
+                        for (int s = 0; s < 4; ++s) std::fprintf(stderr, " %s=%llu/%llu/%llu/%llu", kSrc[s], (unsigned long long)p.cls[s][0], (unsigned long long)p.cls[s][1], (unsigned long long)p.cls[s][2], (unsigned long long)p.cls[s][3]);
+                        std::fprintf(stderr, "\n");
+                        std::vector<std::pair<uint64_t, uint32_t>> v;
+                        for (const auto& kv : p.cutoutByMesh) v.emplace_back(kv.second, kv.first);
+                        std::sort(v.rbegin(), v.rend());
+                        std::fprintf(stderr, "[mesh-id] cutout faces by mesh:");
+                        for (size_t k = 0; k < v.size() && k < 12; ++k) std::fprintf(stderr, " %s=%llu", (v[k].second >= 0xFFFFFFF0u) ? kSrc[v[k].second - 0xFFFFFFF0u] : reg.names[v[k].second].c_str(), (unsigned long long)v[k].first);
+                        std::fprintf(stderr, "\n[mesh-id] cutout othermode-L:");
+                        std::vector<std::pair<uint64_t, uint32_t>> mds;
+                        for (const auto& kv : p.cutoutModes) mds.emplace_back(kv.second, kv.first);
+                        std::sort(mds.rbegin(), mds.rend());
+                        for (size_t k = 0; k < mds.size() && k < 6; ++k) std::fprintf(stderr, " %04X=%llu", mds[k].second, (unsigned long long)mds[k].first);
+                        std::fprintf(stderr, "\n");
+                        std::memset(p.cls, 0, sizeof(p.cls));
+                        p.cutoutByMesh.clear();
+                        p.cutoutModes.clear();
+                    }
+                    p.tileH.clear();
+                    p.tileSame = p.tileDiff = 0;
+                    p.hMin = ~0u;
+                    p.hMax = 0;
+                    p.mesh = p.meshNode = p.terrain = p.sprite = p.other = p.otherNode = p.vtxMesh = p.vtxInline = p.calls = p.callsMesh = p.frameMeshSum = p.frameMeshMax = 0;
+                }
+            }
+            const uint32_t d = f5_depth(state);
+            const uint32_t base = (d < (uint32_t)F5_MAX_DEPTH) ? (s_chunk_base[d] & 0x00FFFFFFu) : 0u;
+            const auto it = reg.chunkMesh.find(base);
+            const bool inMesh = (it != reg.chunkMesh.end());
+            const bool underNode = f5_lookup_node_id(p.lastMv) != 0;
+            switch (OP) {
+                case 0x01:
+                    if (((dl->w0 >> 16) & 1u) == 0) p.lastMv = dl->w1;
+                    break;
+                case 0x06:
+                    ++p.calls;
+                    if (reg.chunkMesh.count(state->rsp->fromSegmentedMasked(dl->w1) & 0x00FFFFFFu)) ++p.callsMesh;
+                    break;
+                case 0x04:
+                    ++(inMesh ? p.vtxMesh : p.vtxInline);
+                    break;
+                case 0x05:
+                    if (((dl->w0 >> 16) & 0xFFu) == 0x05u) {
+                        ++p.terrain;
+                        const uint32_t hptr = dl[1].w0;
+                        const int32_t tx = (int16_t)(dl[4].w0 >> 16) + s_mv_off_x, tz = (int16_t)(dl[4].w1 >> 16) + s_mv_off_z;
+                        const uint64_t key = ((uint64_t)(uint32_t)tx << 32) ^ (uint32_t)tz ^ ((uint64_t)(dl[4].w1 & 0xFFFFu) << 48);
+                        p.tileH.insert(hptr);
+                        auto ins = p.tileAt.emplace(key, hptr);
+                        if (!ins.second) {
+                            ++(ins.first->second == hptr ? p.tileSame : p.tileDiff);
+                            ins.first->second = hptr;
+                        }
+                        p.hMin = std::min(p.hMin, hptr);
+                        p.hMax = std::max(p.hMax, hptr);
+                    }
+                    break;
+                case 0xBD:
+                case 0x0A:
+                    ++p.sprite;
+                    break;
+                case 0xBF:
+                case 0x08:
+                case 0xB4:
+                case 0x13:
+                    if (inMesh) {
+                        ++p.mesh;
+                        p.meshNode += underNode ? 1 : 0;
+                        p.frameMeshes.insert(it->second);
+                        if (p.runMeshes.insert(it->second).second && p.runMeshes.size() <= 400) std::fprintf(stderr, "[mesh-id] first draw: %s\n", reg.names[it->second].c_str());
+                    } else {
+                        ++p.other;
+                        const uint32_t node = f5_lookup_node_id(p.lastMv);
+                        const uint32_t item = (node >= 0x80000000u) ? rd_be_u32(ram, node + 0x10) : 0u;
+                        const uint32_t md = f5_vaddr_ok(item, 0x10) ? rd_be_u32(ram, item + 8) : 0u;
+                        const auto mi = reg.md1Mesh.find(md);
+                        ++p.inlineByMesh[(mi != reg.md1Mesh.end()) ? mi->second : (node ? 0xFFFFFFFEu : 0xFFFFFFFFu)];
+                        if ((mi == reg.md1Mesh.end()) && node) {
+                            ++p.unresolved[((uint64_t)node << 32) | md];
+                        }
+                        p.otherNode += underNode ? 1 : 0;
+                    }
+                    break;
+                default:
+                    break;
+            }
+            const bool tile05 = (OP == 0x05) && (((dl->w0 >> 16) & 0xFFu) == 0x05u);
+            const bool sprite = (OP == 0xBD) || (OP == 0x0A);
+            const bool tri = (OP == 0xBF) || (OP == 0x08) || (OP == 0xB4) || (OP == 0x13);
+            if (tile05 || sprite || tri) {
+                const uint32_t L = state->rdp->otherMode.L;
+                const int src = tile05 ? 2 : sprite ? 3 : inMesh ? 0 : 1;
+                int cls = 0;
+                if ((L & ZMODE_MASK) == ZMODE_XLU) cls = 2;
+                else if (((L & (3u << G_MDSFT_ALPHACOMPARE)) != 0) || ((L & (CVG_X_ALPHA | ALPHA_CVG_SEL)) == (CVG_X_ALPHA | ALPHA_CVG_SEL))) cls = 1;
+                else if ((L & Z_UPD) == 0) cls = 3;
+                ++p.cls[src][cls];
+                if (cls == 1) {
+                    const uint32_t node = f5_lookup_node_id(p.lastMv);
+                    const uint32_t item = (node >= 0x80000000u) ? rd_be_u32(ram, node + 0x10) : 0u;
+                    const uint32_t md = f5_vaddr_ok(item, 0x10) ? rd_be_u32(ram, item + 8) : 0u;
+                    const auto mi = reg.md1Mesh.find(md);
+                    const uint32_t key = inMesh ? it->second : (mi != reg.md1Mesh.end()) ? mi->second : 0xFFFFFFF0u + (uint32_t)src;
+                    ++p.cutoutByMesh[key];
+                    ++p.cutoutModes[L & 0xFFFFu];
+                }
+            }
+        }
         template <int OP>
         static void f5_bounded(State* state, DisplayList** dl) {
             if (f5_ran_off_chunk(state, *dl)) {
@@ -974,6 +1466,14 @@ namespace RT64 {
                 *dl = nullptr;
                 return;
             }
+            f5_mesh_probe<OP>(state, *dl);
+            if (rs64lights::sceneCaptureEnabled(rs64lights::config()) && (state->displayListCounter != s_sun_task)) {
+                s_sun_task = state->displayListCounter;
+                f5_capture_sun(state);
+                if (rs64lights::config().shadowTerrain) {
+                    f5_capture_terrain(state);
+                }
+            }
             if (s_inner[OP]) {
                 s_inner[OP](state, dl);
             } else {
@@ -994,10 +1494,38 @@ namespace RT64 {
             f5_next_chunk(state, dl);
         }
 
+        // A call or branch into a registered mesh chunk arms its light, no-cast mark and exhaust lights for the next vertex load.
+        static void f5_arm_mesh_emitters(State* state, uint32_t target) {
+            if (!rs64lights::emitterLookupEnabled(rs64lights::config())) {
+                return;
+            }
+            F5MeshRegistry& reg = f5_mesh_registry(state);
+            const auto it = reg.chunkMesh.find(target & 0x00FFFFFFu);
+            if (it == reg.chunkMesh.end()) {
+                return;
+            }
+            if (reg.laser[it->second].kind == rs64lights::KindLaser) {
+                s_pending_laser = reg.laser[it->second];
+                s_pending_laser_valid = true;
+                if (rs64lights::config().log) {
+                    static uint32_t s_n = 0;
+                    if ((++s_n % 120) == 1) {
+                        std::fprintf(stderr, "[rt-lights] chunk emitter: %s\n", reg.names[it->second].c_str());
+                    }
+                }
+            }
+            s_pending_nocast = reg.noCast[it->second];
+            if (reg.exhaust[it->second] != nullptr) {
+                s_pending_exhaust = reg.exhaust[it->second];
+            }
+            s_pending_craft = (reg.craft[it->second] != 0);
+        }
+
         // 0x07: branch to chunk w1.
         void op_07_branch(State* state, DisplayList** dl) {
             const uint32_t target = state->rsp->fromSegmentedMasked((*dl)->w1);
             if (target == 0 || target + 0x108u > RDRAMSize) { GBI_F3D::endDl(state, dl); return; }
+            f5_arm_mesh_emitters(state, target);
             f5_enter_chunk(state, dl, target);
         }
 
@@ -1015,6 +1543,7 @@ namespace RT64 {
             }
             const uint32_t target = state->rsp->fromSegmentedMasked((*dl)->w1);
             if (target == 0 || target + 0x108u > RDRAMSize) return;
+            f5_arm_mesh_emitters(state, target);
             if (((*dl)->w0 >> 16) & 1) {
                 f5_enter_chunk(state, dl, target);
             } else {
@@ -1336,6 +1865,30 @@ namespace RT64 {
                     emit_vertex(strip[(N + 1) + cc], (float)cc / s_sub, (float)(rr + 1) / s_sub);
                 }
             }
+            // ROGUESQ_LOG_RT_LIGHTS with shadows: an unmorphed near tile must match the static caster mesh vertex for vertex.
+            if (rs64lights::config().shadows && rs64lights::config().log && (shift == 0) && (gridN == 5) && (wInterior == 0) && ((wXmin | wXmax | wZmin | wZmax) == 0) && (nbXmin == shift) && (nbXmax == shift) && (nbZmin == shift) && (nbZmax == shift)) {
+                static uint32_t s_chk = 0;
+                if ((++s_chk % 500) == 1) {
+                    int8_t raw[25];
+                    for (int k = 0; k < 25; ++k) {
+                        raw[k] = (int8_t)ram[(hptr + (uint32_t)k) ^ 3];
+                    }
+                    thread_local std::vector<float> tp;
+                    thread_local std::vector<uint32_t> tix;
+                    tp.clear();
+                    tix.clear();
+                    rs64lights::terrainTileMesh(raw, s_sub, x, z, hcoeff, tp, tix);
+                    int bad = 0;
+                    for (int rr = 0; rr <= N; ++rr) {
+                        for (int cc = 0; cc <= N; ++cc) {
+                            const RSP::Vertex& v = (rr < N) ? geom[(size_t)rr * 2 * (N + 1) + cc] : geom[(size_t)(N - 1) * 2 * (N + 1) + (N + 1) + cc];
+                            const float* q = &tp[((size_t)rr * (N + 1) + cc) * 3];
+                            bad += ((q[0] != (float)v.x) || (q[1] != (float)(v.y - y)) || (q[2] != (float)v.z)) ? 1 : 0;
+                        }
+                    }
+                    std::fprintf(stderr, "[rt-terrain] tile check: base_y=%d verts=%d mismatch=%d\n", y, (N + 1) * (N + 1), bad);
+                }
+            }
             f5_emit_terrain_strips(state, geom.data(), N);
         }
 
@@ -1348,8 +1901,12 @@ namespace RT64 {
                   std::fprintf(stderr, "[f5-op05] unusual header %08X %08X next %08X %08X\n", w0, (*dl)->w1, (*dl)[1].w0, (*dl)[1].w1); std::fflush(stderr); } }
             if (((w0 >> 16) & 0xFFu) != 0x05u) return;      // plain 8-byte command
             ++s_task_tiles;
-            if ((w0 >> 8) & 0x2u) f5_tile_quad(state, *dl);   // 05 05 02 = flat tile
-            else                  f5_tile_grid(state, *dl);   // 05 05 00 = heightfield grid
+            const bool flatTile = ((w0 >> 8) & 0x2u) != 0;
+            if (flatTile) f5_tile_quad(state, *dl);   // 05 05 02 = flat tile
+            else          f5_tile_grid(state, *dl);   // 05 05 00 = heightfield grid
+            if (rs64lights::sceneCaptureEnabled(rs64lights::config()) && rs64lights::config().shadowTerrain) {
+                f5_note_terrain_tile(state, *dl, flatTile);
+            }
             (*dl) += 4;                                       // 40-byte record
         }
 
@@ -1462,6 +2019,34 @@ namespace RT64 {
             if (!f5_native_active()) return;
             f5_ensure_viewport(state);
 
+            // Meshes the game builds every frame (no prebuilt chunks, e.g. the r_pow pickup) are identified by their scene node at the modelview load.
+            if (!proj && rs64lights::emitterLookupEnabled(rs64lights::config())) {
+                const uint32_t node = f5_lookup_node_id(w1);
+                const uint32_t item = (node >= 0x80000000u) ? rd_be_u32(ram, node + 0x10) : 0u;
+                const uint32_t md = f5_vaddr_ok(item, 0x10) ? rd_be_u32(ram, item + 8) : 0u;
+                if (md != 0) {
+                    F5MeshRegistry& reg = f5_mesh_registry(state);
+                    const auto mi = reg.md1Mesh.find(md);
+                    if ((mi != reg.md1Mesh.end()) && (reg.exhaustPart[mi->second] != nullptr)) {
+                        s_pending_exhaust = reg.exhaustPart[mi->second];
+                    }
+                    if (mi != reg.md1Mesh.end()) {
+                        s_pending_craft = (reg.craft[mi->second] != 0);
+                    }
+                    if ((mi != reg.md1Mesh.end()) && (reg.laser[mi->second].kind == rs64lights::KindLaser)) {
+                        s_pending_laser = reg.laser[mi->second];
+                        s_pending_laser_valid = true;
+                        s_pending_nocast = reg.noCast[mi->second];
+                        if (rs64lights::config().log) {
+                            static uint32_t s_n = 0;
+                            if ((++s_n % 120) == 1) {
+                                std::fprintf(stderr, "[rt-lights] inline emitter: %s\n", reg.names[mi->second].c_str());
+                            }
+                        }
+                    }
+                }
+            }
+
             // Per-object distance cull: evaluate on the modelview load that delimits each object.
             {
                 const float thr2 = f5_cull_dist2();
@@ -1495,7 +2080,7 @@ namespace RT64 {
                       if (nodePtr >= 0x80000000u) {
                           // Default stamps every stable node (ships smooth; the best result found).
                           // ROGUESQ_F5_UNIQUE_ONLY=1 restricts to nodes with a unique drawable this
-                          // frame — excludes particle templates and terrain tiles, but also drops
+                          // frame â€” excludes particle templates and terrain tiles, but also drops
                           // formation ships (identical model = shared drawable), so it is opt-in.
                           static int s_uniq = -1; if (s_uniq < 0) { const char* e = std::getenv("ROGUESQ_F5_UNIQUE_ONLY"); s_uniq = (e && e[0] == '1') ? 1 : 0; }
                           bool stamp = true;
@@ -1508,7 +2093,7 @@ namespace RT64 {
                               stamp = (dr >= 0x80000000u) && (it != s_draw_hist[buf].end()) && (it->second == 1);
                           }
                           if (stamp) id = 0x20000000u | (nodePtr & 0x00FFFFFFu) | (f5_node_regrid_generation(state->RDRAM, nodePtr) << 24);
-                          // ROGUESQ_F5_TERRAIN_ID: terrain tiles are a scrolling pool — the node ptr is
+                          // ROGUESQ_F5_TERRAIN_ID: terrain tiles are a scrolling pool â€” the node ptr is
                           // the reused SLOT, which makes RT64 interpolate a slot through the world-cell
                           // change at a grid re-center (the periodic terrain hitch). Instead, id a
                           // terrain tile by its WORLD position (node+0x40 X/Z, quantized) so the draw
@@ -1667,7 +2252,52 @@ namespace RT64 {
                 out[i].color.b = (uint8_t)(c >> 8);
                 out[i].color.a = (uint8_t)c;
             }
-            if (!s_cull_skip) state->rsp->setVertex(0x80000000u | F5_VTX_SCRATCH, n, 0);
+            f5_mesh_vertex_dump(state, out, n);
+            if (!s_cull_skip) {
+                state->rsp->setVertex(0x80000000u | F5_VTX_SCRATCH, n, 0);
+                if (s_pending_laser_valid && rs64lights::config().enabled) {
+                    rs64lights::Candidate c = s_pending_laser;
+                    c.transformIndex = state->rsp->curTransformIndex;
+                    f5_push_light(state, c);
+                }
+                if ((s_pending_exhaust != nullptr) && rs64lights::config().enabled && (rs64lights::config().exhaustGain > 0.0f)) {
+                    // A large part (the Falcon hull) can arrive in several vertex batches under one transform: emit its lights once.
+                    static const char* s_lastKey = nullptr;
+                    static uint32_t s_lastTransform = UINT32_MAX;
+                    static uint64_t s_lastTask = ~0ull;
+                    const bool again = (s_lastKey == s_pending_exhaust) && (s_lastTransform == state->rsp->curTransformIndex) && (s_lastTask == state->displayListCounter);
+                    s_lastKey = s_pending_exhaust;
+                    s_lastTransform = state->rsp->curTransformIndex;
+                    s_lastTask = state->displayListCounter;
+                    rs64lights::Candidate ex[rs64lights::MaxExhaustLights];
+                    const uint32_t m = again ? 0 : rs64lights::exhaustLights(s_pending_exhaust, rs64lights::config().exhaustRadius, rs64lights::config().exhaustGain, ex, rs64lights::MaxExhaustLights);
+                    for (uint32_t k = 0; k < m; ++k) {
+                        ex[k].transformIndex = state->rsp->curTransformIndex;
+                        f5_push_light(state, ex[k]);
+                    }
+                    if (rs64lights::config().log) {
+                        static uint32_t s_n = 0;
+                        if ((++s_n % 120) == 1) {
+                            std::fprintf(stderr, "[rt-lights] exhaust: %s lights=%u\n", s_pending_exhaust, m);
+                        }
+                    }
+                }
+                if (s_pending_craft && rs64lights::sceneCaptureEnabled(rs64lights::config())) {
+                    auto& craft = state->ext.workloadQueue->workloads[state->ext.workloadQueue->writeCursor].rs64Craft;
+                    if (craft.empty() || (craft.back() != state->rsp->curTransformIndex)) {
+                        craft.push_back(state->rsp->curTransformIndex);
+                    }
+                }
+                // Laser bolts (pure light) and light-source glow cards never cast; a torpedo body does.
+                if ((s_pending_nocast != 0) && rs64lights::sceneCaptureEnabled(rs64lights::config())) {
+                    Workload &wl = state->ext.workloadQueue->workloads[state->ext.workloadQueue->writeCursor];
+                    (s_pending_nocast == 1 ? wl.rs64NoCast : wl.rs64NoCastCutout).push_back(state->rsp->curTransformIndex);
+                }
+            }
+            s_pending_laser_valid = false;
+            s_pending_nocast = 0;
+            s_pending_exhaust = nullptr;
+            s_pending_craft = false;
             s_cache_count = n;
         }
 
@@ -1855,6 +2485,36 @@ namespace RT64 {
                     }
                     state->rsp->drawIndexedTri(F5_FACE_SLOT, F5_FACE_SLOT + 3, F5_FACE_SLOT + 2);
                     state->rsp->drawIndexedTri(F5_FACE_SLOT, F5_FACE_SLOT + 1, F5_FACE_SLOT + 3);
+                    if (rs64lights::config().enabled) {
+                        const float modelScale = std::sqrt((float)savedModel[0][0] * (float)savedModel[0][0] + (float)savedModel[0][1] * (float)savedModel[0][1] + (float)savedModel[0][2] * (float)savedModel[0][2]);
+                        rs64lights::Candidate lc;
+                        if (rs64lights::spriteLight(w1, spriteSize * modelScale, rs64lights::config().spriteRadius, rs64lights::config().spriteRadiusMax, lc)) {
+                            lc.transformIndex = state->rsp->curTransformIndex;
+                            if (!s_sprite_xform) {
+                                lc.local[0] = (float)c.x;
+                                lc.local[1] = (float)c.y;
+                                lc.local[2] = (float)c.z;
+                            }
+                            f5_push_light(state, lc);
+                        }
+                        else if (rs64lights::config().log) {
+                            // Distinct rejected prim colours (with the render tile's format), counted and listed every 300 rejections.
+                            static std::map<uint64_t, uint32_t> s_rej;
+                            static uint32_t s_n = 0;
+                            const LoadTile& t0 = state->rdp->tiles[0];
+                            if (s_rej.size() < 256) {
+                                ++s_rej[(uint64_t(w1) << 16) | (uint64_t(t0.fmt) << 8) | t0.siz];
+                            }
+                            if ((++s_n % 300) == 0) {
+                                std::fprintf(stderr, "[rt-lights] rejected sprites (prim fmt/siz=count):");
+                                for (const auto& kv : s_rej) {
+                                    std::fprintf(stderr, " %08X %u/%u=%u", uint32_t(kv.first >> 16), uint32_t((kv.first >> 8) & 0xFF), uint32_t(kv.first & 0xFF), kv.second);
+                                }
+                                std::fprintf(stderr, "\n");
+                                s_rej.clear();
+                            }
+                        }
+                    }
                     if (s_sprite_xform) {
                         modelTop = savedModel;
                         state->rsp->popMatrixId(1, false);

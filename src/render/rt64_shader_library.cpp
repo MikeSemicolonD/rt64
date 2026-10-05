@@ -10,6 +10,15 @@
 
 #include "shaders/FbChangesClearCS.hlsl.spirv.h"
 #include "shaders/FbChangesDrawColorPS.hlsl.spirv.h"
+#include "shaders/RS64LightsPS.hlsl.spirv.h"
+#ifndef __APPLE__
+#   include "shaders/RS64ShadowsPS.hlsl.spirv.h"
+#   include "shaders/RS64LightsShadowedPS.hlsl.spirv.h"
+#   include "shaders/RS64FogShaftsPS.hlsl.spirv.h"
+#   include "shaders/RS64ShadowsSoftPS.hlsl.spirv.h"
+#   include "shaders/RS64ShadowBlurPS.hlsl.spirv.h"
+#   include "shaders/RS64ShadowBlurVPS.hlsl.spirv.h"
+#endif
 #include "shaders/FbChangesDrawDepthPS.hlsl.spirv.h"
 #include "shaders/FbReadAnyChangesCS.hlsl.spirv.h"
 #include "shaders/FbReadAnyFullCS.hlsl.spirv.h"
@@ -56,6 +65,13 @@
 #ifdef _WIN32
 #   include "shaders/FbChangesClearCS.hlsl.dxil.h"
 #   include "shaders/FbChangesDrawColorPS.hlsl.dxil.h"
+#   include "shaders/RS64LightsPS.hlsl.dxil.h"
+#   include "shaders/RS64ShadowsPS.hlsl.dxil.h"
+#   include "shaders/RS64LightsShadowedPS.hlsl.dxil.h"
+#   include "shaders/RS64FogShaftsPS.hlsl.dxil.h"
+#   include "shaders/RS64ShadowsSoftPS.hlsl.dxil.h"
+#   include "shaders/RS64ShadowBlurPS.hlsl.dxil.h"
+#   include "shaders/RS64ShadowBlurVPS.hlsl.dxil.h"
 #   include "shaders/FbChangesDrawDepthPS.hlsl.dxil.h"
 #   include "shaders/FbReadAnyChangesCS.hlsl.dxil.h"
 #   include "shaders/FbReadAnyFullCS.hlsl.dxil.h"
@@ -101,6 +117,7 @@
 #elif defined(__APPLE__)
 #   include "shaders/FbChangesClearCS.hlsl.metal.h"
 #   include "shaders/FbChangesDrawColorPS.hlsl.metal.h"
+#   include "shaders/RS64LightsPS.hlsl.metal.h"
 #   include "shaders/FbChangesDrawDepthPS.hlsl.metal.h"
 #   include "shaders/FbReadAnyChangesCS.hlsl.metal.h"
 #   include "shaders/FbReadAnyFullCS.hlsl.metal.h"
@@ -784,6 +801,198 @@ namespace RT64 {
             pipelineDesc.depthTargetFormat = RenderFormat::D32_FLOAT;
             fbChangesDrawDepth.pipeline = device->createGraphicsPipeline(pipelineDesc);
         }
+
+        // RS64 dynamic point lights: full-screen pass reading depth, drawn while the depth target is bound read-only.
+        {
+            RS64LightsDescriptorSet descriptorSet;
+            layoutBuilder.begin();
+            layoutBuilder.addDescriptorSet(descriptorSet);
+            layoutBuilder.end();
+            rs64Lights.pipelineLayout = layoutBuilder.create(device);
+            rs64LightsDebug.pipelineLayout = layoutBuilder.create(device);
+
+            std::unique_ptr<RenderShader> lightsShader = device->createShader(CREATE_SHADER_INPUTS(RS64LightsPSBlobDXIL, RS64LightsPSBlobSPIRV, RS64LightsPSBlobMSL, "PSMain", shaderFormat));
+            RenderGraphicsPipelineDesc pipelineDesc;
+            pipelineDesc.renderTargetFormat[0] = RenderTarget::colorBufferFormat(usesHDR);
+            pipelineDesc.renderTargetCount = 1;
+            pipelineDesc.vertexShader = fullScreenVertexShader.get();
+            pipelineDesc.pixelShader = lightsShader.get();
+            pipelineDesc.multisampling = multisampling;
+            pipelineDesc.depthTargetFormat = RenderFormat::D32_FLOAT;
+            pipelineDesc.depthEnabled = false;
+            pipelineDesc.depthWriteEnabled = false;
+
+            // Tint the prelit colour: result = dst * src + dst.
+            RenderBlendDesc tint = RenderBlendDesc::Copy();
+            tint.blendEnabled = true;
+            tint.srcBlend = RenderBlend::DEST_COLOR;
+            tint.dstBlend = RenderBlend::ONE;
+            tint.blendOp = RenderBlendOperation::ADD;
+            tint.srcBlendAlpha = RenderBlend::ZERO;
+            tint.dstBlendAlpha = RenderBlend::ONE;
+            tint.blendOpAlpha = RenderBlendOperation::ADD;
+            pipelineDesc.renderTargetBlend[0] = tint;
+            pipelineDesc.pipelineLayout = rs64Lights.pipelineLayout.get();
+            rs64Lights.pipeline = device->createGraphicsPipeline(pipelineDesc);
+
+            RenderBlendDesc over = RenderBlendDesc::Copy();
+            over.blendEnabled = true;
+            over.srcBlend = RenderBlend::SRC_ALPHA;
+            over.dstBlend = RenderBlend::INV_SRC_ALPHA;
+            over.blendOp = RenderBlendOperation::ADD;
+            over.srcBlendAlpha = RenderBlend::ZERO;
+            over.dstBlendAlpha = RenderBlend::ONE;
+            over.blendOpAlpha = RenderBlendOperation::ADD;
+            pipelineDesc.renderTargetBlend[0] = over;
+            pipelineDesc.pipelineLayout = rs64LightsDebug.pipelineLayout.get();
+            rs64LightsDebug.pipeline = device->createGraphicsPipeline(pipelineDesc);
+        }
+
+        // RS64 sun shadows: inline RayQuery against the per-frame scene, only on devices with ray queries.
+#   ifndef __APPLE__
+        if (device->getCapabilities().rayQuery) {
+            // Traced passes: sets 0-2 = raster common + bindless textures (cutout alpha test), set 3 = RS64 traced resources.
+            FramebufferRendererDescriptorCommonSet tracedCommonSet(samplerLibrary, device->getCapabilities().raytracing);
+            FramebufferRendererDescriptorTextureSet tracedTextureSet;
+            RS64TracedDescriptorSet tracedSet;
+            auto tracedLayout = [&]() {
+                layoutBuilder.begin();
+                layoutBuilder.addDescriptorSet(tracedCommonSet);
+                layoutBuilder.addDescriptorSet(tracedTextureSet);
+                layoutBuilder.addDescriptorSet(tracedTextureSet);
+                layoutBuilder.addDescriptorSet(tracedSet);
+                layoutBuilder.end();
+                return layoutBuilder.create(device);
+            };
+            rs64Shadows.pipelineLayout = tracedLayout();
+            rs64ShadowsDebug.pipelineLayout = tracedLayout();
+
+            std::unique_ptr<RenderShader> shadowsShader = device->createShader(CREATE_SHADER_INPUTS(RS64ShadowsPSBlobDXIL, RS64ShadowsPSBlobSPIRV, RS64ShadowsPSBlobSPIRV, "PSMain", shaderFormat));
+            RenderGraphicsPipelineDesc pipelineDesc;
+            pipelineDesc.renderTargetFormat[0] = RenderTarget::colorBufferFormat(usesHDR);
+            pipelineDesc.renderTargetCount = 1;
+            pipelineDesc.vertexShader = fullScreenVertexShader.get();
+            pipelineDesc.pixelShader = shadowsShader.get();
+            pipelineDesc.multisampling = multisampling;
+            pipelineDesc.depthTargetFormat = RenderFormat::D32_FLOAT;
+            pipelineDesc.depthEnabled = false;
+            pipelineDesc.depthWriteEnabled = false;
+
+            // Darken: result = dst * src.
+            RenderBlendDesc darken = RenderBlendDesc::Copy();
+            darken.blendEnabled = true;
+            darken.srcBlend = RenderBlend::ZERO;
+            darken.dstBlend = RenderBlend::SRC_COLOR;
+            darken.blendOp = RenderBlendOperation::ADD;
+            darken.srcBlendAlpha = RenderBlend::ZERO;
+            darken.dstBlendAlpha = RenderBlend::ONE;
+            darken.blendOpAlpha = RenderBlendOperation::ADD;
+            pipelineDesc.renderTargetBlend[0] = darken;
+            pipelineDesc.pipelineLayout = rs64Shadows.pipelineLayout.get();
+            rs64Shadows.pipeline = device->createGraphicsPipeline(pipelineDesc);
+
+            pipelineDesc.renderTargetBlend[0] = RenderBlendDesc::Copy();
+            pipelineDesc.pipelineLayout = rs64ShadowsDebug.pipelineLayout.get();
+            rs64ShadowsDebug.pipeline = device->createGraphicsPipeline(pipelineDesc);
+
+            // Soft shadows: trace into an RGBA16F mask (shadow, blur radius, view distance), blur H into a ping texture, blur V and darken the colour target.
+            rs64ShadowsSoft.pipelineLayout = tracedLayout();
+            std::unique_ptr<RenderShader> softShader = device->createShader(CREATE_SHADER_INPUTS(RS64ShadowsSoftPSBlobDXIL, RS64ShadowsSoftPSBlobSPIRV, RS64ShadowsSoftPSBlobSPIRV, "PSMain", shaderFormat));
+            RenderGraphicsPipelineDesc maskDesc = pipelineDesc;
+            maskDesc.pixelShader = softShader.get();
+            // Two targets: mask (shadow, radius, distance code, AO) and indirect light (GI + reflections rgb).
+            maskDesc.renderTargetCount = 2;
+            maskDesc.renderTargetFormat[0] = RenderFormat::R16G16B16A16_FLOAT;
+            maskDesc.renderTargetFormat[1] = RenderFormat::R16G16B16A16_FLOAT;
+            maskDesc.multisampling = RenderMultisampling();
+            maskDesc.depthTargetFormat = RenderFormat::UNKNOWN;
+            maskDesc.renderTargetBlend[0] = RenderBlendDesc::Copy();
+            maskDesc.renderTargetBlend[1] = RenderBlendDesc::Copy();
+            maskDesc.pipelineLayout = rs64ShadowsSoft.pipelineLayout.get();
+            rs64ShadowsSoft.pipeline = device->createGraphicsPipeline(maskDesc);
+
+            RS64ShadowBlurDescriptorSet blurSet;
+            auto blurLayout = [&]() {
+                layoutBuilder.begin();
+                layoutBuilder.addDescriptorSet(blurSet);
+                layoutBuilder.end();
+                return layoutBuilder.create(device);
+            };
+            rs64ShadowBlurH.pipelineLayout = blurLayout();
+            rs64ShadowBlurV.pipelineLayout = blurLayout();
+            rs64ShadowBlurVDebug.pipelineLayout = blurLayout();
+            std::unique_ptr<RenderShader> blurHShader = device->createShader(CREATE_SHADER_INPUTS(RS64ShadowBlurPSBlobDXIL, RS64ShadowBlurPSBlobSPIRV, RS64ShadowBlurPSBlobSPIRV, "PSMain", shaderFormat));
+            std::unique_ptr<RenderShader> blurVShader = device->createShader(CREATE_SHADER_INPUTS(RS64ShadowBlurVPSBlobDXIL, RS64ShadowBlurVPSBlobSPIRV, RS64ShadowBlurVPSBlobSPIRV, "PSMain", shaderFormat));
+            maskDesc.pixelShader = blurHShader.get();
+            maskDesc.pipelineLayout = rs64ShadowBlurH.pipelineLayout.get();
+            rs64ShadowBlurH.pipeline = device->createGraphicsPipeline(maskDesc);
+            // Compose: result = dst * src + dst * srcA = dst * dark * (1 + indirect), see rs64lights::composeFactor.
+            RenderBlendDesc compose = RenderBlendDesc::Copy();
+            compose.blendEnabled = true;
+            compose.srcBlend = RenderBlend::DEST_COLOR;
+            compose.dstBlend = RenderBlend::SRC_ALPHA;
+            compose.blendOp = RenderBlendOperation::ADD;
+            compose.srcBlendAlpha = RenderBlend::ZERO;
+            compose.dstBlendAlpha = RenderBlend::ONE;
+            compose.blendOpAlpha = RenderBlendOperation::ADD;
+            RenderGraphicsPipelineDesc compDesc = pipelineDesc;
+            compDesc.pixelShader = blurVShader.get();
+            compDesc.renderTargetBlend[0] = compose;
+            compDesc.pipelineLayout = rs64ShadowBlurV.pipelineLayout.get();
+            rs64ShadowBlurV.pipeline = device->createGraphicsPipeline(compDesc);
+            compDesc.renderTargetBlend[0] = RenderBlendDesc::Copy();
+            compDesc.pipelineLayout = rs64ShadowBlurVDebug.pipelineLayout.get();
+            rs64ShadowBlurVDebug.pipeline = device->createGraphicsPipeline(compDesc);
+
+            // Shadowed point lights: the light pass with one RayQuery per ranked light, same blends as rs64Lights.
+            rs64LightsShadowed.pipelineLayout = tracedLayout();
+            rs64LightsShadowedDebug.pipelineLayout = tracedLayout();
+            std::unique_ptr<RenderShader> lightsShadowedShader = device->createShader(CREATE_SHADER_INPUTS(RS64LightsShadowedPSBlobDXIL, RS64LightsShadowedPSBlobSPIRV, RS64LightsShadowedPSBlobSPIRV, "PSMain", shaderFormat));
+            pipelineDesc.pixelShader = lightsShadowedShader.get();
+            RenderBlendDesc tint = RenderBlendDesc::Copy();
+            tint.blendEnabled = true;
+            tint.srcBlend = RenderBlend::DEST_COLOR;
+            tint.dstBlend = RenderBlend::ONE;
+            tint.blendOp = RenderBlendOperation::ADD;
+            tint.srcBlendAlpha = RenderBlend::ZERO;
+            tint.dstBlendAlpha = RenderBlend::ONE;
+            tint.blendOpAlpha = RenderBlendOperation::ADD;
+            pipelineDesc.renderTargetBlend[0] = tint;
+            pipelineDesc.pipelineLayout = rs64LightsShadowed.pipelineLayout.get();
+            rs64LightsShadowed.pipeline = device->createGraphicsPipeline(pipelineDesc);
+            RenderBlendDesc over = RenderBlendDesc::Copy();
+            over.blendEnabled = true;
+            over.srcBlend = RenderBlend::SRC_ALPHA;
+            over.dstBlend = RenderBlend::INV_SRC_ALPHA;
+            over.blendOp = RenderBlendOperation::ADD;
+            over.srcBlendAlpha = RenderBlend::ZERO;
+            over.dstBlendAlpha = RenderBlend::ONE;
+            over.blendOpAlpha = RenderBlendOperation::ADD;
+            pipelineDesc.renderTargetBlend[0] = over;
+            pipelineDesc.pipelineLayout = rs64LightsShadowedDebug.pipelineLayout.get();
+            rs64LightsShadowedDebug.pipeline = device->createGraphicsPipeline(pipelineDesc);
+
+            // Fog shafts: sun in-scatter added onto the game's fog.
+            rs64FogShafts.pipelineLayout = tracedLayout();
+            rs64FogShaftsDebug.pipelineLayout = tracedLayout();
+            std::unique_ptr<RenderShader> fogShader = device->createShader(CREATE_SHADER_INPUTS(RS64FogShaftsPSBlobDXIL, RS64FogShaftsPSBlobSPIRV, RS64FogShaftsPSBlobSPIRV, "PSMain", shaderFormat));
+            pipelineDesc.pixelShader = fogShader.get();
+            RenderBlendDesc add = RenderBlendDesc::Copy();
+            add.blendEnabled = true;
+            add.srcBlend = RenderBlend::ONE;
+            add.dstBlend = RenderBlend::ONE;
+            add.blendOp = RenderBlendOperation::ADD;
+            add.srcBlendAlpha = RenderBlend::ZERO;
+            add.dstBlendAlpha = RenderBlend::ONE;
+            add.blendOpAlpha = RenderBlendOperation::ADD;
+            pipelineDesc.renderTargetBlend[0] = add;
+            pipelineDesc.pipelineLayout = rs64FogShafts.pipelineLayout.get();
+            rs64FogShafts.pipeline = device->createGraphicsPipeline(pipelineDesc);
+            pipelineDesc.renderTargetBlend[0] = RenderBlendDesc::Copy();
+            pipelineDesc.pipelineLayout = rs64FogShaftsDebug.pipelineLayout.get();
+            rs64FogShaftsDebug.pipeline = device->createGraphicsPipeline(pipelineDesc);
+        }
+#   endif
 
         // Copy color to depth and depth to color.
         {

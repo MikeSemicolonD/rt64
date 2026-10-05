@@ -31,6 +31,18 @@ namespace RT64 {
         ShaderRecord debug;
         ShaderRecord fbChangesClear;
         ShaderRecord fbChangesDrawColor;
+        ShaderRecord rs64Lights;
+        ShaderRecord rs64LightsDebug;
+        ShaderRecord rs64Shadows;
+        ShaderRecord rs64ShadowsDebug;
+        ShaderRecord rs64ShadowsSoft;
+        ShaderRecord rs64ShadowBlurH;
+        ShaderRecord rs64ShadowBlurV;
+        ShaderRecord rs64ShadowBlurVDebug;
+        ShaderRecord rs64LightsShadowed;
+        ShaderRecord rs64LightsShadowedDebug;
+        ShaderRecord rs64FogShafts;
+        ShaderRecord rs64FogShaftsDebug;
         ShaderRecord fbChangesDrawDepth;
         ShaderRecord fbReadAnyChanges;
         ShaderRecord fbReadAnyFull;

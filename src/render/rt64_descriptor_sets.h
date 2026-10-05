@@ -489,6 +489,75 @@ namespace RT64 {
         }
     };
 
+    struct RS64LightsDescriptorSet : RenderDescriptorSetBase {
+        uint32_t gLights;
+        uint32_t gDepth;
+
+        RS64LightsDescriptorSet(RenderDevice *device = nullptr) {
+            builder.begin();
+            gLights = builder.addConstantBuffer(0);
+            gDepth = builder.addTexture(1);
+            builder.end();
+
+            if (device != nullptr) {
+                create(device);
+            }
+        }
+    };
+
+    // Set 3 of the traced RS64 passes (sets 0-2 are the raster common and bindless texture sets).
+    struct RS64TracedDescriptorSet : RenderDescriptorSetBase {
+        uint32_t gParams;
+        uint32_t gDepth;
+        uint32_t gScene;
+        uint32_t gCutoutDraws;
+        uint32_t gCutoutIndices;
+        uint32_t gTexCoords;
+        uint32_t gTerrainIndices;
+        uint32_t gTerrainNormals;
+        uint32_t gHitColors;
+        uint32_t gEmissiveColors;
+
+        RS64TracedDescriptorSet(RenderDevice *device = nullptr) {
+            builder.begin();
+            gParams = builder.addConstantBuffer(1);
+            gDepth = builder.addTexture(2);
+            gScene = builder.addAccelerationStructure(3);
+            gCutoutDraws = builder.addStructuredBuffer(4);
+            gCutoutIndices = builder.addByteAddressBuffer(5);
+            gTexCoords = builder.addByteAddressBuffer(6);
+            gTerrainIndices = builder.addByteAddressBuffer(7);
+            gTerrainNormals = builder.addByteAddressBuffer(8);
+            gHitColors = builder.addStructuredBuffer(9);
+            gEmissiveColors = builder.addStructuredBuffer(10);
+            builder.end();
+
+            if (device != nullptr) {
+                create(device);
+            }
+        }
+    };
+
+    struct RS64ShadowBlurDescriptorSet : RenderDescriptorSetBase {
+        uint32_t gBlur;
+        uint32_t gDepth;
+        uint32_t gMask;
+        uint32_t gIndirect;
+
+        RS64ShadowBlurDescriptorSet(RenderDevice *device = nullptr) {
+            builder.begin();
+            gBlur = builder.addConstantBuffer(0);
+            gDepth = builder.addTexture(1);
+            gMask = builder.addTexture(2);
+            gIndirect = builder.addTexture(3);
+            builder.end();
+
+            if (device != nullptr) {
+                create(device);
+            }
+        }
+    };
+
     struct RSPModifyDescriptorSet : RenderDescriptorSetBase {
         uint32_t srcModifyPos;
         uint32_t screenPos;

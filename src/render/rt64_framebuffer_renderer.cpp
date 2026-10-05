@@ -19,6 +19,14 @@
 #include "gbi/rt64_f3d.h"
 #include "shared/rt64_framebuffer_params.h"
 #include "shared/rt64_raster_params.h"
+#include "shared/rt64_rs64_lights_cb.h"
+#include "shared/rt64_rs64_shadows_cb.h"
+#include "shared/rt64_rs64_shadow_blur_cb.h"
+#include "shared/rt64_rs64_fog_shafts_cb.h"
+#include "shared/rt64_rs64_cutout.h"
+
+static_assert(sizeof(interop::RS64CutoutDraw) == sizeof(rs64lights::CutoutEntry), "cutout table layout");
+#include "hle/rt64_rs64_lights.h"
 
 #include "rt64_descriptor_sets.h"
 #include "rt64_render_worker.h"
@@ -1472,6 +1480,50 @@ namespace RT64 {
             vertexProcessor->recordCommandList(worker, shaderLibrary, outputBuffers);
         }
 
+        // One full-screen pass of each kind per colour target: earlier pairs that share the target defer to the last one.
+        {
+            thread_local std::vector<const void *> targets;
+            thread_local std::vector<uint8_t> shadowsOn, lightsOn, fogOn;
+            targets.assign(framebufferCount, nullptr);
+            shadowsOn.assign(framebufferCount, 0);
+            lightsOn.assign(framebufferCount, 0);
+            fogOn.assign(framebufferCount, 0);
+            for (uint32_t f = 0; f < framebufferCount; f++) {
+                targets[f] = framebufferVector[f].rs64Target;
+                shadowsOn[f] = framebufferVector[f].rs64ShadowsOn ? 1 : 0;
+                lightsOn[f] = framebufferVector[f].rs64LightsOn ? 1 : 0;
+                fogOn[f] = framebufferVector[f].rs64FogOn ? 1 : 0;
+            }
+            rs64lights::lastPassPerTarget(targets.data(), reinterpret_cast<bool *>(shadowsOn.data()), framebufferCount);
+            rs64lights::lastPassPerTarget(targets.data(), reinterpret_cast<bool *>(lightsOn.data()), framebufferCount);
+            rs64lights::lastPassPerTarget(targets.data(), reinterpret_cast<bool *>(fogOn.data()), framebufferCount);
+            for (uint32_t f = 0; f < framebufferCount; f++) {
+                framebufferVector[f].rs64ShadowsOn = (shadowsOn[f] != 0);
+                framebufferVector[f].rs64LightsOn = (lightsOn[f] != 0);
+                framebufferVector[f].rs64FogOn = (fogOn[f] != 0);
+            }
+        }
+
+        // Shadow casters were gathered by addFramebuffer; build their acceleration structures after this frame's world vertices.
+        const bool rs64Dynamic = (!rs64Shadow.indices.empty() || !rs64Shadow.cutoutIndices.empty() || !rs64Shadow.craftIndices.empty()) && (vertexProcessor != nullptr) && (rs64Shadow.worldPos != nullptr);
+        if (rs64Dynamic || rs64Shadow.terrainActive) {
+            rs64TimingMark(worker, RS64TimeScene);
+            recordRS64ShadowScene(worker, rs64Dynamic);
+            rs64TimingMark(worker, RS64TimeScene);
+        }
+        else {
+            rs64Shadow.ready = false;
+            rs64Shadow.indices.clear();
+            rs64Shadow.cutoutDrawCount = 0;
+        }
+        rs64Shadow.ranges.clear();
+        rs64Shadow.cutoutRanges.clear();
+        rs64Shadow.cutoutIndices.clear();
+        rs64Shadow.rangeCalls.clear();
+        rs64Shadow.emissiveRanges.clear();
+        rs64Shadow.emissiveCalls.clear();
+        rs64Shadow.craftRanges.clear();
+
 #   if RT_ENABLED
         if (rtEnabled) {
             assert(rtResources != nullptr);
@@ -1563,6 +1615,23 @@ namespace RT64 {
                 const RasterScene &rasterScene = targetDrawCall.rasterScenes[pair.first];
                 submitDepthAccess(worker, targetDrawCall.fbStorage, false, depthState);
                 submitRasterScene(worker, framebuffer, targetDrawCall.fbStorage, rasterScene, depthState);
+                if (targetDrawCall.rs64LightsAfterScene == static_cast<int32_t>(pair.first)) {
+                    if (framebuffer.rs64ShadowsOn && rs64Shadow.ready) {
+                        rs64TimingMark(worker, RS64TimeShadows);
+                        recordRS64Shadows(worker, framebuffer, depthState);
+                        rs64TimingMark(worker, RS64TimeShadows);
+                    }
+                    if (framebuffer.rs64FogOn && rs64Shadow.ready && (rs64Shadow.tlas != nullptr)) {
+                        rs64TimingMark(worker, RS64TimeFog);
+                        recordRS64FogShafts(worker, framebuffer, depthState);
+                        rs64TimingMark(worker, RS64TimeFog);
+                    }
+                    if (framebuffer.rs64LightsOn) {
+                        rs64TimingMark(worker, RS64TimeLights);
+                        recordRS64Lights(worker, framebuffer, depthState);
+                        rs64TimingMark(worker, RS64TimeLights);
+                    }
+                }
             }
         }
     }
@@ -1582,6 +1651,30 @@ namespace RT64 {
     }
 #endif
 
+    static rs64lights::Mat4 rs64ToMat4(const interop::float4x4 &m) {
+        static_assert(sizeof(interop::float4x4) == sizeof(rs64lights::Mat4), "float4x4 layout");
+        rs64lights::Mat4 r;
+        memcpy(&r, &m, sizeof(r));
+        return r;
+    }
+
+    // Two projections show the same 3D view when their raw view and projection matrices and their N64 viewport match (the radar shares the matrices but not the viewport).
+    // ignoreProj: camera-space positions only need the same camera; the player craft is drawn under its own projection (nearer clip) in the same view.
+    static bool rs64SameView(const DrawData &drawData, uint32_t a, uint32_t b, bool ignoreProj = false) {
+        const size_t n = std::min({ drawData.viewTransforms.size(), drawData.projTransforms.size(), drawData.rspViewports.size() });
+        if ((a >= n) || (b >= n)) {
+            return false;
+        }
+        if (a == b) {
+            return true;
+        }
+        const interop::RSPViewport &va = drawData.rspViewports[a];
+        const interop::RSPViewport &vb = drawData.rspViewports[b];
+        const bool sameViewport = (va.scale.x == vb.scale.x) && (va.scale.y == vb.scale.y) && (va.scale.z == vb.scale.z) && (va.translate.x == vb.translate.x) && (va.translate.y == vb.translate.y) && (va.translate.z == vb.translate.z);
+        return sameViewport && rs64lights::sameMatrix(rs64ToMat4(drawData.viewTransforms[a]), rs64ToMat4(drawData.viewTransforms[b]), 1e-4f)
+            && (ignoreProj || rs64lights::sameMatrix(rs64ToMat4(drawData.projTransforms[a]), rs64ToMat4(drawData.projTransforms[b]), 1e-4f));
+    }
+
     void FramebufferRenderer::addFramebuffer(const DrawParams &p) {
         assert(p.fbStorage != nullptr);
         
@@ -1598,6 +1691,19 @@ namespace RT64 {
             framebufferVector.back().paramsBuffer = p.worker->device->createBuffer(RenderBufferDesc::UploadBuffer(256, RenderBufferFlag::CONSTANT));
             framebufferVector.back().descRealFbSet = std::make_unique<FramebufferRendererDescriptorFramebufferSet>(p.worker->device);
             framebufferVector.back().descDummyFbSet = std::make_unique<FramebufferRendererDescriptorFramebufferSet>(p.worker->device);
+            framebufferVector.back().rs64LightsBuffer = p.worker->device->createBuffer(RenderBufferDesc::UploadBuffer(sizeof(interop::RS64LightsCB), RenderBufferFlag::CONSTANT));
+            framebufferVector.back().rs64LightsSet = std::make_unique<RS64LightsDescriptorSet>(p.worker->device);
+            if (p.worker->device->getCapabilities().rayQuery) {
+                framebufferVector.back().rs64ShadowsBuffer = p.worker->device->createBuffer(RenderBufferDesc::UploadBuffer(sizeof(interop::RS64ShadowsCB), RenderBufferFlag::CONSTANT));
+                framebufferVector.back().rs64ShadowsSet = std::make_unique<RS64TracedDescriptorSet>(p.worker->device);
+                framebufferVector.back().rs64LightsShadowedSet = std::make_unique<RS64TracedDescriptorSet>(p.worker->device);
+                framebufferVector.back().rs64FogBuffer = p.worker->device->createBuffer(RenderBufferDesc::UploadBuffer(sizeof(interop::RS64FogShaftsCB), RenderBufferFlag::CONSTANT));
+                framebufferVector.back().rs64FogSet = std::make_unique<RS64TracedDescriptorSet>(p.worker->device);
+                framebufferVector.back().rs64BlurHSet = std::make_unique<RS64ShadowBlurDescriptorSet>(p.worker->device);
+                framebufferVector.back().rs64BlurVSet = std::make_unique<RS64ShadowBlurDescriptorSet>(p.worker->device);
+                framebufferVector.back().rs64BlurHBuffer = p.worker->device->createBuffer(RenderBufferDesc::UploadBuffer(sizeof(interop::RS64ShadowBlurCB), RenderBufferFlag::CONSTANT));
+                framebufferVector.back().rs64BlurVBuffer = p.worker->device->createBuffer(RenderBufferDesc::UploadBuffer(sizeof(interop::RS64ShadowBlurCB), RenderBufferFlag::CONSTANT));
+            }
         }
 
         Framebuffer &framebuffer = framebufferVector[framebufferCount - 1];
@@ -1677,6 +1783,7 @@ namespace RT64 {
         };
 
         targetDrawCall.rasterScenes.clear();
+        targetDrawCall.rs64LightsAfterScene = -1;
 
 #   if RT_ENABLED
         RaytracingScene rtScene;
@@ -1763,11 +1870,95 @@ namespace RT64 {
             }
         }
 
+        const rs64lights::Config &lightsCfg = rs64lights::config();
+        if (lightsCfg.shadows) {
+            static bool s_capsLogged = false;
+            if (!s_capsLogged) {
+                s_capsLogged = true;
+                const RenderDeviceCapabilities &caps = p.worker->device->getCapabilities();
+                std::fprintf(stderr, "[rt-shadows] device raytracing=%d rayQuery=%d\n", (int)caps.raytracing, (int)caps.rayQuery);
+            }
+        }
+        const bool lightsMSAA = (p.fbStorage->colorTarget != nullptr) && (p.fbStorage->colorTarget->multisampling.sampleCount > 1);
+        const bool lightsWanted = lightsCfg.enabled && p.rs64Lights && (p.fbStorage->colorTarget != nullptr) && !lightsMSAA && !p.curWorkload->rs64Lights.empty();
+        if (lightsCfg.enabled && lightsMSAA) {
+            static bool s_warned = false;
+            if (!s_warned) {
+                s_warned = true;
+                std::fprintf(stderr, "[rt-lights] MSAA target: light pass skipped\n");
+            }
+        }
+        const bool shadowsWanted = rs64lights::tracePassWanted(lightsCfg.shadows, lightsCfg.ao, lightsCfg.gi, lightsCfg.reflections) && p.rs64Lights && (p.fbStorage->colorTarget != nullptr) && !lightsMSAA && p.curWorkload->rs64Sun.valid && p.worker->device->getCapabilities().rayQuery;
+        const bool fogWanted = lightsCfg.fogShafts && p.rs64Lights && (p.fbStorage->colorTarget != nullptr) && !lightsMSAA && p.curWorkload->rs64Sun.valid && p.worker->device->getCapabilities().rayQuery;
+        const bool lightShadowsWanted = rs64lights::sceneWanted(false, lightsWanted, lightsCfg.lightShadows, p.worker->device->getCapabilities().rayQuery, lightsMSAA);
+        const bool sceneWanted = shadowsWanted || lightShadowsWanted || fogWanted;
+        const bool postWanted = lightsWanted || shadowsWanted || fogWanted;
+        // The main 3D view is the perspective projection with the most draws; the pass runs after its last fragment (same view and projection), so other views such as the radar stay unlit.
+        uint32_t lightsProjIndex = UINT32_MAX;
+        uint32_t lightsLastIndex = UINT32_MAX;
+        uint32_t lightsSplitProj = UINT32_MAX;
+        uint32_t lightsSplitCall = UINT32_MAX;
+        if (postWanted) {
+            uint32_t mostCalls = 0;
+            for (uint32_t pr = 0; pr < fbPair.projectionCount; pr++) {
+                const Projection &proj = fbPair.projections[pr];
+                if ((proj.type == Projection::Type::Perspective) && !proj.scissorRect.isNull() && (proj.gameCallCount > mostCalls)) {
+                    mostCalls = proj.gameCallCount;
+                    lightsProjIndex = pr;
+                }
+            }
+            if (lightsProjIndex != UINT32_MAX) {
+                const uint32_t mainTi = fbPair.projections[lightsProjIndex].transformsIndex;
+                for (uint32_t pr = 0; pr < fbPair.projectionCount; pr++) {
+                    const Projection &proj = fbPair.projections[pr];
+                    // The radar is a few draws in camera space under the same matrices and viewport, after the scene; tiny fragments are skipped so it stays unlit.
+                    if ((proj.type == Projection::Type::Perspective) && !proj.scissorRect.isNull() && (proj.gameCallCount >= 8) && rs64SameView(drawData, proj.transformsIndex, mainTi)) {
+                        lightsLastIndex = pr;
+                    }
+                }
+                // The pass goes right after the view's last scene-geometry draw (depth-writing, not XLU or prim-depth): effect sprites drawn after it
+                // (explosions, glows) are not darkened by the ground they float over.
+                for (uint32_t pr = lightsProjIndex; (lightsLastIndex != UINT32_MAX) && (pr <= lightsLastIndex); pr++) {
+                    const Projection &proj = fbPair.projections[pr];
+                    if ((proj.type != Projection::Type::Perspective) || proj.scissorRect.isNull() || ((pr != lightsProjIndex) && !rs64SameView(drawData, proj.transformsIndex, mainTi))) {
+                        continue;
+                    }
+                    for (uint32_t d = 0; d < proj.gameCallCount; d++) {
+                        const GameCall &call = proj.gameCalls[d];
+                        const interop::OtherMode &om = call.callDesc.otherMode;
+                        rs64lights::CasterMode cm;
+                        cm.zUpd = om.zUpd();
+                        cm.primDepth = (om.zSource() == G_ZS_PRIM);
+                        cm.xlu = ((om.L & ZMODE_MASK) == ZMODE_XLU);
+                        cm.fillOrCopy = (om.cycleType() == G_CYC_FILL) || (om.cycleType() == G_CYC_COPY);
+                        cm.extended = (call.callDesc.extendedType != DrawExtendedType::None);
+                        cm.triangles = call.callDesc.triangleCount;
+                        if (rs64lights::casterClass(cm) != rs64lights::CasterNone) {
+                            lightsSplitProj = pr;
+                            lightsSplitCall = d;
+                        }
+                    }
+                }
+            }
+        }
+        bool lightsSawPersp = false;
+        bool lightsSplit = false;
+        bool lightsHaveProj = false;
+        uint32_t lightsTransformsIndex = 0;
+        hlslpp::float2 lightsScreenScale = { 1.0f, 1.0f };
+        hlslpp::float2 lightsScreenOffset = { 0.0f, 0.0f };
         for (uint32_t pr = 0; (pr < fbPair.projectionCount) && (globalCallIndex < p.maxGameCall); pr++) {
             const Projection &proj = fbPair.projections[pr];
             if (proj.scissorRect.isNull()) {
                 continue;
             }
+
+            if (postWanted && lightsHaveProj && !lightsSplit && (pr > lightsLastIndex)) {
+                checkRasterScene(rasterScene);
+                targetDrawCall.rs64LightsAfterScene = static_cast<int32_t>(targetDrawCall.rasterScenes.size()) - 1;
+                lightsSplit = true;
+            }
+            lightsSawPersp = lightsSawPersp || (pr == lightsProjIndex);
 
 #       if RT_ENABLED
             // TODO: Move heuristics of RT proj elsewhere?
@@ -1816,6 +2007,13 @@ namespace RT64 {
                 }
 
                 viewportClip = convertViewportRect(viewport.rect(viewportClipRatios), p.resolutionScale, p.fbWidth, projInvRatioScale, extOriginPercentage, 0.0f, viewportOrigin, viewportOrigin);
+            }
+
+            if (postWanted && !lightsHaveProj && (pr == lightsProjIndex)) {
+                lightsHaveProj = true;
+                lightsTransformsIndex = proj.transformsIndex;
+                lightsScreenScale = triangles.screenScale;
+                lightsScreenOffset = triangles.screenOffset;
             }
 
             for (uint32_t d = 0; (d < proj.gameCallCount) && (globalCallIndex < p.maxGameCall); d++) {
@@ -2100,6 +2298,11 @@ namespace RT64 {
 
                 instanceDrawCallVector.push_back(instanceDrawCall);
                 globalCallIndex++;
+                if (postWanted && lightsHaveProj && !lightsSplit && (pr == lightsSplitProj) && (d == lightsSplitCall)) {
+                    checkRasterScene(rasterScene);
+                    targetDrawCall.rs64LightsAfterScene = static_cast<int32_t>(targetDrawCall.rasterScenes.size()) - 1;
+                    lightsSplit = true;
+                }
             }
         }
 
@@ -2107,6 +2310,1088 @@ namespace RT64 {
         checkRtScene(rtScene);
 #   endif
         checkRasterScene(rasterScene);
+        if (postWanted && lightsSawPersp && !lightsSplit) {
+            targetDrawCall.rs64LightsAfterScene = static_cast<int32_t>(targetDrawCall.rasterScenes.size()) - 1;
+        }
+        const int32_t lightsScene = targetDrawCall.rs64LightsAfterScene;
+        const bool lightsFilled = lightsWanted && (lightsScene >= 0) && lightsHaveProj && fillRS64Lights(p, framebuffer, lightsTransformsIndex, lightsScreenScale, lightsScreenOffset);
+        bool shadowsFilled = false;
+        bool fogFilled = false;
+        framebuffer.rs64LightsShadowed = false;
+        if (sceneWanted && (lightsScene >= 0) && lightsHaveProj) {
+            // Casters: opaque, depth-writing, non-prim-depth triangles of the main view (prim depth = sky dome, sprites, glows).
+            const uint32_t mainTi = fbPair.projections[lightsProjIndex].transformsIndex;
+            // Terrain casts from the static HMP map when this frame's record-space origin solves; its drawn (geomorphing, view-limited) draws are then skipped.
+            const rs64lights::TerrainFrame &tf = p.curWorkload->rs64Terrain;
+            const bool terrainLerp = drawData.lerpWorldTransforms.size() == drawData.worldTransforms.size();
+            const auto &terrainWorld = terrainLerp ? drawData.lerpWorldTransforms : drawData.worldTransforms;
+            int32_t terrainOx = 0;
+            int32_t terrainOz = 0;
+            uint32_t terrainVotes = 0;
+            if (lightsCfg.shadowTerrain && tf.map && !tf.mixed && (tf.transformIndex < terrainWorld.size())) {
+                const bool hasPrev = (rs64Shadow.terrainOriginVersion == tf.map->version);
+                terrainVotes = rs64lights::solveTerrainOrigin(*tf.map, tf.samples.data(), tf.samples.size(), terrainOx, terrainOz, hasPrev, rs64Shadow.terrainOriginX, rs64Shadow.terrainOriginZ);
+            }
+            rs64Shadow.terrainActive = (terrainVotes > 0);
+            if (rs64Shadow.terrainActive) {
+                rs64Shadow.terrainOriginVersion = tf.map->version;
+                rs64Shadow.terrainOriginX = terrainOx;
+                rs64Shadow.terrainOriginZ = terrainOz;
+                rs64Shadow.terrainMap = tf.map;
+                rs64lights::terrainInstanceTransform(rs64ToMat4(terrainWorld[tf.transformIndex]), terrainOx, terrainOz, rs64Shadow.terrainTransform);
+            }
+            const bool hitColors = lightsCfg.gi || lightsCfg.reflections;
+            thread_local std::vector<std::pair<rs64lights::IndexRange, uint32_t>> terrainCalls;
+            terrainCalls.clear();
+            // Ranges accumulate over the workload's framebuffer pairs (the game can split one view across pairs); recordSetup consumes them.
+            for (uint32_t pr = 0; pr < fbPair.projectionCount; pr++) {
+                const Projection &proj = fbPair.projections[pr];
+                if ((proj.type != Projection::Type::Perspective) || proj.scissorRect.isNull() || !rs64lights::casterFragment(pr == lightsProjIndex, rs64SameView(drawData, proj.transformsIndex, mainTi), proj.gameCallCount)) {
+                    continue;
+                }
+                for (uint32_t d = 0; d < proj.gameCallCount; d++) {
+                    const GameCall &call = proj.gameCalls[d];
+                    const interop::OtherMode &om = call.callDesc.otherMode;
+                    const uint32_t L = om.L;
+                    rs64lights::CasterMode cm;
+                    cm.zUpd = om.zUpd();
+                    cm.primDepth = (om.zSource() == G_ZS_PRIM);
+                    cm.xlu = ((L & ZMODE_MASK) == ZMODE_XLU);
+                    cm.fillOrCopy = (om.cycleType() == G_CYC_FILL) || (om.cycleType() == G_CYC_COPY);
+                    cm.extended = (call.callDesc.extendedType != DrawExtendedType::None);
+                    cm.alphaCompare = (om.alphaCompare() != 0);
+                    cm.cvgXAlpha = ((L & (CVG_X_ALPHA | ALPHA_CVG_SEL)) == (CVG_X_ALPHA | ALPHA_CVG_SEL));
+                    cm.triangles = call.callDesc.triangleCount;
+                    const bool drawnTerrain = rs64Shadow.terrainActive && (call.callDesc.minWorldMatrix == call.callDesc.maxWorldMatrix) && rs64lights::isTerrainTransform(tf, call.callDesc.minWorldMatrix);
+                    const bool oneTransform = (call.callDesc.minWorldMatrix == call.callDesc.maxWorldMatrix);
+                    const auto &noCast = p.curWorkload->rs64NoCast;
+                    const auto &noCastCutout = p.curWorkload->rs64NoCastCutout;
+                    const bool emissive = oneTransform && (std::find(noCast.begin(), noCast.end(), call.callDesc.minWorldMatrix) != noCast.end());
+                    const bool glowCard = oneTransform && (std::find(noCastCutout.begin(), noCastCutout.end(), call.callDesc.minWorldMatrix) != noCastCutout.end());
+                    const rs64lights::CasterClass cc = rs64lights::casterAfterDeny(rs64lights::casterClass(cm), emissive, glowCard, lightsCfg.shadowCutout);
+                    if (hitColors && drawnTerrain) {
+                        terrainCalls.push_back({ { call.meshDesc.faceIndicesStart, call.callDesc.triangleCount }, call.callDesc.callIndex });
+                    }
+                    if (hitColors && (emissive || glowCard) && !cm.fillOrCopy) {
+                        rs64Shadow.emissiveRanges.push_back({ call.meshDesc.faceIndicesStart, call.callDesc.triangleCount });
+                        rs64Shadow.emissiveCalls.push_back(call.callDesc.callIndex);
+                    }
+                    if (!drawnTerrain) {
+                        const auto &craftTi = p.curWorkload->rs64Craft;
+                        const bool craft = oneTransform && (std::find(craftTi.begin(), craftTi.end(), call.callDesc.minWorldMatrix) != craftTi.end());
+                        if ((cc == rs64lights::CasterOpaque) && craft) {
+                            rs64Shadow.craftRanges.push_back({ call.meshDesc.faceIndicesStart, call.callDesc.triangleCount });
+                        }
+                        else if (cc == rs64lights::CasterOpaque) {
+                            rs64Shadow.ranges.push_back({ call.meshDesc.faceIndicesStart, call.callDesc.triangleCount });
+                            rs64Shadow.rangeCalls.push_back(call.callDesc.callIndex);
+                        }
+                        else if (cc == rs64lights::CasterCutout) {
+                            rs64Shadow.cutoutRanges.push_back({ { call.meshDesc.faceIndicesStart, call.callDesc.triangleCount }, call.callDesc.callIndex, call.callDesc.tileIndex });
+                        }
+                    }
+                }
+            }
+            rs64Shadow.indices.clear();
+            rs64lights::gatherCasterIndices(drawData.faceIndices.data(), drawData.faceIndices.size(), rs64Shadow.ranges.data(), rs64Shadow.ranges.size(), rs64Shadow.indices);
+            rs64Shadow.craftIndices.clear();
+            rs64lights::gatherCasterIndices(drawData.faceIndices.data(), drawData.faceIndices.size(), rs64Shadow.craftRanges.data(), rs64Shadow.craftRanges.size(), rs64Shadow.craftIndices);
+            rs64Shadow.cutoutIndices.clear();
+            rs64Shadow.cutoutTable.clear();
+            rs64lights::buildCutoutScene(drawData.faceIndices.data(), drawData.faceIndices.size(), rs64Shadow.cutoutRanges.data(), rs64Shadow.cutoutRanges.size(), rs64Shadow.cutoutIndices, rs64Shadow.cutoutTable);
+            rs64Shadow.worldPos = worldPosRes;
+            rs64Shadow.texCoords = tcRes;
+            rs64Shadow.texCoordsSize = outputBuffers.genTexCoordBuffer.allocatedSize;
+            rs64Shadow.vertexCount = drawData.vertexCount();
+            const bool sceneHasCasters = !rs64Shadow.indices.empty() || !rs64Shadow.cutoutIndices.empty() || !rs64Shadow.craftIndices.empty() || rs64Shadow.terrainActive;
+            // Hangar: the largest draw (the ship, resting level) gives the world up; floor-facing receivers keep the game's painted shadow.
+            rs64lights::Sun sun = p.curWorkload->rs64Sun;
+            // Boot sequence: the authored key light is fixed in world space, so a moving camera does not swing the shadows.
+            float viewR[9];
+            if (sun.worldAuthored && (mainTi < drawData.viewTransforms.size()) && rs64lights::viewRotation(rs64ToMat4(drawData.viewTransforms[mainTi]), viewR)) {
+                sun.valid = rs64lights::sunCameraDir(rs64lights::menuSunDir(), viewR, sun.dir);
+            }
+            if (sun.fromModel) {
+                const Projection &mainProj = fbPair.projections[lightsProjIndex];
+                uint32_t bestTris = 0;
+                uint32_t bestTi = UINT32_MAX;
+                for (uint32_t d = 0; d < mainProj.gameCallCount; d++) {
+                    const GameCall &call = mainProj.gameCalls[d];
+                    if (call.callDesc.triangleCount > bestTris) {
+                        bestTris = call.callDesc.triangleCount;
+                        bestTi = call.callDesc.minWorldMatrix;
+                    }
+                }
+                const bool sunLerp = drawData.lerpWorldTransforms.size() == drawData.worldTransforms.size();
+                const auto &sunWorld = sunLerp ? drawData.lerpWorldTransforms : drawData.worldTransforms;
+                static const float kStraightDown[3] = { 0.0f, 1.0f, 0.0f };
+                float up[3];
+                if ((bestTi < sunWorld.size()) && rs64lights::modelSunDir(kStraightDown, rs64ToMat4(sunWorld[bestTi]), up)) {
+                    sun.skip[0] = up[0];
+                    sun.skip[1] = up[1];
+                    sun.skip[2] = up[2];
+                    sun.skip[3] = lightsCfg.hangarFloorCos;
+                }
+            }
+            if (hitColors) {
+                buildRS64HitColors(p, terrainCalls, (sun.fromModel && (sun.skip[3] > 0.0f)) ? sun.skip : nullptr);
+            }
+            shadowsFilled = shadowsWanted && sceneHasCasters && fillRS64Shadows(p, framebuffer, lightsTransformsIndex, lightsScreenScale, lightsScreenOffset, sun);
+            if (fogWanted && sceneHasCasters) {
+                // The game fogs only terrain and a few models, and terrain often draws in its own same-view projection.
+                rs64lights::FogParams fogPick;
+                for (uint32_t pr = 0; pr < fbPair.projectionCount; pr++) {
+                    const Projection &fogProj = fbPair.projections[pr];
+                    if ((fogProj.type != Projection::Type::Perspective) || !rs64SameView(drawData, fogProj.transformsIndex, mainTi)) {
+                        continue;
+                    }
+                    for (uint32_t d = 0; d < fogProj.gameCallCount; d++) {
+                        const GameCall &call = fogProj.gameCalls[d];
+                        const uint32_t fi = call.meshDesc.faceIndicesStart;
+                        if ((call.callDesc.triangleCount == 0) || (fi >= drawData.faceIndices.size())) {
+                            continue;
+                        }
+                        const uint32_t v = drawData.faceIndices[fi];
+                        const uint16_t fogIndex = (v < drawData.fogIndices.size()) ? drawData.fogIndices[v] : 0;
+                        if ((fogIndex == 0) || (fogIndex > drawData.rspFog.size())) {
+                            continue;
+                        }
+                        const interop::RSPFog &rf = drawData.rspFog[fogIndex - 1];
+                        const interop::float4 &fc = call.callDesc.rdpParams.fogColor;
+                        const float color[3] = { fc.x, fc.y, fc.z };
+                        rs64lights::considerFogCall(fogPick, call.callDesc.triangleCount, rf.mul, rf.offset, color);
+                    }
+                }
+                const rs64lights::FogParams &fog = rs64lights::workloadFog(rs64FogCache, p.curWorkload->workloadId, fogPick);
+                const bool fogVisible = (lightsCfg.fogShaftsDebug != 0) || rs64lights::fogShaftsVisible(fog.color, lightsCfg.fogShaftsStrength);
+                fogFilled = fogVisible && fillRS64FogShafts(p, framebuffer, lightsTransformsIndex, lightsScreenScale, lightsScreenOffset, sun, fog);
+                if (lightsCfg.log) {
+                    static uint32_t s_f = 0;
+                    if ((++s_f % 120) == 1) {
+                        std::fprintf(stderr, "[rt-fog] pick: valid=%d tris=%u mul=%.2f offset=%.2f color=(%.3f,%.3f,%.3f) filled=%d\n", (int)fog.valid, fog.tris, fog.mul, fog.offset, fog.color[0], fog.color[1], fog.color[2], (int)fogFilled);
+                    }
+                }
+            }
+            framebuffer.rs64LightsShadowed = lightsFilled && lightShadowsWanted && sceneHasCasters && (framebuffer.rs64LightsShadowedSet != nullptr);
+            if (lightsCfg.log) {
+                static uint32_t s_n = 0;
+                if ((++s_n % 120) == 1) {
+                    std::fprintf(stderr, "[rt-shadows] casters: ranges=%zu indices=%zu cutouts=%zu cutoutTris=%zu vertices=%u filled=%d sun=(%.3f,%.3f,%.3f)\n", rs64Shadow.ranges.size(), rs64Shadow.indices.size(), rs64Shadow.cutoutTable.size(), rs64Shadow.cutoutIndices.size() / 3, rs64Shadow.vertexCount, (int)shadowsFilled,
+                        p.curWorkload->rs64Sun.dir[0], p.curWorkload->rs64Sun.dir[1], p.curWorkload->rs64Sun.dir[2]);
+                    std::fprintf(stderr, "[rt-terrain] origin: noCast=%zu samples=%zu votes=%u ti=%u transforms=%zu mixed=%d origin=(%d,%d) active=%d lightsShadowed=%d\n", p.curWorkload->rs64NoCast.size(), tf.samples.size(), terrainVotes, tf.transformIndex, tf.transforms.size(), (int)tf.mixed, terrainOx, terrainOz, (int)rs64Shadow.terrainActive, (int)framebuffer.rs64LightsShadowed);
+                }
+            }
+        }
+        framebuffer.rs64LightsOn = lightsFilled;
+        framebuffer.rs64ShadowsOn = shadowsFilled;
+        framebuffer.rs64FogOn = fogFilled;
+        framebuffer.rs64Target = p.fbStorage->colorTarget;
+        if (!lightsFilled && !shadowsFilled && !fogFilled) {
+            targetDrawCall.rs64LightsAfterScene = -1;
+        }
+        if (lightsCfg.log) {
+            static uint32_t s_n[2] = {};
+            uint32_t types[5] = {};
+            for (uint32_t pr = 0; pr < fbPair.projectionCount; pr++) {
+                ++types[std::min<uint32_t>(4, (uint32_t)fbPair.projections[pr].type)];
+            }
+            if ((types[1] > 0) && ((++s_n[(p.deltaTimeMs == 0.0f) ? 0 : 1] % 120) == 1)) {
+                std::fprintf(stderr, "[rt-lights] fb: dt=%.2f projs none/persp/ortho/rect/tri=%u/%u/%u/%u/%u candidates=%zu", p.deltaTimeMs, types[0], types[1], types[2], types[3], types[4], p.curWorkload->rs64Lights.size());
+                std::fprintf(stderr, " order[main=%u last=%u]:", lightsProjIndex, lightsLastIndex);
+                for (uint32_t pr = 0; pr < fbPair.projectionCount; pr++) {
+                    const Projection &q = fbPair.projections[pr];
+                    const bool same = (lightsProjIndex != UINT32_MAX) && rs64SameView(drawData, q.transformsIndex, fbPair.projections[lightsProjIndex].transformsIndex);
+                    std::fprintf(stderr, " %u:t%d:c%u:s%d:ti%u:sc(%d,%d,%d,%d)", pr, (int)q.type, q.gameCallCount, (int)same, q.transformsIndex, q.scissorRect.ulx, q.scissorRect.uly, q.scissorRect.lrx, q.scissorRect.lry);
+                }
+                std::fprintf(stderr, " color=%d msaa=%d main=%d split=%d proj=%d scene=%d filled=%d ti=%u modView=%zu modProj=%zu world=%zu lerp=%zu\n",
+                    (int)(p.fbStorage->colorTarget != nullptr), (int)lightsMSAA, (int)lightsSawPersp, (int)lightsSplit, (int)lightsHaveProj, lightsScene, (int)lightsFilled,
+                    lightsTransformsIndex, drawData.modViewTransforms.size(), drawData.modProjTransforms.size(), drawData.worldTransforms.size(), drawData.lerpWorldTransforms.size());
+            }
+        }
+    }
+
+    bool FramebufferRenderer::rs64ViewProj(const DrawParams &p, uint32_t transformsIndex, rs64lights::Mat4 &out) {
+        const DrawData &drawData = p.curWorkload->drawData;
+
+        // The projection processor only fills the modified transforms when it runs (interpolation or aspect adjustment); otherwise the raster pass uses the raw ones.
+        const bool modified = (drawData.modViewTransforms.size() == drawData.viewTransforms.size()) && (drawData.modProjTransforms.size() == drawData.projTransforms.size());
+        const auto &viewTransforms = modified ? drawData.modViewTransforms : drawData.viewTransforms;
+        const auto &projTransforms = modified ? drawData.modProjTransforms : drawData.projTransforms;
+        if ((transformsIndex >= viewTransforms.size()) || (transformsIndex >= projTransforms.size())) {
+            return false;
+        }
+
+        out = rs64lights::mul(rs64ToMat4(viewTransforms[transformsIndex]), rs64ToMat4(projTransforms[transformsIndex]));
+        return true;
+    }
+
+    bool FramebufferRenderer::rs64ViewFromScreen(const DrawParams &p, uint32_t transformsIndex, hlslpp::float2 screenScale, hlslpp::float2 screenOffset, rs64lights::Mat4 &out) {
+        const DrawData &drawData = p.curWorkload->drawData;
+        if (transformsIndex >= drawData.rspViewports.size()) {
+            return false;
+        }
+
+        rs64lights::Mat4 viewProj;
+        if (!rs64ViewProj(p, transformsIndex, viewProj)) {
+            return false;
+        }
+
+        // Same resolution the raster pass maps screen positions with (FbParams.resolution).
+        const interop::RSPViewport &vp = drawData.rspViewports[transformsIndex];
+        rs64lights::ScreenMap map;
+        map.vpScale[0] = vp.scale.x;
+        map.vpScale[1] = vp.scale.y;
+        map.vpScale[2] = vp.scale.z;
+        map.vpTranslate[0] = vp.translate.x;
+        map.vpTranslate[1] = vp.translate.y;
+        map.vpTranslate[2] = vp.translate.z;
+        map.res[0] = p.targetWidth / p.resolutionScale.x;
+        map.res[1] = p.targetHeight / p.resolutionScale.y;
+        map.screenScale[0] = screenScale.x;
+        map.screenScale[1] = screenScale.y;
+        map.screenOffset[0] = screenOffset.x;
+        map.screenOffset[1] = screenOffset.y;
+        return rs64lights::viewFromScreen(viewProj, map, out);
+    }
+
+    bool FramebufferRenderer::fillRS64Lights(const DrawParams &p, Framebuffer &framebuffer, uint32_t transformsIndex, hlslpp::float2 screenScale, hlslpp::float2 screenOffset) {
+        const DrawData &drawData = p.curWorkload->drawData;
+        const auto &candidates = p.curWorkload->rs64Lights;
+        rs64lights::Mat4 inv;
+        if (!rs64ViewFromScreen(p, transformsIndex, screenScale, screenOffset, inv)) {
+            return false;
+        }
+        const bool lerp = drawData.lerpWorldTransforms.size() == drawData.worldTransforms.size();
+        const auto &world = lerp ? drawData.lerpWorldTransforms : drawData.worldTransforms;
+        thread_local std::vector<rs64lights::Resolved> resolved;
+        resolved.clear();
+        for (const rs64lights::Candidate &c : candidates) {
+            const bool cameraSpace = (c.transformIndex == rs64lights::CameraSpace);
+            if (!cameraSpace && ((c.transformIndex >= world.size()) || !rs64SameView(drawData, c.viewIndex, transformsIndex, c.modelUnits))) {
+                continue;
+            }
+            const float v[4] = { c.local[0], c.local[1], c.local[2], 1.0f };
+            float o[4] = { v[0], v[1], v[2], 1.0f };
+            if (!cameraSpace) {
+                rs64lights::transform(v, rs64ToMat4(world[c.transformIndex]), o);
+            }
+            rs64lights::Resolved r;
+            r.pos[0] = o[0] / o[3];
+            r.pos[1] = o[1] / o[3];
+            r.pos[2] = o[2] / o[3];
+            r.radius = c.radius;
+            r.color[0] = c.color[0];
+            r.color[1] = c.color[1];
+            r.color[2] = c.color[2];
+            r.intensity = c.intensity;
+            r.falloff = c.falloff;
+            r.shadowStart = c.shadowStart * rs64lights::config().spriteShadowStart;
+            if (c.modelUnits && !cameraSpace) {
+                const float s = rs64lights::transformScale(rs64ToMat4(world[c.transformIndex]));
+                r.radius = c.radius * s;
+                r.shadowStart = c.shadowStart * s;
+            }
+            resolved.push_back(r);
+        }
+
+        rs64lights::Resolved chosen[rs64lights::MaxLights];
+        const size_t count = rs64lights::selectLights(resolved.data(), resolved.size(), chosen, rs64lights::MaxLights);
+        if (count == 0) {
+            return false;
+        }
+        if (rs64lights::config().log) {
+            static uint32_t s_n = 0;
+            if ((++s_n % 90) == 1) {
+                std::fprintf(stderr, "[rt-lights] chosen %zu of %zu:", count, resolved.size());
+                for (size_t i = 0; i < count && i < 6; ++i) {
+                    std::fprintf(stderr, " (%.0f,%.0f,%.0f r=%.0f i=%.2f)", chosen[i].pos[0], chosen[i].pos[1], chosen[i].pos[2], chosen[i].radius, chosen[i].intensity);
+                }
+                std::fprintf(stderr, "\n");
+            }
+        }
+
+        const rs64lights::Config &cfg = rs64lights::config();
+        interop::RS64LightsCB cb = {};
+        memcpy(&cb.viewFromScreen, &inv, sizeof(inv));
+        cb.viewport = { framebuffer.viewport.x, framebuffer.viewport.y, framebuffer.viewport.width, framebuffer.viewport.height };
+        cb.lightCount = static_cast<uint32_t>(count);
+        cb.debugMode = static_cast<uint32_t>(cfg.debugMode);
+        cb.gain = cfg.gain;
+        cb.wrap = cfg.wrap;
+        cb.debugRange = cfg.debugRange;
+        cb.tMin = cfg.shadowTMin;
+        cb.normalBias = cfg.shadowNormalBias;
+        cb.terrainTMinScale = cfg.shadowTerrainTMin;
+        cb.shadowParams = { cfg.lightShadowEnd, 0.0f, (cfg.terrainNormals && rs64Shadow.terrainNormalGpu) ? 1.0f : 0.0f, cfg.terrainNormalWindow };
+        for (size_t i = 0; i < count; ++i) {
+            cb.lightPosRadius[i] = { chosen[i].pos[0], chosen[i].pos[1], chosen[i].pos[2], chosen[i].radius };
+            cb.lightColor[i] = { chosen[i].color[0], chosen[i].color[1], chosen[i].color[2], chosen[i].intensity };
+            cb.lightParams[i] = { chosen[i].falloff, chosen[i].shadowStart, 0.0f, 0.0f };
+        }
+
+        void *bytes = framebuffer.rs64LightsBuffer->map();
+        memcpy(bytes, &cb, sizeof(cb));
+        framebuffer.rs64LightsBuffer->unmap();
+        framebuffer.rs64LightsSet->setBuffer(framebuffer.rs64LightsSet->gLights, framebuffer.rs64LightsBuffer.get(), sizeof(interop::RS64LightsCB));
+        framebuffer.rs64LightsSet->setTexture(framebuffer.rs64LightsSet->gDepth, p.fbStorage->depthTarget->texture.get(), RenderTextureLayout::DEPTH_READ, p.fbStorage->depthTarget->textureView.get());
+        if (framebuffer.rs64LightsShadowedSet) {
+            framebuffer.rs64LightsShadowedSet->setBuffer(framebuffer.rs64LightsShadowedSet->gParams, framebuffer.rs64LightsBuffer.get(), sizeof(interop::RS64LightsCB));
+            framebuffer.rs64LightsShadowedSet->setTexture(framebuffer.rs64LightsShadowedSet->gDepth, p.fbStorage->depthTarget->texture.get(), RenderTextureLayout::DEPTH_READ, p.fbStorage->depthTarget->textureView.get());
+        }
+        framebuffer.rs64LightsDebug = (cfg.debugMode != 0);
+        return true;
+    }
+
+    bool FramebufferRenderer::fillRS64Shadows(const DrawParams &p, Framebuffer &framebuffer, uint32_t transformsIndex, hlslpp::float2 screenScale, hlslpp::float2 screenOffset, const rs64lights::Sun &sun) {
+        rs64lights::Mat4 inv;
+        if (!sun.valid || !framebuffer.rs64ShadowsSet || !rs64ViewFromScreen(p, transformsIndex, screenScale, screenOffset, inv)) {
+            return false;
+        }
+
+        const rs64lights::Config &cfg = rs64lights::config();
+        interop::RS64ShadowsCB cb = {};
+        memcpy(&cb.viewFromScreen, &inv, sizeof(inv));
+        cb.viewport = { framebuffer.viewport.x, framebuffer.viewport.y, framebuffer.viewport.width, framebuffer.viewport.height };
+        cb.sunDir = { sun.dir[0], sun.dir[1], sun.dir[2], 0.0f };
+        cb.debugMode = static_cast<uint32_t>(cfg.shadowsDebug);
+        cb.strength = cfg.shadowStrength;
+        cb.tMin = cfg.shadowTMin;
+        cb.tMax = cfg.shadowTMax;
+        cb.normalBias = cfg.shadowNormalBias;
+        cb.terrainTMinScale = cfg.shadowTerrainTMin;
+        cb.receiverSkip = { sun.skip[0], sun.skip[1], sun.skip[2], sun.skip[3] };
+
+        // Soft path (the only one that carries AO, GI and reflections): debug 0 or 5-8.
+        const bool indirect = cfg.ao || cfg.gi || cfg.reflections;
+        rs64lights::Mat4 viewProj;
+        const bool soft = (cfg.softShadows || indirect) && ((cfg.shadowsDebug == 0) || (cfg.shadowsDebug >= 5)) && framebuffer.rs64BlurHSet && (p.fbStorage->colorTarget != nullptr) && rs64ViewProj(p, transformsIndex, viewProj);
+        if (!soft && !cfg.shadows) {
+            return false;
+        }
+        // Soft path without soft shadows (AO/GI/reflections only): one sharp sun ray.
+        const float tanAngle = cfg.softShadows ? std::tan(cfg.sunAngleDeg * 3.14159265f / 180.0f) : 0.0f;
+        const float maxRadius = cfg.softBlurPx * p.resolutionScale.y;
+        cb.softRays = cfg.softShadows ? static_cast<uint32_t>(cfg.softRays) : 1u;
+        const float res = p.resolutionScale.y;
+        cb.aoParams = { float(cfg.aoRays), cfg.aoRange, cfg.aoStrength, cfg.aoBlurPx * res };
+        cb.giParams = { float(cfg.giRays), cfg.giRange, cfg.giStrength, cfg.giBlurPx * res };
+        cb.reflParams = { std::tan(cfg.reflRoughnessDeg * 3.14159265f / 180.0f), cfg.reflRange, cfg.reflStrength, cfg.giEmissive };
+        cb.sunColor = { sun.color[0], sun.color[1], sun.color[2], 0.0f };
+        cb.featureMask = (cfg.shadows ? 1u : 0u) | ((soft && cfg.ao) ? 2u : 0u) | ((soft && cfg.gi) ? 4u : 0u) | ((soft && cfg.reflections && sun.fromModel) ? 8u : 0u);
+        cb.terrainParams = { cfg.terrainNormalWindow, 0.0f, 0.0f, 0.0f };
+        rs64lights::Mat4 sfv;
+        if (rs64lights::inverse(inv, sfv)) {
+            memcpy(&cb.screenFromView, &sfv, sizeof(sfv));
+        }
+        cb.softParams = { tanAngle, soft ? rs64lights::pixelsPerUnit(viewProj, framebuffer.viewport.height) : 0.0f, maxRadius, (cfg.terrainNormals && rs64Shadow.terrainNormalGpu) ? (cfg.terrainTerminator ? 2.0f : 1.0f) : 0.0f };
+
+        void *bytes = framebuffer.rs64ShadowsBuffer->map();
+        memcpy(bytes, &cb, sizeof(cb));
+        framebuffer.rs64ShadowsBuffer->unmap();
+        framebuffer.rs64ShadowsSet->setBuffer(framebuffer.rs64ShadowsSet->gParams, framebuffer.rs64ShadowsBuffer.get(), sizeof(interop::RS64ShadowsCB));
+        framebuffer.rs64ShadowsSet->setTexture(framebuffer.rs64ShadowsSet->gDepth, p.fbStorage->depthTarget->texture.get(), RenderTextureLayout::DEPTH_READ, p.fbStorage->depthTarget->textureView.get());
+        framebuffer.rs64ShadowsDebug = (cfg.shadowsDebug != 0);
+        framebuffer.rs64ShadowsSoft = soft;
+        if (soft) {
+            ensureRS64SoftTargets(p.worker, framebuffer, p.fbStorage->colorTarget->width, p.fbStorage->colorTarget->height);
+            interop::RS64ShadowBlurCB bcb = {};
+            memcpy(&bcb.viewFromScreen, &inv, sizeof(inv));
+            bcb.viewport = cb.viewport;
+            const float blurMax = std::max({ maxRadius, cfg.ao ? cb.aoParams.w : 0.0f, cfg.gi ? cb.giParams.w : 0.0f });
+            bcb.params = { cfg.shadows ? cfg.shadowStrength : 0.0f, 0.02f, (cfg.shadowsDebug >= 5) ? 1.0f : 0.0f, blurMax };
+            bcb.aoParams = { cfg.aoStrength, (cfg.shadowsDebug >= 5) ? float(cfg.shadowsDebug) : 0.0f, 0.0f, 0.0f };
+            bcb.texelDir = { 1.0f, 0.0f };
+            memcpy(framebuffer.rs64BlurHBuffer->map(), &bcb, sizeof(bcb));
+            framebuffer.rs64BlurHBuffer->unmap();
+            bcb.texelDir = { 0.0f, 1.0f };
+            memcpy(framebuffer.rs64BlurVBuffer->map(), &bcb, sizeof(bcb));
+            framebuffer.rs64BlurVBuffer->unmap();
+            RS64ShadowBlurDescriptorSet &hs = *framebuffer.rs64BlurHSet;
+            RS64ShadowBlurDescriptorSet &vs = *framebuffer.rs64BlurVSet;
+            hs.setBuffer(hs.gBlur, framebuffer.rs64BlurHBuffer.get(), sizeof(interop::RS64ShadowBlurCB));
+            hs.setTexture(hs.gDepth, p.fbStorage->depthTarget->texture.get(), RenderTextureLayout::DEPTH_READ, p.fbStorage->depthTarget->textureView.get());
+            hs.setTexture(hs.gMask, framebuffer.rs64SoftMask.get(), RenderTextureLayout::SHADER_READ);
+            hs.setTexture(hs.gIndirect, framebuffer.rs64SoftIndirect.get(), RenderTextureLayout::SHADER_READ);
+            vs.setTexture(vs.gIndirect, framebuffer.rs64SoftIndirectPing.get(), RenderTextureLayout::SHADER_READ);
+            vs.setBuffer(vs.gBlur, framebuffer.rs64BlurVBuffer.get(), sizeof(interop::RS64ShadowBlurCB));
+            vs.setTexture(vs.gDepth, p.fbStorage->depthTarget->texture.get(), RenderTextureLayout::DEPTH_READ, p.fbStorage->depthTarget->textureView.get());
+            vs.setTexture(vs.gMask, framebuffer.rs64SoftPing.get(), RenderTextureLayout::SHADER_READ);
+        }
+        return true;
+    }
+
+    // Hit colours in BLAS triangle order for the opaque casters (ranges, mirroring gatherCasterIndices' skips), the emissive draws (their own BLAS), the frame's
+    // drawn terrain and the caster average: vertex-colour average x the call's render-tile TMEM average x prim.
+    void FramebufferRenderer::buildRS64HitColors(const DrawParams &p, const std::vector<std::pair<rs64lights::IndexRange, uint32_t>> &terrainCalls, const float *floorUp) {
+        RS64ShadowScene &s = rs64Shadow;
+        const DrawData &drawData = p.curWorkload->drawData;
+        const auto &fi = drawData.faceIndices;
+        const auto &nc = drawData.normColBytes;
+        const auto &callTex = p.curWorkload->rs64CallTex;
+        auto drawColor = [&](const rs64lights::IndexRange &r, uint32_t callIndex, float out[3]) {
+            float texRgb[3] = {};
+            const float *tex = nullptr;
+            if ((callIndex < callTex.size()) && ((float)callTex[callIndex].w > 0.0f)) {
+                texRgb[0] = (float)callTex[callIndex].x;
+                texRgb[1] = (float)callTex[callIndex].y;
+                texRgb[2] = (float)callTex[callIndex].z;
+                tex = texRgb;
+            }
+            float vtx[3] = { 1.0f, 1.0f, 1.0f };
+            if (tex == nullptr) {
+                float sum[3] = {};
+                uint32_t n = 0;
+                const uint32_t count = r.triangleCount * 3;
+                const uint32_t step = std::max<uint32_t>(1, r.triangleCount / 16) * 3;
+                for (uint32_t k = 0; (k < count) && (size_t(r.start) + k < fi.size()); k += step) {
+                    const size_t v = fi[r.start + k];
+                    if (v * 4 + 3 < nc.size()) {
+                        sum[0] += nc[v * 4 + 0] / 255.0f;
+                        sum[1] += nc[v * 4 + 1] / 255.0f;
+                        sum[2] += nc[v * 4 + 2] / 255.0f;
+                        ++n;
+                    }
+                }
+                for (int k = 0; (k < 3) && (n > 0); ++k) {
+                    vtx[k] = sum[k] / float(n);
+                }
+            }
+            float prim[3] = { 1.0f, 1.0f, 1.0f };
+            if (callIndex < drawData.rdpParams.size()) {
+                prim[0] = (float)drawData.rdpParams[callIndex].primColor.x;
+                prim[1] = (float)drawData.rdpParams[callIndex].primColor.y;
+                prim[2] = (float)drawData.rdpParams[callIndex].primColor.z;
+            }
+            rs64lights::drawAverageColor(vtx, tex, prim, out);
+        };
+        // Area-weighted world-space normal sum of up to 64 of a draw's triangles (the hangar camera is unrotated, so world space is camera space).
+        const auto &pos = drawData.posFloats;
+        const auto &wIdx = drawData.worldIndices;
+        float sumN[3] = {};
+        auto drawNormalSum = [&](const rs64lights::IndexRange &r, float out[3]) {
+            out[0] = out[1] = out[2] = 0.0f;
+            const uint32_t step = std::max<uint32_t>(1, r.triangleCount / 64);
+            for (uint32_t t = 0; t < r.triangleCount; t += step) {
+                float w[3][3];
+                bool ok = true;
+                for (uint32_t k = 0; (k < 3) && ok; ++k) {
+                    const size_t f = size_t(r.start) + t * 3 + k;
+                    const size_t v = (f < fi.size()) ? fi[f] : SIZE_MAX;
+                    if ((v == SIZE_MAX) || (v * 3 + 2 >= pos.size()) || (v >= wIdx.size()) || (wIdx[v] >= drawData.worldTransforms.size())) {
+                        ok = false;
+                        break;
+                    }
+                    const rs64lights::Mat4 m = rs64ToMat4(drawData.worldTransforms[wIdx[v]]);
+                    for (int j = 0; j < 3; ++j) {
+                        w[k][j] = pos[v * 3 + 0] * m.m[0][j] + pos[v * 3 + 1] * m.m[1][j] + pos[v * 3 + 2] * m.m[2][j] + m.m[3][j];
+                    }
+                }
+                if (!ok) {
+                    continue;
+                }
+                const float e1[3] = { w[1][0] - w[0][0], w[1][1] - w[0][1], w[1][2] - w[0][2] };
+                const float e2[3] = { w[2][0] - w[0][0], w[2][1] - w[0][1], w[2][2] - w[0][2] };
+                out[0] += e1[1] * e2[2] - e1[2] * e2[1];
+                out[1] += e1[2] * e2[0] - e1[0] * e2[2];
+                out[2] += e1[0] * e2[1] - e1[1] * e2[0];
+            }
+            return (out[0] != 0.0f) || (out[1] != 0.0f) || (out[2] != 0.0f);
+        };
+        auto buildTable = [&](const std::vector<rs64lights::IndexRange> &ranges, const std::vector<uint32_t> &calls, bool emissive, std::vector<rs64lights::HitColorEntry> &table, double sum[3]) {
+            table.clear();
+            uint32_t tri = 0;
+            for (size_t r = 0; (r < ranges.size()) && (r < calls.size()); ++r) {
+                const size_t count = size_t(ranges[r].triangleCount) * 3;
+                if ((count == 0) || (size_t(ranges[r].start) + count > fi.size())) {
+                    continue;
+                }
+                float c[3];
+                drawColor(ranges[r], calls[r], c);
+                uint32_t rgba = rs64lights::packHitColor(c[0], c[1], c[2], emissive);
+                if ((floorUp != nullptr) && !emissive && drawNormalSum(ranges[r], sumN)) {
+                    if (rs64lights::floorFacing(sumN, floorUp, 0.9f)) {
+                        rgba = rs64lights::markFloor(rgba);
+                    }
+                }
+                table.push_back({ tri, rgba });
+                tri += ranges[r].triangleCount;
+                for (int k = 0; k < 3; ++k) {
+                    sum[k] += c[k];
+                }
+            }
+        };
+        double casterSum[3] = {};
+        double emissiveSum[3] = {};
+        buildTable(s.ranges, s.rangeCalls, false, s.hitTable, casterSum);
+        buildTable(s.emissiveRanges, s.emissiveCalls, true, s.emissiveTable, emissiveSum);
+        s.emissiveIndices.clear();
+        rs64lights::gatherCasterIndices(fi.data(), fi.size(), s.emissiveRanges.data(), s.emissiveRanges.size(), s.emissiveIndices);
+        const double n = double(std::max<size_t>(s.hitTable.size(), 1));
+        s.averageColor = rs64lights::packHitColor(float(casterSum[0] / n), float(casterSum[1] / n), float(casterSum[2] / n), false);
+        if (rs64lights::config().log) {
+            static uint32_t s_n = 0;
+            if ((++s_n % 120) < 4) {
+                std::fprintf(stderr, "[rt-hit] casters=%zu emissive=%zu cutouts=%zu avg=%08X terrain=%08X:", s.hitTable.size(), s.emissiveTable.size(), s.cutoutTable.size(), s.averageColor, s.terrainColor);
+                for (size_t i = 0; (i < s.hitTable.size()) && (i < 48); ++i) {
+                    const uint32_t call = (i < s.rangeCalls.size()) ? s.rangeCalls[i] : 0;
+                    const bool tex = (call < callTex.size()) && ((float)callTex[call].w > 0.0f);
+                    std::fprintf(stderr, " %u:%08X%s(c%u)", s.hitTable[i].firstTriangle, s.hitTable[i].rgba, tex ? "t" : "", call);
+                }
+                std::fprintf(stderr, " | emissive:");
+                for (size_t i = 0; (i < s.emissiveTable.size()) && (i < 16); ++i) {
+                    const uint32_t call = (i < s.emissiveCalls.size()) ? s.emissiveCalls[i] : 0;
+                    std::fprintf(stderr, " %u:%08X(c%u,%ut)", s.emissiveTable[i].firstTriangle, s.emissiveTable[i].rgba, call, (i < s.emissiveRanges.size()) ? s.emissiveRanges[i].triangleCount : 0);
+                }
+                std::fprintf(stderr, "\n");
+            }
+        }
+        if (!terrainCalls.empty()) {
+            double t[3] = {};
+            for (const auto &tc : terrainCalls) {
+                float c[3];
+                drawColor(tc.first, tc.second, c);
+                for (int k = 0; k < 3; ++k) {
+                    t[k] += c[k];
+                }
+            }
+            const double m = double(terrainCalls.size());
+            s.terrainColor = rs64lights::packHitColor(float(t[0] / m), float(t[1] / m), float(t[2] / m), false);
+        }
+    }
+
+    // Soft-shadow mask (shadow, blur radius) and ping textures at the colour target's size; recreated when it changes.
+    void FramebufferRenderer::ensureRS64SoftTargets(RenderWorker *worker, Framebuffer &framebuffer, uint32_t width, uint32_t height) {
+        if (framebuffer.rs64SoftMask && (framebuffer.rs64SoftW == width) && (framebuffer.rs64SoftH == height)) {
+            return;
+        }
+        framebuffer.rs64SoftMaskFb.reset();
+        framebuffer.rs64SoftPingFb.reset();
+        framebuffer.rs64SoftMask = worker->device->createTexture(RenderTextureDesc::ColorTarget(width, height, RenderFormat::R16G16B16A16_FLOAT));
+        framebuffer.rs64SoftPing = worker->device->createTexture(RenderTextureDesc::ColorTarget(width, height, RenderFormat::R16G16B16A16_FLOAT));
+        framebuffer.rs64SoftIndirect = worker->device->createTexture(RenderTextureDesc::ColorTarget(width, height, RenderFormat::R16G16B16A16_FLOAT));
+        framebuffer.rs64SoftIndirectPing = worker->device->createTexture(RenderTextureDesc::ColorTarget(width, height, RenderFormat::R16G16B16A16_FLOAT));
+        const RenderTexture *maskTargets[] = { framebuffer.rs64SoftMask.get(), framebuffer.rs64SoftIndirect.get() };
+        const RenderTexture *pingTargets[] = { framebuffer.rs64SoftPing.get(), framebuffer.rs64SoftIndirectPing.get() };
+        framebuffer.rs64SoftMaskFb = worker->device->createFramebuffer(RenderFramebufferDesc(maskTargets, 2));
+        framebuffer.rs64SoftPingFb = worker->device->createFramebuffer(RenderFramebufferDesc(pingTargets, 2));
+        framebuffer.rs64SoftW = width;
+        framebuffer.rs64SoftH = height;
+    }
+
+    void FramebufferRenderer::recordRS64Shadows(RenderWorker *worker, const Framebuffer &framebuffer, bool &depthState) {
+        const RenderTargetDrawCall &targetDrawCall = framebuffer.renderTargetDrawCall;
+        submitDepthAccess(worker, targetDrawCall.fbStorage, true, depthState);
+        framebuffer.rs64ShadowsSet->setAccelerationStructure(framebuffer.rs64ShadowsSet->gScene, rs64Shadow.tlas.get());
+        {
+            // History slots are placed when the scene is built, after the fill.
+            uint8_t *bytes = static_cast<uint8_t *>(framebuffer.rs64ShadowsBuffer->map());
+            memcpy(bytes + offsetof(interop::RS64ShadowsCB, historyCam), rs64Shadow.historyCam, sizeof(rs64Shadow.historyCam));
+            memcpy(bytes + offsetof(interop::RS64ShadowsCB, historyMask), &rs64Shadow.historyMask, sizeof(uint32_t));
+            const uint32_t hitParams[4] = { rs64Shadow.hitCount, rs64Shadow.emissiveCount, rs64Shadow.terrainColor, rs64Shadow.averageColor };
+            memcpy(bytes + offsetof(interop::RS64ShadowsCB, hitParams), hitParams, sizeof(hitParams));
+            framebuffer.rs64ShadowsBuffer->unmap();
+        }
+        const RenderViewport &v = framebuffer.viewport;
+        if (framebuffer.rs64ShadowsSoft) {
+            // Trace into the mask, blur H into ping, then blur V and darken the colour target (left bound as colorWriteDepthRead, as submitDepthAccess set it).
+            const RenderRect sc(int32_t(v.x), int32_t(v.y), int32_t(v.x + v.width), int32_t(v.y + v.height));
+            RenderTexture *mask = framebuffer.rs64SoftMask.get();
+            RenderTexture *ping = framebuffer.rs64SoftPing.get();
+            RenderTexture *ind = framebuffer.rs64SoftIndirect.get();
+            RenderTexture *indPing = framebuffer.rs64SoftIndirectPing.get();
+            const RenderTextureBarrier toMask[] = { RenderTextureBarrier(mask, RenderTextureLayout::COLOR_WRITE), RenderTextureBarrier(ind, RenderTextureLayout::COLOR_WRITE) };
+            worker->commandList->barriers(RenderBarrierStage::GRAPHICS, toMask, uint32_t(std::size(toMask)));
+            worker->commandList->setFramebuffer(framebuffer.rs64SoftMaskFb.get());
+            worker->commandList->clearColor(0, RenderColor(0.0f, 0.0f, 0.0f, 0.0f));
+            worker->commandList->clearColor(1, RenderColor(0.0f, 0.0f, 0.0f, 0.0f));
+            worker->commandList->setViewports(v);
+            worker->commandList->setScissors(sc);
+            worker->commandList->setPipeline(shaderLibrary->rs64ShadowsSoft.pipeline.get());
+            worker->commandList->setGraphicsPipelineLayout(shaderLibrary->rs64ShadowsSoft.pipelineLayout.get());
+            bindRS64Traced(worker, *framebuffer.rs64ShadowsSet, framebuffer.rs64ShadowsBuffer.get(), offsetof(interop::RS64ShadowsCB, cutoutDrawCount), false);
+            worker->commandList->setVertexBuffers(0, nullptr, 0, nullptr);
+            worker->commandList->drawInstanced(3, 1, 0, 0);
+
+            const RenderTextureBarrier toPing[] = {
+                RenderTextureBarrier(mask, RenderTextureLayout::SHADER_READ), RenderTextureBarrier(ind, RenderTextureLayout::SHADER_READ),
+                RenderTextureBarrier(ping, RenderTextureLayout::COLOR_WRITE), RenderTextureBarrier(indPing, RenderTextureLayout::COLOR_WRITE)
+            };
+            worker->commandList->barriers(RenderBarrierStage::GRAPHICS, toPing, uint32_t(std::size(toPing)));
+            worker->commandList->setFramebuffer(framebuffer.rs64SoftPingFb.get());
+            worker->commandList->clearColor(0, RenderColor(0.0f, 0.0f, 0.0f, 0.0f));
+            worker->commandList->clearColor(1, RenderColor(0.0f, 0.0f, 0.0f, 0.0f));
+            worker->commandList->setViewports(v);
+            worker->commandList->setScissors(sc);
+            worker->commandList->setPipeline(shaderLibrary->rs64ShadowBlurH.pipeline.get());
+            worker->commandList->setGraphicsPipelineLayout(shaderLibrary->rs64ShadowBlurH.pipelineLayout.get());
+            worker->commandList->setGraphicsDescriptorSet(framebuffer.rs64BlurHSet->get(), 0);
+            worker->commandList->drawInstanced(3, 1, 0, 0);
+
+            const RenderTextureBarrier toCompose[] = { RenderTextureBarrier(ping, RenderTextureLayout::SHADER_READ), RenderTextureBarrier(indPing, RenderTextureLayout::SHADER_READ) };
+            worker->commandList->barriers(RenderBarrierStage::GRAPHICS, toCompose, uint32_t(std::size(toCompose)));
+            worker->commandList->setFramebuffer(targetDrawCall.fbStorage->colorWriteDepthRead.get());
+            worker->commandList->setViewports(v);
+            worker->commandList->setScissors(sc);
+            const ShaderRecord &vrec = framebuffer.rs64ShadowsDebug ? shaderLibrary->rs64ShadowBlurVDebug : shaderLibrary->rs64ShadowBlurV;
+            worker->commandList->setPipeline(vrec.pipeline.get());
+            worker->commandList->setGraphicsPipelineLayout(vrec.pipelineLayout.get());
+            worker->commandList->setGraphicsDescriptorSet(framebuffer.rs64BlurVSet->get(), 0);
+            worker->commandList->drawInstanced(3, 1, 0, 0);
+            return;
+        }
+        const ShaderRecord &record = framebuffer.rs64ShadowsDebug ? shaderLibrary->rs64ShadowsDebug : shaderLibrary->rs64Shadows;
+        worker->commandList->setViewports(v);
+        worker->commandList->setScissors(RenderRect(int32_t(v.x), int32_t(v.y), int32_t(v.x + v.width), int32_t(v.y + v.height)));
+        worker->commandList->setPipeline(record.pipeline.get());
+        worker->commandList->setGraphicsPipelineLayout(record.pipelineLayout.get());
+        bindRS64Traced(worker, *framebuffer.rs64ShadowsSet, framebuffer.rs64ShadowsBuffer.get(), offsetof(interop::RS64ShadowsCB, cutoutDrawCount), false);
+        worker->commandList->setVertexBuffers(0, nullptr, 0, nullptr);
+        worker->commandList->drawInstanced(3, 1, 0, 0);
+    }
+
+    // Traced passes: this frame's cutout table, indices and tex-coords into set 3 (placeholders when there are none), the count patched into the
+    // pass's constant buffer at record time (the fills run before recordSetup builds the table), then sets 0-2 as raster binds them.
+    void FramebufferRenderer::bindRS64Traced(RenderWorker *worker, RS64TracedDescriptorSet &set, RenderBuffer *paramsBuffer, uint64_t countOffset, bool countAsFloat) {
+        RS64ShadowScene &s = rs64Shadow;
+        if (!rs64CutoutPlaceholder) {
+            rs64CutoutPlaceholder = worker->device->createBuffer(RenderBufferDesc::UploadBuffer(64, RenderBufferFlag::STORAGE));
+        }
+        const bool have = (s.cutoutDrawCount > 0) && (s.texCoords != nullptr);
+        const uint32_t count = have ? s.cutoutDrawCount : 0;
+        if (have) {
+            set.setBuffer(set.gCutoutDraws, s.cutoutTableGpu.get(), s.cutoutTableGpuCapacity, RenderBufferStructuredView(sizeof(rs64lights::CutoutEntry)));
+            set.setBuffer(set.gCutoutIndices, s.cutoutIndexGpu.get(), s.cutoutIndexGpuCapacity);
+            set.setBuffer(set.gTexCoords, const_cast<RenderBuffer *>(s.texCoords), s.texCoordsSize);
+        }
+        else {
+            set.setBuffer(set.gCutoutDraws, rs64CutoutPlaceholder.get(), 64, RenderBufferStructuredView(sizeof(rs64lights::CutoutEntry)));
+            set.setBuffer(set.gCutoutIndices, rs64CutoutPlaceholder.get(), 64);
+            set.setBuffer(set.gTexCoords, rs64CutoutPlaceholder.get(), 64);
+        }
+        const RenderBufferStructuredView hitView(sizeof(rs64lights::HitColorEntry));
+        if ((s.hitCount > 0) && s.hitTableGpu) {
+            set.setBuffer(set.gHitColors, s.hitTableGpu.get(), s.hitTableGpuCapacity, hitView);
+        }
+        else {
+            set.setBuffer(set.gHitColors, rs64CutoutPlaceholder.get(), 64, hitView);
+        }
+        if ((s.emissiveCount > 0) && s.emissiveTableGpu) {
+            set.setBuffer(set.gEmissiveColors, s.emissiveTableGpu.get(), s.emissiveTableGpuCapacity, hitView);
+        }
+        else {
+            set.setBuffer(set.gEmissiveColors, rs64CutoutPlaceholder.get(), 64, hitView);
+        }
+        if (s.terrainBlas && s.terrainNormalGpu) {
+            set.setBuffer(set.gTerrainIndices, s.terrainIndexGpu.get(), s.terrainIndexBytes);
+            set.setBuffer(set.gTerrainNormals, s.terrainNormalGpu.get(), s.terrainNormalBytes);
+        }
+        else {
+            set.setBuffer(set.gTerrainIndices, rs64CutoutPlaceholder.get(), 64);
+            set.setBuffer(set.gTerrainNormals, rs64CutoutPlaceholder.get(), 64);
+        }
+        uint8_t *bytes = static_cast<uint8_t *>(paramsBuffer->map());
+        if (countAsFloat) {
+            const float f = float(count);
+            memcpy(bytes + countOffset, &f, sizeof(f));
+        }
+        else {
+            memcpy(bytes + countOffset, &count, sizeof(count));
+        }
+        paramsBuffer->unmap();
+        worker->commandList->setGraphicsDescriptorSet(descCommonSet->get(), 0);
+        worker->commandList->setGraphicsDescriptorSet(descTextureSet->get(), 1);
+        worker->commandList->setGraphicsDescriptorSet(descTextureSet->get(), 2);
+        worker->commandList->setGraphicsDescriptorSet(set.get(), 3);
+    }
+
+    bool FramebufferRenderer::fillRS64FogShafts(const DrawParams &p, Framebuffer &framebuffer, uint32_t transformsIndex, hlslpp::float2 screenScale, hlslpp::float2 screenOffset, const rs64lights::Sun &sun, const rs64lights::FogParams &fog) {
+        rs64lights::Mat4 inv;
+        rs64lights::Mat4 viewProj;
+        if (!sun.valid || !fog.valid || !framebuffer.rs64FogSet || !rs64ViewProj(p, transformsIndex, viewProj) || !rs64ViewFromScreen(p, transformsIndex, screenScale, screenOffset, inv)) {
+            return false;
+        }
+
+        const rs64lights::Config &cfg = rs64lights::config();
+        interop::RS64FogShaftsCB cb = {};
+        memcpy(&cb.viewFromScreen, &inv, sizeof(inv));
+        memcpy(&cb.viewProj, &viewProj, sizeof(viewProj));
+        cb.viewport = { framebuffer.viewport.x, framebuffer.viewport.y, framebuffer.viewport.width, framebuffer.viewport.height };
+        cb.sunDir = { sun.dir[0], sun.dir[1], sun.dir[2], 0.0f };
+        cb.fogColor = { fog.color[0], fog.color[1], fog.color[2], 0.0f };
+        cb.debugMode = static_cast<uint32_t>(cfg.fogShaftsDebug);
+        cb.steps = static_cast<uint32_t>(cfg.fogShaftsSteps);
+        cb.strength = cfg.fogShaftsStrength;
+        cb.fogMul = fog.mul;
+        cb.fogOffset = fog.offset;
+        cb.tMin = cfg.shadowTMin;
+        cb.tMax = cfg.shadowTMax;
+        cb.terrainTMinScale = cfg.shadowTerrainTMin;
+        cb.skyDepth = rs64lights::fogSkyDepth();
+        cb.visBias = cfg.shadowNormalBias;
+
+        void *bytes = framebuffer.rs64FogBuffer->map();
+        memcpy(bytes, &cb, sizeof(cb));
+        framebuffer.rs64FogBuffer->unmap();
+        framebuffer.rs64FogSet->setBuffer(framebuffer.rs64FogSet->gParams, framebuffer.rs64FogBuffer.get(), sizeof(interop::RS64FogShaftsCB));
+        framebuffer.rs64FogSet->setTexture(framebuffer.rs64FogSet->gDepth, p.fbStorage->depthTarget->texture.get(), RenderTextureLayout::DEPTH_READ, p.fbStorage->depthTarget->textureView.get());
+        framebuffer.rs64FogDebug = (cfg.fogShaftsDebug != 0);
+        return true;
+    }
+
+    void FramebufferRenderer::recordRS64FogShafts(RenderWorker *worker, const Framebuffer &framebuffer, bool &depthState) {
+        const RenderTargetDrawCall &targetDrawCall = framebuffer.renderTargetDrawCall;
+        submitDepthAccess(worker, targetDrawCall.fbStorage, true, depthState);
+        framebuffer.rs64FogSet->setAccelerationStructure(framebuffer.rs64FogSet->gScene, rs64Shadow.tlas.get());
+        const ShaderRecord &record = framebuffer.rs64FogDebug ? shaderLibrary->rs64FogShaftsDebug : shaderLibrary->rs64FogShafts;
+        const RenderViewport &v = framebuffer.viewport;
+        worker->commandList->setViewports(v);
+        worker->commandList->setScissors(RenderRect(int32_t(v.x), int32_t(v.y), int32_t(v.x + v.width), int32_t(v.y + v.height)));
+        worker->commandList->setPipeline(record.pipeline.get());
+        worker->commandList->setGraphicsPipelineLayout(record.pipelineLayout.get());
+        bindRS64Traced(worker, *framebuffer.rs64FogSet, framebuffer.rs64FogBuffer.get(), offsetof(interop::RS64FogShaftsCB, cutoutDrawCount), false);
+        worker->commandList->setVertexBuffers(0, nullptr, 0, nullptr);
+        worker->commandList->drawInstanced(3, 1, 0, 0);
+    }
+
+    void FramebufferRenderer::recordRS64TerrainBLAS(RenderWorker *worker) {
+        RS64ShadowScene &s = rs64Shadow;
+        RenderDevice *device = worker->device;
+        thread_local std::vector<float> pos;
+        thread_local std::vector<uint32_t> idx;
+        rs64lights::buildTerrainMesh(*s.terrainMap, rs64lights::config().shadowTerrainSub, pos, idx);
+        s.terrainBuiltVersion = s.terrainMap->version;
+        s.terrainBlas.reset();
+        s.terrainNormalGpu.reset();
+        if (idx.empty()) {
+            return;
+        }
+        const uint64_t posBytes = pos.size() * sizeof(float);
+        const uint64_t idxBytes = idx.size() * sizeof(uint32_t);
+        s.terrainPosBuffer = device->createBuffer(RenderBufferDesc::UploadBuffer(posBytes, RenderBufferFlag::ACCELERATION_STRUCTURE_INPUT));
+        memcpy(s.terrainPosBuffer->map(), pos.data(), posBytes);
+        s.terrainPosBuffer->unmap();
+        s.terrainIndexBuffer = device->createBuffer(RenderBufferDesc::UploadBuffer(idxBytes, RenderBufferFlag::ACCELERATION_STRUCTURE_INPUT));
+        memcpy(s.terrainIndexBuffer->map(), idx.data(), idxBytes);
+        s.terrainIndexBuffer->unmap();
+        const RenderBottomLevelASMesh mesh(RenderBufferReference(s.terrainIndexBuffer.get()), RenderBufferReference(s.terrainPosBuffer.get()), RenderFormat::R32_UINT, RenderFormat::R32G32B32_FLOAT, uint32_t(idx.size()), uint32_t(pos.size() / 3), sizeof(float) * 3, true);
+        RenderBottomLevelASBuildInfo info;
+        device->setBottomLevelASBuildInfo(info, &mesh, 1, false, true);
+        s.terrainBlasBuffer = device->createBuffer(RenderBufferDesc::AccelerationStructureBuffer(info.accelerationStructureSize));
+        s.terrainBlas = device->createAccelerationStructure(RenderAccelerationStructureDesc(RenderAccelerationStructureType::BOTTOM_LEVEL, RenderBufferReference(s.terrainBlasBuffer.get()), info.accelerationStructureSize));
+        s.terrainScratch = device->createBuffer(RenderBufferDesc::DefaultBuffer(info.scratchSize, RenderBufferFlag::ACCELERATION_STRUCTURE_SCRATCH));
+        worker->commandList->barriers(RenderBarrierStage::COMPUTE, RenderBufferBarrier(s.terrainBlasBuffer.get(), RenderBufferAccess::WRITE));
+        worker->commandList->buildBottomLevelAS(s.terrainBlas.get(), RenderBufferReference(s.terrainScratch.get()), info);
+        worker->commandList->barriers(RenderBarrierStage::COMPUTE, RenderBufferBarrier(s.terrainBlasBuffer.get(), RenderBufferAccess::READ));
+
+        // Smooth normals and indices for the shadow pass's terrain receivers, GPU-local like the cutout tables.
+        thread_local std::vector<float> nrm;
+        rs64lights::buildTerrainNormals(pos, idx, nrm);
+        s.terrainIndexBytes = idxBytes;
+        s.terrainNormalBytes = nrm.size() * sizeof(float);
+        s.terrainNormalBuffer = device->createBuffer(RenderBufferDesc::UploadBuffer(s.terrainNormalBytes));
+        memcpy(s.terrainNormalBuffer->map(), nrm.data(), s.terrainNormalBytes);
+        s.terrainNormalBuffer->unmap();
+        s.terrainIndexGpu = device->createBuffer(RenderBufferDesc::DefaultBuffer(idxBytes, RenderBufferFlag::STORAGE));
+        s.terrainNormalGpu = device->createBuffer(RenderBufferDesc::DefaultBuffer(s.terrainNormalBytes, RenderBufferFlag::STORAGE));
+        const RenderBufferBarrier copyIn[] = { RenderBufferBarrier(s.terrainIndexGpu.get(), RenderBufferAccess::WRITE), RenderBufferBarrier(s.terrainNormalGpu.get(), RenderBufferAccess::WRITE) };
+        worker->commandList->barriers(RenderBarrierStage::COPY, copyIn, uint32_t(std::size(copyIn)));
+        worker->commandList->copyBufferRegion(RenderBufferReference(s.terrainIndexGpu.get()), RenderBufferReference(s.terrainIndexBuffer.get()), idxBytes);
+        worker->commandList->copyBufferRegion(RenderBufferReference(s.terrainNormalGpu.get()), RenderBufferReference(s.terrainNormalBuffer.get()), s.terrainNormalBytes);
+        const RenderBufferBarrier copyOut[] = { RenderBufferBarrier(s.terrainIndexGpu.get(), RenderBufferAccess::READ), RenderBufferBarrier(s.terrainNormalGpu.get(), RenderBufferAccess::READ) };
+        worker->commandList->barriers(RenderBarrierStage::GRAPHICS, copyOut, uint32_t(std::size(copyOut)));
+        if (rs64lights::config().log) {
+            std::fprintf(stderr, "[rt-terrain] blas: map=%ux%u version=%llu tris=%zu bytes=%llu\n", s.terrainMap->width, s.terrainMap->height, (unsigned long long)s.terrainMap->version, idx.size() / 3, (unsigned long long)info.accelerationStructureSize);
+        }
+    }
+
+    void FramebufferRenderer::recordRS64ShadowScene(RenderWorker *worker, bool dynamic) {
+        RS64ShadowScene &s = rs64Shadow;
+        RenderDevice *device = worker->device;
+        auto grow = [device](std::unique_ptr<RenderBuffer> &buf, uint64_t &cap, uint64_t need, RenderBufferDesc desc) {
+            if ((need <= cap) && buf) {
+                return false;
+            }
+            cap = need + need / 2 + 256;
+            desc.size = cap;
+            buf = device->createBuffer(desc);
+            return true;
+        };
+
+        s.retired.blas.reset();
+        s.retired.blasBuffer.reset();
+        if (s.terrainActive && (s.terrainBuiltVersion != s.terrainMap->version)) {
+            recordRS64TerrainBLAS(worker);
+        }
+
+        RenderTopLevelASInstance instances[3 + 4 + 2];
+        uint32_t instanceCount = 0;
+        RenderBottomLevelASBuildInfo blasInfo;
+        RenderBottomLevelASBuildInfo cutoutInfo;
+        const bool opaque = dynamic && !s.indices.empty();
+        s.cutoutDrawCount = 0;
+        if (opaque) {
+            const uint64_t indexBytes = s.indices.size() * sizeof(uint32_t);
+            grow(s.indexBuffer, s.indexCapacity, indexBytes, RenderBufferDesc::UploadBuffer(indexBytes, RenderBufferFlag::ACCELERATION_STRUCTURE_INPUT));
+            void *dst = s.indexBuffer->map();
+            memcpy(dst, s.indices.data(), indexBytes);
+            s.indexBuffer->unmap();
+            const RenderBottomLevelASMesh mesh(RenderBufferReference(s.indexBuffer.get()), RenderBufferReference(s.worldPos), RenderFormat::R32_UINT, RenderFormat::R32G32B32_FLOAT, uint32_t(s.indices.size()), s.vertexCount, sizeof(float) * 4, true);
+            device->setBottomLevelASBuildInfo(blasInfo, &mesh, 1, true, false);
+            if (grow(s.blasBuffer, s.blasCapacity, blasInfo.accelerationStructureSize, RenderBufferDesc::AccelerationStructureBuffer(blasInfo.accelerationStructureSize)) || !s.blas) {
+                s.blas = device->createAccelerationStructure(RenderAccelerationStructureDesc(RenderAccelerationStructureType::BOTTOM_LEVEL, RenderBufferReference(s.blasBuffer.get()), s.blasCapacity));
+            }
+            grow(s.blasScratch, s.blasScratchCapacity, blasInfo.scratchSize, RenderBufferDesc::DefaultBuffer(blasInfo.scratchSize, RenderBufferFlag::ACCELERATION_STRUCTURE_SCRATCH));
+            instances[instanceCount++] = RenderTopLevelASInstance(RenderBufferReference(s.blasBuffer.get()), 0, 0x01, 0, true, RenderAffineTransform());
+        }
+        // Cutouts: a non-opaque BLAS hit-tested against the draw's texture alpha; left out when the tex-coord buffer is missing.
+        if (dynamic && !s.cutoutIndices.empty() && (s.texCoords != nullptr)) {
+            const uint64_t idxBytes = s.cutoutIndices.size() * sizeof(uint32_t);
+            grow(s.cutoutIndexBuffer, s.cutoutIndexCapacity, idxBytes, RenderBufferDesc::UploadBuffer(idxBytes, RenderBufferFlag::ACCELERATION_STRUCTURE_INPUT | RenderBufferFlag::STORAGE));
+            memcpy(s.cutoutIndexBuffer->map(), s.cutoutIndices.data(), idxBytes);
+            s.cutoutIndexBuffer->unmap();
+            const uint64_t tabBytes = s.cutoutTable.size() * sizeof(rs64lights::CutoutEntry);
+            grow(s.cutoutTableBuffer, s.cutoutTableCapacity, tabBytes, RenderBufferDesc::UploadBuffer(tabBytes, RenderBufferFlag::STORAGE));
+            memcpy(s.cutoutTableBuffer->map(), s.cutoutTable.data(), tabBytes);
+            s.cutoutTableBuffer->unmap();
+            grow(s.cutoutIndexGpu, s.cutoutIndexGpuCapacity, idxBytes, RenderBufferDesc::DefaultBuffer(idxBytes, RenderBufferFlag::STORAGE));
+            grow(s.cutoutTableGpu, s.cutoutTableGpuCapacity, tabBytes, RenderBufferDesc::DefaultBuffer(tabBytes, RenderBufferFlag::STORAGE));
+            s.cutoutIndexBytes = idxBytes;
+            s.cutoutTableBytes = tabBytes;
+            const RenderBottomLevelASMesh cmesh(RenderBufferReference(s.cutoutIndexBuffer.get()), RenderBufferReference(s.worldPos), RenderFormat::R32_UINT, RenderFormat::R32G32B32_FLOAT, uint32_t(s.cutoutIndices.size()), s.vertexCount, sizeof(float) * 4, false);
+            device->setBottomLevelASBuildInfo(cutoutInfo, &cmesh, 1, true, false);
+            if (grow(s.cutoutBlasBuffer, s.cutoutBlasCapacity, cutoutInfo.accelerationStructureSize, RenderBufferDesc::AccelerationStructureBuffer(cutoutInfo.accelerationStructureSize)) || !s.cutoutBlas) {
+                s.cutoutBlas = device->createAccelerationStructure(RenderAccelerationStructureDesc(RenderAccelerationStructureType::BOTTOM_LEVEL, RenderBufferReference(s.cutoutBlasBuffer.get()), s.cutoutBlasCapacity));
+            }
+            grow(s.cutoutBlasScratch, s.cutoutBlasScratchCapacity, cutoutInfo.scratchSize, RenderBufferDesc::DefaultBuffer(cutoutInfo.scratchSize, RenderBufferFlag::ACCELERATION_STRUCTURE_SCRATCH));
+            instances[instanceCount++] = RenderTopLevelASInstance(RenderBufferReference(s.cutoutBlasBuffer.get()), 2, 0x04, 0, true, RenderAffineTransform());
+            s.cutoutDrawCount = uint32_t(s.cutoutTable.size());
+        }
+        // Emissive draws (lasers, glow and exhaust cards): seen by bounce and reflection rays (mask 0x80), never by shadow queries.
+        RenderBottomLevelASBuildInfo emissiveInfo;
+        const bool emissiveScene = dynamic && !s.emissiveIndices.empty() && !s.emissiveTable.empty();
+        s.emissiveCount = 0;
+        if (emissiveScene) {
+            const uint64_t idxBytes = s.emissiveIndices.size() * sizeof(uint32_t);
+            grow(s.emissiveIndexBuffer, s.emissiveIndexCapacity, idxBytes, RenderBufferDesc::UploadBuffer(idxBytes, RenderBufferFlag::ACCELERATION_STRUCTURE_INPUT));
+            memcpy(s.emissiveIndexBuffer->map(), s.emissiveIndices.data(), idxBytes);
+            s.emissiveIndexBuffer->unmap();
+            const RenderBottomLevelASMesh emesh(RenderBufferReference(s.emissiveIndexBuffer.get()), RenderBufferReference(s.worldPos), RenderFormat::R32_UINT, RenderFormat::R32G32B32_FLOAT, uint32_t(s.emissiveIndices.size()), s.vertexCount, sizeof(float) * 4, true);
+            device->setBottomLevelASBuildInfo(emissiveInfo, &emesh, 1, true, false);
+            if (grow(s.emissiveBlasBuffer, s.emissiveBlasCapacity, emissiveInfo.accelerationStructureSize, RenderBufferDesc::AccelerationStructureBuffer(emissiveInfo.accelerationStructureSize)) || !s.emissiveBlas) {
+                s.emissiveBlas = device->createAccelerationStructure(RenderAccelerationStructureDesc(RenderAccelerationStructureType::BOTTOM_LEVEL, RenderBufferReference(s.emissiveBlasBuffer.get()), s.emissiveBlasCapacity));
+            }
+            grow(s.emissiveBlasScratch, s.emissiveBlasScratchCapacity, emissiveInfo.scratchSize, RenderBufferDesc::DefaultBuffer(emissiveInfo.scratchSize, RenderBufferFlag::ACCELERATION_STRUCTURE_SCRATCH));
+            instances[instanceCount++] = RenderTopLevelASInstance(RenderBufferReference(s.emissiveBlasBuffer.get()), 7, 0x80, 0, true, RenderAffineTransform());
+            s.emissiveCount = uint32_t(s.emissiveTable.size());
+        }
+        // Craft draws cast like other drawn casters (mask 0x01) but never enter a history snapshot; hits take the caster average colour.
+        RenderBottomLevelASBuildInfo craftInfo;
+        const bool craftScene = dynamic && !s.craftIndices.empty();
+        if (craftScene) {
+            const uint64_t idxBytes = s.craftIndices.size() * sizeof(uint32_t);
+            grow(s.craftIndexBuffer, s.craftIndexCapacity, idxBytes, RenderBufferDesc::UploadBuffer(idxBytes, RenderBufferFlag::ACCELERATION_STRUCTURE_INPUT));
+            memcpy(s.craftIndexBuffer->map(), s.craftIndices.data(), idxBytes);
+            s.craftIndexBuffer->unmap();
+            const RenderBottomLevelASMesh kmesh(RenderBufferReference(s.craftIndexBuffer.get()), RenderBufferReference(s.worldPos), RenderFormat::R32_UINT, RenderFormat::R32G32B32_FLOAT, uint32_t(s.craftIndices.size()), s.vertexCount, sizeof(float) * 4, true);
+            device->setBottomLevelASBuildInfo(craftInfo, &kmesh, 1, true, false);
+            if (grow(s.craftBlasBuffer, s.craftBlasCapacity, craftInfo.accelerationStructureSize, RenderBufferDesc::AccelerationStructureBuffer(craftInfo.accelerationStructureSize)) || !s.craftBlas) {
+                s.craftBlas = device->createAccelerationStructure(RenderAccelerationStructureDesc(RenderAccelerationStructureType::BOTTOM_LEVEL, RenderBufferReference(s.craftBlasBuffer.get()), s.craftBlasCapacity));
+            }
+            grow(s.craftBlasScratch, s.craftBlasScratchCapacity, craftInfo.scratchSize, RenderBufferDesc::DefaultBuffer(craftInfo.scratchSize, RenderBufferFlag::ACCELERATION_STRUCTURE_SCRATCH));
+            instances[instanceCount++] = RenderTopLevelASInstance(RenderBufferReference(s.craftBlasBuffer.get()), 8, 0x01, 0, true, RenderAffineTransform());
+        }
+        // Hit colour tables, GPU-local like the cutout tables.
+        s.hitCount = 0;
+        const auto uploadTable = [&](const std::vector<rs64lights::HitColorEntry> &table, std::unique_ptr<RenderBuffer> &up, uint64_t &upCap, std::unique_ptr<RenderBuffer> &gpu, uint64_t &gpuCap, uint64_t &bytes) {
+            bytes = table.size() * sizeof(rs64lights::HitColorEntry);
+            grow(up, upCap, bytes, RenderBufferDesc::UploadBuffer(bytes, RenderBufferFlag::STORAGE));
+            memcpy(up->map(), table.data(), bytes);
+            up->unmap();
+            grow(gpu, gpuCap, bytes, RenderBufferDesc::DefaultBuffer(bytes, RenderBufferFlag::STORAGE));
+        };
+        if (opaque && !s.hitTable.empty()) {
+            uploadTable(s.hitTable, s.hitTableBuffer, s.hitTableCapacity, s.hitTableGpu, s.hitTableGpuCapacity, s.hitTableBytes);
+            s.hitCount = uint32_t(s.hitTable.size());
+        }
+        if (emissiveScene) {
+            uploadTable(s.emissiveTable, s.emissiveTableBuffer, s.emissiveTableCapacity, s.emissiveTableGpu, s.emissiveTableGpuCapacity, s.emissiveTableBytes);
+        }
+        if (s.terrainActive && s.terrainBlas) {
+            RenderAffineTransform xf;
+            memcpy(xf.m, s.terrainTransform, sizeof(xf.m));
+            instances[instanceCount++] = RenderTopLevelASInstance(RenderBufferReference(s.terrainBlasBuffer.get()), 1, 0x02, 0, false, xf);
+        }
+        // Past frames' casters (slot i: id 3+i, mask 0x08 << i), moved from their camera into this one through map space.
+        const rs64lights::Config &lcfg = rs64lights::config();
+        const bool terrainNow = s.terrainActive && s.terrainBlas && (s.terrainMap != nullptr);
+        s.historyMask = 0;
+        for (int i = 0; terrainNow && (i < lcfg.shadowHistory); ++i) {
+            RS64ShadowScene::History &h = s.history[i];
+            float inv[3][4];
+            if (!h.blas || (h.mapVersion != s.terrainMap->version) || !rs64lights::affineInverse(h.terrainTransform, inv)) {
+                continue;
+            }
+            float delta[3][4];
+            rs64lights::affineCompose(s.terrainTransform, inv, delta);
+            RenderAffineTransform xf;
+            memcpy(xf.m, delta, sizeof(xf.m));
+            instances[instanceCount++] = RenderTopLevelASInstance(RenderBufferReference(h.blasBuffer.get()), 3 + i, uint8_t(0x08u << i), 0, true, xf);
+            s.historyMask |= 0x08u << i;
+            s.historyCam[i][0] = delta[0][3];
+            s.historyCam[i][1] = delta[1][3];
+            s.historyCam[i][2] = delta[2][3];
+            s.historyCam[i][3] = lcfg.shadowHistorySkip;
+        }
+        if (lcfg.log && (lcfg.shadowHistory > 0)) {
+            static uint32_t s_histLog = 0;
+            if ((++s_histLog % 120) == 1) {
+                std::fprintf(stderr, "[rt-shadows] history mask=0x%02X terrain=%d cam0=(%.0f,%.0f,%.0f) cam1=(%.0f,%.0f,%.0f)\n", s.historyMask, terrainNow ? 1 : 0,
+                    s.historyCam[0][0], s.historyCam[0][1], s.historyCam[0][2], s.historyCam[1][0], s.historyCam[1][1], s.historyCam[1][2]);
+            }
+        }
+        // Every interval frames this frame's opaque BLAS is kept as a history slot (it owns its geometry once built); the next frame grows a fresh one.
+        const bool snapshot = opaque && terrainNow && (lcfg.shadowHistory > 0) && ((++s.historyFrame % uint32_t(lcfg.shadowHistoryInterval)) == 0);
+        s.indices.clear();
+        s.terrainActive = false;
+        if (instanceCount == 0) {
+            s.ready = false;
+            return;
+        }
+
+        RenderTopLevelASBuildInfo tlasInfo;
+        device->setTopLevelASBuildInfo(tlasInfo, instances, instanceCount, true, false);
+        if (grow(s.tlasBuffer, s.tlasCapacity, tlasInfo.accelerationStructureSize, RenderBufferDesc::AccelerationStructureBuffer(tlasInfo.accelerationStructureSize)) || !s.tlas) {
+            s.tlas = device->createAccelerationStructure(RenderAccelerationStructureDesc(RenderAccelerationStructureType::TOP_LEVEL, RenderBufferReference(s.tlasBuffer.get()), s.tlasCapacity));
+        }
+        grow(s.tlasScratch, s.tlasScratchCapacity, tlasInfo.scratchSize, RenderBufferDesc::DefaultBuffer(tlasInfo.scratchSize, RenderBufferFlag::ACCELERATION_STRUCTURE_SCRATCH));
+        const uint64_t instBytes = tlasInfo.instancesBufferData.size();
+        grow(s.instancesBuffer, s.instancesCapacity, instBytes, RenderBufferDesc::UploadBuffer(instBytes, RenderBufferFlag::ACCELERATION_STRUCTURE_INPUT));
+        void *inst = s.instancesBuffer->map();
+        memcpy(inst, tlasInfo.instancesBufferData.data(), instBytes);
+        s.instancesBuffer->unmap();
+
+        // Vulkan takes a barrier's source stage from the buffer's previous barrier; without these a freshly grown AS buffer orders its builds after nothing.
+        worker->commandList->barriers(RenderBarrierStage::COMPUTE, RenderBufferBarrier(s.tlasBuffer.get(), RenderBufferAccess::WRITE));
+        if (opaque) {
+            worker->commandList->barriers(RenderBarrierStage::COMPUTE, RenderBufferBarrier(s.blasBuffer.get(), RenderBufferAccess::WRITE));
+            worker->commandList->buildBottomLevelAS(s.blas.get(), RenderBufferReference(s.blasScratch.get()), blasInfo);
+            worker->commandList->barriers(RenderBarrierStage::COMPUTE, RenderBufferBarrier(s.blasBuffer.get(), RenderBufferAccess::READ));
+        }
+        if (s.cutoutDrawCount > 0) {
+            const RenderBufferBarrier copyIn[] = { RenderBufferBarrier(s.cutoutIndexGpu.get(), RenderBufferAccess::WRITE), RenderBufferBarrier(s.cutoutTableGpu.get(), RenderBufferAccess::WRITE) };
+            worker->commandList->barriers(RenderBarrierStage::COPY, copyIn, uint32_t(std::size(copyIn)));
+            worker->commandList->copyBufferRegion(RenderBufferReference(s.cutoutIndexGpu.get()), RenderBufferReference(s.cutoutIndexBuffer.get()), s.cutoutIndexBytes);
+            worker->commandList->copyBufferRegion(RenderBufferReference(s.cutoutTableGpu.get()), RenderBufferReference(s.cutoutTableBuffer.get()), s.cutoutTableBytes);
+            const RenderBufferBarrier copyOut[] = { RenderBufferBarrier(s.cutoutIndexGpu.get(), RenderBufferAccess::READ), RenderBufferBarrier(s.cutoutTableGpu.get(), RenderBufferAccess::READ) };
+            worker->commandList->barriers(RenderBarrierStage::GRAPHICS, copyOut, uint32_t(std::size(copyOut)));
+            worker->commandList->barriers(RenderBarrierStage::COMPUTE, RenderBufferBarrier(s.cutoutBlasBuffer.get(), RenderBufferAccess::WRITE));
+            worker->commandList->buildBottomLevelAS(s.cutoutBlas.get(), RenderBufferReference(s.cutoutBlasScratch.get()), cutoutInfo);
+            worker->commandList->barriers(RenderBarrierStage::COMPUTE, RenderBufferBarrier(s.cutoutBlasBuffer.get(), RenderBufferAccess::READ));
+        }
+        if (emissiveScene) {
+            worker->commandList->barriers(RenderBarrierStage::COMPUTE, RenderBufferBarrier(s.emissiveBlasBuffer.get(), RenderBufferAccess::WRITE));
+            worker->commandList->buildBottomLevelAS(s.emissiveBlas.get(), RenderBufferReference(s.emissiveBlasScratch.get()), emissiveInfo);
+            worker->commandList->barriers(RenderBarrierStage::COMPUTE, RenderBufferBarrier(s.emissiveBlasBuffer.get(), RenderBufferAccess::READ));
+        }
+        if (craftScene) {
+            worker->commandList->barriers(RenderBarrierStage::COMPUTE, RenderBufferBarrier(s.craftBlasBuffer.get(), RenderBufferAccess::WRITE));
+            worker->commandList->buildBottomLevelAS(s.craftBlas.get(), RenderBufferReference(s.craftBlasScratch.get()), craftInfo);
+            worker->commandList->barriers(RenderBarrierStage::COMPUTE, RenderBufferBarrier(s.craftBlasBuffer.get(), RenderBufferAccess::READ));
+        }
+        for (int t = 0; t < 2; ++t) {
+            RenderBuffer *gpu = (t == 0) ? s.hitTableGpu.get() : s.emissiveTableGpu.get();
+            RenderBuffer *up = (t == 0) ? s.hitTableBuffer.get() : s.emissiveTableBuffer.get();
+            const uint64_t bytes = (t == 0) ? s.hitTableBytes : s.emissiveTableBytes;
+            const bool active = (t == 0) ? (s.hitCount > 0) : (s.emissiveCount > 0);
+            if (!active || (gpu == nullptr) || (up == nullptr)) {
+                continue;
+            }
+            worker->commandList->barriers(RenderBarrierStage::COPY, RenderBufferBarrier(gpu, RenderBufferAccess::WRITE));
+            worker->commandList->copyBufferRegion(RenderBufferReference(gpu), RenderBufferReference(up), bytes);
+            worker->commandList->barriers(RenderBarrierStage::GRAPHICS, RenderBufferBarrier(gpu, RenderBufferAccess::READ));
+        }
+        worker->commandList->buildTopLevelAS(s.tlas.get(), RenderBufferReference(s.tlasScratch.get()), RenderBufferReference(s.instancesBuffer.get()), tlasInfo);
+        worker->commandList->barriers(RenderBarrierStage::GRAPHICS_AND_COMPUTE, RenderBufferBarrier(s.tlasBuffer.get(), RenderBufferAccess::READ));
+        s.ready = true;
+        if (snapshot) {
+            RS64ShadowScene::History &h = s.history[s.historyNext % uint32_t(lcfg.shadowHistory)];
+            s.retired.blas = std::move(h.blas);
+            s.retired.blasBuffer = std::move(h.blasBuffer);
+            h.blasBuffer = std::move(s.blasBuffer);
+            h.blas = std::move(s.blas);
+            memcpy(h.terrainTransform, s.terrainTransform, sizeof(h.terrainTransform));
+            h.mapVersion = s.terrainMap->version;
+            s.blasCapacity = 0;
+            ++s.historyNext;
+        }
+    }
+
+    void FramebufferRenderer::rs64TimingBegin(RenderWorker *worker) {
+        rs64TimingMarks = 0;
+        if (!rs64lights::config().logTiming) {
+            return;
+        }
+        if (!rs64TimingPool) {
+            rs64TimingPool = worker->device->createQueryPool(uint32_t(std::size(rs64TimingLabels)));
+        }
+        worker->commandList->resetQueryPool(rs64TimingPool.get(), 0, uint32_t(std::size(rs64TimingLabels)));
+    }
+
+    // Called once before and once after a pass; the pair's difference is that pass's GPU time.
+    void FramebufferRenderer::rs64TimingMark(RenderWorker *worker, uint8_t pass) {
+        if (!rs64TimingPool || (rs64TimingMarks >= std::size(rs64TimingLabels))) {
+            return;
+        }
+        rs64TimingLabels[rs64TimingMarks] = pass;
+        worker->commandList->writeTimestamp(rs64TimingPool.get(), rs64TimingMarks);
+        ++rs64TimingMarks;
+    }
+
+    // After the workload's command list has executed and been waited on.
+    void FramebufferRenderer::rs64TimingReport() {
+        if (!rs64TimingPool) {
+            return;
+        }
+        if (rs64TimingMarks >= 2) {
+            rs64TimingPool->queryResults();
+            const uint64_t *ts = rs64TimingPool->getResults();
+            for (uint32_t i = 0; (i + 1) < rs64TimingMarks; i += 2) {
+                rs64TimingSum[rs64TimingLabels[i]] += double(ts[i + 1] - ts[i]) / 1000000.0;
+            }
+        }
+        if (++rs64TimingFrames >= 120) {
+            const double n = double(rs64TimingFrames);
+            std::fprintf(stderr, "[rt-timing] avg ms/workload over %u: scene=%.3f shadows=%.3f fog=%.3f lights=%.3f total=%.3f\n", rs64TimingFrames,
+                rs64TimingSum[RS64TimeScene] / n, rs64TimingSum[RS64TimeShadows] / n, rs64TimingSum[RS64TimeFog] / n, rs64TimingSum[RS64TimeLights] / n,
+                (rs64TimingSum[RS64TimeScene] + rs64TimingSum[RS64TimeShadows] + rs64TimingSum[RS64TimeFog] + rs64TimingSum[RS64TimeLights]) / n);
+            for (double &v : rs64TimingSum) {
+                v = 0.0;
+            }
+            rs64TimingFrames = 0;
+        }
+    }
+
+    void FramebufferRenderer::recordRS64Lights(RenderWorker *worker, const Framebuffer &framebuffer, bool &depthState) {
+        const RenderTargetDrawCall &targetDrawCall = framebuffer.renderTargetDrawCall;
+        submitDepthAccess(worker, targetDrawCall.fbStorage, true, depthState);
+        // Shadowed variant when this frame's scene was built; otherwise the Phase 1 pass.
+        const bool shadowed = framebuffer.rs64LightsShadowed && rs64Shadow.ready && (rs64Shadow.tlas != nullptr);
+        const ShaderRecord &record = shadowed ? (framebuffer.rs64LightsDebug ? shaderLibrary->rs64LightsShadowedDebug : shaderLibrary->rs64LightsShadowed)
+                                              : (framebuffer.rs64LightsDebug ? shaderLibrary->rs64LightsDebug : shaderLibrary->rs64Lights);
+        const RenderViewport &v = framebuffer.viewport;
+        worker->commandList->setViewports(v);
+        worker->commandList->setScissors(RenderRect(int32_t(v.x), int32_t(v.y), int32_t(v.x + v.width), int32_t(v.y + v.height)));
+        worker->commandList->setPipeline(record.pipeline.get());
+        worker->commandList->setGraphicsPipelineLayout(record.pipelineLayout.get());
+        if (shadowed) {
+            framebuffer.rs64LightsShadowedSet->setAccelerationStructure(framebuffer.rs64LightsShadowedSet->gScene, rs64Shadow.tlas.get());
+            bindRS64Traced(worker, *framebuffer.rs64LightsShadowedSet, framebuffer.rs64LightsBuffer.get(), offsetof(interop::RS64LightsCB, shadowParams) + sizeof(float), true);
+        }
+        else {
+            worker->commandList->setGraphicsDescriptorSet(framebuffer.rs64LightsSet->get(), 0);
+        }
+        worker->commandList->setVertexBuffers(0, nullptr, 0, nullptr);
+        worker->commandList->drawInstanced(3, 1, 0, 0);
     }
 
     void FramebufferRenderer::endFramebuffers(RenderWorker *worker, const DrawBuffers *drawBuffers, const OutputBuffers *outputBuffers, bool rtEnabled) {

@@ -844,6 +844,7 @@ namespace RT64 {
 
             const uint32_t differentBytesLimit = (fb->RAMBytes * DifferenceFractionNum) / DifferenceFractionDiv;
             const bool discardFb = canDiscard && (fb->modifiedBytes >= differentBytesLimit);
+            { static int s_pu = 0; if (((fb->addressStart == 0x656000u) || (fb->addressStart == 0x6AB000u)) && (++s_pu <= 300) && ((s_pu % 3) == 1)) { fprintf(stderr, "[probe-upload] fb=0x%06X %ux%u diffPx=%u modified=%u limit=%u discard=%d\n", fb->addressStart, fb->width, fb->height, differentPixels, fb->modifiedBytes, differentBytesLimit, (int)discardFb); fflush(stderr); } }
             if (discardFb) {
                 fbDiscards.emplace_back(fb->addressStart);
             }

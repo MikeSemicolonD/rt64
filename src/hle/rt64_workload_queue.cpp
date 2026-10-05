@@ -321,14 +321,16 @@ namespace RT64 {
             uploadProjections = true;
         }
 
-        const bool processTransforms = prevFrame.matched;
+        // Shadows need the world-vertex pass, which reads the inverse-transpose and previous transforms; unmatched frames upload the plain ones.
+        const bool rs64WorldPass = rs64lights::sceneCaptureEnabled(rs64lights::config()) && ext.device->getCapabilities().rayQuery;
+        const bool processTransforms = prevFrame.matched || rs64WorldPass;
         bool uploadTransforms = false;
         if (processTransforms) {
             TransformProcessor::ProcessParams transformParams;
             transformParams.worker = ext.workloadGraphicsWorker;
             transformParams.workloadQueue = this;
             transformParams.curFrame = &curFrame;
-            transformParams.prevFrame = &prevFrame;
+            transformParams.prevFrame = prevFrame.matched ? &prevFrame : nullptr;
             transformParams.curFrameWeight = curFrameWeight;
             transformParams.prevFrameWeight = prevFrameWeight;
             transformProcessor.process(transformParams);
@@ -389,7 +391,7 @@ namespace RT64 {
                 rspProcessor->process(rspParams);
             }
 
-            const bool processWorldVertices = prevFrame.matched;
+            const bool processWorldVertices = prevFrame.matched || rs64WorldPass;
             if (processWorldVertices) {
                 workload.resetWorldOutputBuffers();
 
@@ -642,6 +644,7 @@ namespace RT64 {
                     drawParams.postBlendNoise = workloadConfig.postBlendNoise;
                     drawParams.postBlendNoiseNegative = workloadConfig.postBlendNoiseNegative;
                     drawParams.maxGameCall = std::min(gameCallCountMax - gameCallCursor, fbPair.gameCallCount);
+                    drawParams.rs64Lights = true;
                     framebufferRenderer->addFramebuffer(drawParams);
                 }
                 
@@ -704,6 +707,7 @@ namespace RT64 {
             ext.workloadGraphicsWorker->commandList->begin();
             ext.workloadGraphicsWorker->commandList->resetQueryPool(queryPool.get(), 0, 2);
             ext.workloadGraphicsWorker->commandList->writeTimestamp(queryPool.get(), 0);
+            framebufferRenderer->rs64TimingBegin(ext.workloadGraphicsWorker);
             framebufferRenderer->endFramebuffers(ext.workloadGraphicsWorker, &workload.drawBuffers, &workload.outputBuffers, workloadConfig.raytracingEnabled);
             framebufferRenderer->recordSetup(ext.workloadGraphicsWorker, bufferUploaders, processRSP ? rspProcessor.get() : nullptr, processWorldVertices ? vertexProcessor.get() : nullptr, &workload.outputBuffers, workloadConfig.raytracingEnabled);
 
@@ -851,6 +855,7 @@ namespace RT64 {
             queryPool->queryResults();
             const uint64_t *frameTimestamps = queryPool->getResults();
             rendererGPUProfiler.log(double(frameTimestamps[1] - frameTimestamps[0]) / 1000000.0);
+            framebufferRenderer->rs64TimingReport();
 
             // Indicate to the texture cache it's safe to delete the textures if no locks are active.
             ext.textureCache->decrementLock();
