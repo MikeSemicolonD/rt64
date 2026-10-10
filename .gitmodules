@@ -45,4 +45,5 @@
 	url = https://github.com/rt64/re-spirv
 [submodule "src/contrib/plume"]
 	path = src/contrib/plume
-	url = https://github.com/renderbag/plume.git
+	url = https://github.com/MikeSemicolonD/plume.git
+	branch = MikesBranch
