@@ -8,7 +8,12 @@
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
+#include <filesystem>
 #include <string>
+#include <vector>
+
+#define STB_IMAGE_WRITE_IMPLEMENTATION
+#include "stb/stb_image_write.h"
 
 #include "common/rt64_thread.h"
 #include "rhi/rt64_render_hooks.h"
@@ -36,6 +41,86 @@ std::atomic<uint32_t> g_rs64_transition_gate_fb{ 0 };
 std::atomic<uint64_t> g_rs64_last_workload_id{ 0 };
 
 namespace RT64 {
+    // ROGUESQ_SCREENSHOT_EVERY=<seconds>: saves the game's color buffer to screenshots/shot_NNN.png, at most ROGUESQ_SCREENSHOT_MAX (default 20) per run.
+    struct RS64Screenshot {
+        std::unique_ptr<RenderBuffer> buffer;
+        uint64_t bufferSize = 0;
+        uint32_t width = 0;
+        uint32_t height = 0;
+        uint32_t rowWidth = 0;
+        bool rgba8 = true;
+        int taken = 0;
+        std::chrono::steady_clock::time_point last = std::chrono::steady_clock::now();
+    };
+
+    static RS64Screenshot rs64Screenshot;
+
+    static bool rs64QueueScreenshot(RenderDevice *device, RenderCommandList *commandList, const VIRenderer::RenderParams &params) {
+        static const double every = []() { const char *v = std::getenv("ROGUESQ_SCREENSHOT_EVERY"); return (v != nullptr) ? std::atof(v) : 0.0; }();
+        static const int maxShots = []() { const char *v = std::getenv("ROGUESQ_SCREENSHOT_MAX"); return (v != nullptr) ? std::max(std::atoi(v), 1) : 20; }();
+        RS64Screenshot &s = rs64Screenshot;
+        const bool rgba8 = (params.textureFormat == RenderFormat::R8G8B8A8_UNORM);
+        if ((every <= 0.0) || (s.taken >= maxShots) || (!rgba8 && (params.textureFormat != RenderFormat::R16G16B16A16_UNORM))) {
+            return false;
+        }
+
+        const auto now = std::chrono::steady_clock::now();
+        if (std::chrono::duration<double>(now - s.last).count() < every) {
+            return false;
+        }
+
+        s.last = now;
+        s.rgba8 = rgba8;
+        s.width = params.textureWidth;
+        s.height = params.textureHeight;
+        s.rowWidth = (s.width + 63) & ~63U;
+        const uint64_t size = uint64_t(s.rowWidth) * s.height * (rgba8 ? 4 : 8);
+        if (s.bufferSize < size) {
+            s.buffer = device->createBuffer(RenderBufferDesc::ReadbackBuffer(size));
+            s.bufferSize = size;
+        }
+
+        commandList->barriers(RenderBarrierStage::COPY, RenderTextureBarrier(params.texture, RenderTextureLayout::COPY_SOURCE));
+        commandList->copyTextureRegion(RenderTextureCopyLocation::PlacedFootprint(s.buffer.get(), params.textureFormat, s.width, s.height, 1, s.rowWidth), RenderTextureCopyLocation::Subresource(params.texture));
+        commandList->barriers(RenderBarrierStage::GRAPHICS, RenderTextureBarrier(params.texture, RenderTextureLayout::SHADER_READ));
+        return true;
+    }
+
+    static void rs64WriteScreenshot() {
+        RS64Screenshot &s = rs64Screenshot;
+        const uint8_t *src = static_cast<const uint8_t *>(s.buffer->map());
+        std::vector<uint8_t> rgba(size_t(s.width) * s.height * 4);
+        for (uint32_t y = 0; y < s.height; y++) {
+            for (uint32_t x = 0; x < s.width; x++) {
+                uint8_t *dst = &rgba[(size_t(y) * s.width + x) * 4];
+                if (s.rgba8) {
+                    const uint8_t *p = &src[(size_t(y) * s.rowWidth + x) * 4];
+                    dst[0] = p[0];
+                    dst[1] = p[1];
+                    dst[2] = p[2];
+                }
+                else {
+                    // High byte of each little-endian 16-bit channel.
+                    const uint8_t *p = &src[(size_t(y) * s.rowWidth + x) * 8];
+                    dst[0] = p[1];
+                    dst[1] = p[3];
+                    dst[2] = p[5];
+                }
+
+                dst[3] = 255;
+            }
+        }
+
+        s.buffer->unmap();
+        std::error_code ec;
+        std::filesystem::create_directories("screenshots", ec);
+        char path[64];
+        std::snprintf(path, sizeof(path), "screenshots/shot_%03d.png", s.taken);
+        stbi_write_png(path, int(s.width), int(s.height), 4, rgba.data(), int(s.width) * 4);
+        s.taken++;
+        std::fprintf(stderr, "[screenshot] %s (%ux%u)\n", path, s.width, s.height);
+    }
+
     // PresentQueue
 
     PresentQueue::PresentQueue() {
@@ -137,6 +222,7 @@ namespace RT64 {
         bool removeBlackBorders;
         UserConfiguration::RefreshRate refreshRate;
         UserConfiguration::Filtering filtering;
+        bool fxaa;
         uint32_t viOriginalRate;
         uint32_t targetRate;
         {
@@ -146,6 +232,7 @@ namespace RT64 {
             removeBlackBorders = ext.sharedResources->enhancementConfig.presentation.removeBlackBorders;
             refreshRate = ext.sharedResources->userConfig.refreshRate;
             filtering = ext.sharedResources->userConfig.filtering;
+            fxaa = ext.sharedResources->userConfig.fxaa;
             viOriginalRate = ext.sharedResources->viOriginalRate;
             targetRate = ext.sharedResources->targetRate;
         }
@@ -691,7 +778,27 @@ namespace RT64 {
                     }
                 }
                 
-                commandList->setFramebuffer(swapChainFramebuffer);
+                const bool useFxaa = fxaa && (renderParams.texture != nullptr);
+                if (useFxaa) {
+                    const uint32_t width = ext.swapChain->getWidth();
+                    const uint32_t height = ext.swapChain->getHeight();
+                    if ((fxaaTexture == nullptr) || (fxaaWidth != width) || (fxaaHeight != height)) {
+                        fxaaFramebuffer.reset();
+                        fxaaTexture = ext.device->createTexture(RenderTextureDesc::ColorTarget(width, height, SwapChainFormat));
+                        fxaaTexture->setName("FXAA Input");
+                        const RenderTexture *fxaaColorTarget = fxaaTexture.get();
+                        fxaaFramebuffer = ext.device->createFramebuffer(RenderFramebufferDesc(&fxaaColorTarget, 1));
+                        fxaaWidth = width;
+                        fxaaHeight = height;
+                    }
+
+                    commandList->barriers(RenderBarrierStage::GRAPHICS, RenderTextureBarrier(fxaaTexture.get(), RenderTextureLayout::COLOR_WRITE));
+                    commandList->setFramebuffer(fxaaFramebuffer.get());
+                }
+                else {
+                    commandList->setFramebuffer(swapChainFramebuffer);
+                }
+
                 commandList->clearColor();
 
                 static const bool s_pq_log3 = [](){
@@ -710,9 +817,30 @@ namespace RT64 {
                         std::fflush(stderr);
                     }
                 }
+                bool screenshotQueued = false;
                 if (renderParams.texture != nullptr) {
                     commandList->barriers(RenderBarrierStage::GRAPHICS, RenderTextureBarrier(renderParams.texture, RenderTextureLayout::SHADER_READ));
                     viRenderer->render(renderParams);
+                }
+
+                if (useFxaa) {
+                    if (fxaaDescriptorSet == nullptr) {
+                        fxaaDescriptorSet = std::make_unique<VideoInterfaceDescriptorSet>(ext.shaderLibrary->samplerLibrary.linear.clampClamp.get(), ext.device);
+                    }
+
+                    fxaaDescriptorSet->setTexture(fxaaDescriptorSet->gInput, fxaaTexture.get(), RenderTextureLayout::SHADER_READ);
+                    const float fxaaConstants[4] = { 1.0f / float(fxaaWidth), 1.0f / float(fxaaHeight), 0.0f, 0.0f };
+                    const ShaderRecord &fxaaShader = ext.shaderLibrary->fxaa;
+                    commandList->barriers(RenderBarrierStage::GRAPHICS, RenderTextureBarrier(fxaaTexture.get(), RenderTextureLayout::SHADER_READ));
+                    commandList->setFramebuffer(swapChainFramebuffer);
+                    commandList->setViewports(RenderViewport(0.0f, 0.0f, float(fxaaWidth), float(fxaaHeight)));
+                    commandList->setScissors(RenderRect(0, 0, int32_t(fxaaWidth), int32_t(fxaaHeight)));
+                    commandList->setPipeline(fxaaShader.pipeline.get());
+                    commandList->setGraphicsPipelineLayout(fxaaShader.pipelineLayout.get());
+                    commandList->setGraphicsDescriptorSet(fxaaDescriptorSet->get(), 0);
+                    commandList->setGraphicsPushConstants(0, fxaaConstants);
+                    commandList->setVertexBuffers(0, nullptr, 0, nullptr);
+                    commandList->drawInstanced(3, 1, 0, 0);
                 }
 
                 RenderHookDraw *drawHook = GetRenderHookDraw();
@@ -725,7 +853,12 @@ namespace RT64 {
                     if (inspector != nullptr) {
                         inspector->draw(commandList);
                     }
-                    
+
+                    // After every draw: the copy ends the render pass, and ImGui records into it directly.
+                    if (renderParams.texture != nullptr) {
+                        screenshotQueued = rs64QueueScreenshot(ext.device, commandList, renderParams);
+                    }
+
                     commandList->barriers(RenderBarrierStage::NONE, RenderTextureBarrier(swapChainTexture, RenderTextureLayout::PRESENT));
                     commandList->end();
                     const RenderCommandList *commandList = ext.presentGraphicsWorker->commandList.get();
@@ -733,6 +866,10 @@ namespace RT64 {
                     RenderCommandSemaphore *signalSemaphore = drawSemaphores[swapChainIndex].get();
                     ext.presentGraphicsWorker->commandQueue->executeCommandLists(&commandList, 1, &waitSemaphore, 1, &signalSemaphore, 1, ext.presentGraphicsWorker->commandFence.get());
                     ext.presentGraphicsWorker->wait();
+                }
+
+                if (screenshotQueued) {
+                    rs64WriteScreenshot();
                 }
             }
 
@@ -894,8 +1031,10 @@ namespace RT64 {
                     ext.presentGraphicsWorker->commandList->end();
                     ext.presentGraphicsWorker->execute();
                     ext.presentGraphicsWorker->wait();
-                    swapChainValid = ext.swapChain->resize();
+
+                    // D3D11 render target views keep the back buffers alive, so they must go before the resize.
                     swapChainFramebuffers.clear();
+                    swapChainValid = ext.swapChain->resize();
 
                     if (swapChainValid) {
                         ext.sharedResources->setSwapChainSize(ext.swapChain->getWidth(), ext.swapChain->getHeight());

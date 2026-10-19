@@ -844,7 +844,6 @@ namespace RT64 {
 
             const uint32_t differentBytesLimit = (fb->RAMBytes * DifferenceFractionNum) / DifferenceFractionDiv;
             const bool discardFb = canDiscard && (fb->modifiedBytes >= differentBytesLimit);
-            { static int s_pu = 0; if (((fb->addressStart == 0x656000u) || (fb->addressStart == 0x6AB000u)) && (++s_pu <= 300) && ((s_pu % 3) == 1)) { fprintf(stderr, "[probe-upload] fb=0x%06X %ux%u diffPx=%u modified=%u limit=%u discard=%d\n", fb->addressStart, fb->width, fb->height, differentPixels, fb->modifiedBytes, differentBytesLimit, (int)discardFb); fflush(stderr); } }
             if (discardFb) {
                 fbDiscards.emplace_back(fb->addressStart);
             }
@@ -895,6 +894,26 @@ namespace RT64 {
 
     void FramebufferManager::resetOperations() {
         descriptorReinterpretSetsCount = 0;
+    }
+
+    // D3D11 can't bind color and depth targets of different sizes together, so each pair grows until they match.
+    void FramebufferManager::matchTargetSizes(RenderWorker *renderWorker, const std::vector<std::pair<RenderTarget *, RenderTarget *>> &colorDepthPairs, std::unordered_set<RenderTarget *> &resizedTargets) {
+        bool resizedAny = true;
+        while (resizedAny) {
+            resizedAny = false;
+            for (const auto &colorDepthPair : colorDepthPairs) {
+                for (RenderTarget *target : { colorDepthPair.first, colorDepthPair.second }) {
+                    const RenderTarget *other = (target == colorDepthPair.first) ? colorDepthPair.second : colorDepthPair.first;
+                    if (target->resize(renderWorker, other->width, other->height)) {
+                        resizedTargets.emplace(target);
+                        resizedAny = true;
+                        if (Framebuffer *resizedFb = find(target->addressForName)) {
+                            resizedFb->readHeight = 0;
+                        }
+                    }
+                }
+            }
+        }
     }
 
     void FramebufferManager::setupOperations(RenderWorker *renderWorker, const std::vector<FramebufferOperation> &operations, hlslpp::float2 resolutionScale, RenderTargetManager &targetManager, std::unordered_set<RenderTarget *> *resizedTargets) {

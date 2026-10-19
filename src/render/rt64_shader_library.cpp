@@ -56,6 +56,7 @@
 #include "shaders/VideoInterfacePSRegular.hlsl.spirv.h"
 #include "shaders/VideoInterfacePSPixel.hlsl.spirv.h"
 #include "shaders/FullScreenVS.hlsl.spirv.h"
+#include "shaders/FxaaPS.hlsl.spirv.h"
 #include "shaders/Im3DVS.hlsl.spirv.h"
 #include "shaders/ComposePS.hlsl.spirv.h"
 #include "shaders/DebugPS.hlsl.spirv.h"
@@ -109,6 +110,7 @@
 #   include "shaders/VideoInterfacePSRegular.hlsl.dxil.h"
 #   include "shaders/VideoInterfacePSPixel.hlsl.dxil.h"
 #   include "shaders/FullScreenVS.hlsl.dxil.h"
+#   include "shaders/FxaaPS.hlsl.dxil.h"
 #   include "shaders/Im3DVS.hlsl.dxil.h"
 #   include "shaders/ComposePS.hlsl.dxil.h"
 #   include "shaders/DebugPS.hlsl.dxil.h"
@@ -155,6 +157,7 @@
 #   include "shaders/VideoInterfacePSRegular.hlsl.metal.h"
 #   include "shaders/VideoInterfacePSPixel.hlsl.metal.h"
 #   include "shaders/FullScreenVS.hlsl.metal.h"
+#   include "shaders/FxaaPS.hlsl.metal.h"
 #   include "shaders/Im3DVS.hlsl.metal.h"
 #   include "shaders/ComposePS.hlsl.metal.h"
 #   include "shaders/DebugPS.hlsl.metal.h"
@@ -635,6 +638,18 @@ namespace RT64 {
             pipelineDesc.pixelShader = pixelShader.get();
             pipelineDesc.pipelineLayout = videoInterfacePixel.pipelineLayout.get();
             videoInterfacePixel.pipeline = device->createGraphicsPipeline(pipelineDesc);
+
+            // FXAA reads the presented image back at window size, so it samples with clamped edges.
+            std::unique_ptr<RenderShader> fxaaShader = device->createShader(CREATE_SHADER_INPUTS(FxaaPSBlobDXIL, FxaaPSBlobSPIRV, FxaaPSBlobMSL, "PSMain", shaderFormat));
+            VideoInterfaceDescriptorSet fxaaDescriptorSet(samplerLibrary.linear.clampClamp.get());
+            layoutBuilder.begin();
+            layoutBuilder.addPushConstant(0, 0, sizeof(float) * 4, RenderShaderStageFlag::PIXEL);
+            layoutBuilder.addDescriptorSet(fxaaDescriptorSet);
+            layoutBuilder.end();
+            fxaa.pipelineLayout = layoutBuilder.create(device);
+            pipelineDesc.pixelShader = fxaaShader.get();
+            pipelineDesc.pipelineLayout = fxaa.pipelineLayout.get();
+            fxaa.pipeline = device->createGraphicsPipeline(pipelineDesc);
         }
     }
 

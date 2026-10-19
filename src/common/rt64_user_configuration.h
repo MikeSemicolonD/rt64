@@ -16,6 +16,7 @@ namespace RT64 {
             D3D12,
             Vulkan,
             Metal,
+            D3D11,
             Automatic,
             OptionCount
         };
@@ -96,6 +97,7 @@ namespace RT64 {
         double extAspectTarget;
         Upscale2D upscale2D;
         bool threePointFiltering;
+        bool fxaa;
         RefreshRate refreshRate;
         int refreshRateTarget;
         InternalColorFormat internalColorFormat;
@@ -118,6 +120,7 @@ namespace RT64 {
         { UserConfiguration::GraphicsAPI::D3D12, "D3D12" },
         { UserConfiguration::GraphicsAPI::Vulkan, "Vulkan" },
         { UserConfiguration::GraphicsAPI::Metal, "Metal" },
+        { UserConfiguration::GraphicsAPI::D3D11, "D3D11" },
         { UserConfiguration::GraphicsAPI::Automatic, "Automatic" },
     });
 

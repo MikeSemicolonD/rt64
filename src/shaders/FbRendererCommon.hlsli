@@ -39,11 +39,30 @@ SamplerState gNearestClampWrapSampler : register(s22, space0);
 SamplerState gNearestClampMirrorSampler : register(s23, space0);
 SamplerState gNearestClampClampSampler : register(s24, space0);
 
+#ifdef RT64_TEXTURE_SLOTS
+// Sets 1 and 2 - the draw's tiles 0-7 (SM 5.0 can't index resource arrays at run time; see TextureSampler.hlsli).
+// Vulkan builds use 4 TMEM slots so 8 + 4 + 3 other textures fit a 16-texture stage (Raspberry Pi V3D).
+#ifndef RT64_TMEM_SLOTS
+#define RT64_TMEM_SLOTS 8
+#endif
+Texture2D<float4> gTextures[8] : register(t0, space1);
+Texture1D<uint> gTMEM[RT64_TMEM_SLOTS] : register(t0, space2);
+
+// RasterPS sets the tile slot before sampling; each switch folds to one case once the slot is a constant.
+static uint gTextureSlot = 0;
+#define RT64_SLOT_SWITCH(CASE) switch (gTextureSlot) { case 0: CASE(0) case 1: CASE(1) case 2: CASE(2) case 3: CASE(3) case 4: CASE(4) case 5: CASE(5) case 6: CASE(6) default: CASE(7) }
+#if RT64_TMEM_SLOTS == 4
+#define RT64_TMEM_SLOT_SWITCH(CASE) switch (gTextureSlot) { case 0: CASE(0) case 1: CASE(1) case 2: CASE(2) default: CASE(3) }
+#else
+#define RT64_TMEM_SLOT_SWITCH RT64_SLOT_SWITCH
+#endif
+#else
 // Set 1 - RGBA32 texture cache.
 Texture2D<float4> gTextures[8192] : register(t0, space1);
 
 // Set 2 - TMEM texture cache.
 Texture1D<uint> gTMEM[8192] : register(t0, space2);
+#endif
 
 // Set 3 - Framebuffer.
 ConstantBuffer<FramebufferParams> FbParams : register(b0, space3);

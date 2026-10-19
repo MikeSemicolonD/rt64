@@ -30,6 +30,7 @@ namespace RT64 {
         uint32_t height;
         std::unique_ptr<RenderTexture> pixelTexture;
         std::unique_ptr<RenderTexture> booleanTexture;
+        std::unique_ptr<RenderTexture> unusedOutputTexture;
         std::unique_ptr<FramebufferDrawChangesDescriptorSet> drawDescSet;
         std::unique_ptr<FramebufferReadChangesDescriptorChangesSet> readChangesSet;
         bool used;

@@ -211,6 +211,7 @@ namespace RT64 {
         void resetOperations();
 
         void setupOperations(RenderWorker *renderWorker, const std::vector<FramebufferOperation> &operations, hlslpp::float2 resolutionScale, RenderTargetManager &targetManager, std::unordered_set<RenderTarget *> *resizedTargets);
+        void matchTargetSizes(RenderWorker *renderWorker, const std::vector<std::pair<RenderTarget *, RenderTarget *>> &colorDepthPairs, std::unordered_set<RenderTarget *> &resizedTargets);
 
         void recordOperations(RenderWorker *renderWorker, const FramebufferChangePool *fbChangePool, const FramebufferStorage *fbStorage, const ShaderLibrary *shaderLibrary, TextureCache *textureCache,
             const std::vector<FramebufferOperation> &operations, RenderTargetManager &targetManager, hlslpp::float2 resolutionScale, uint32_t maxFbPairIndex,

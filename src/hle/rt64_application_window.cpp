@@ -352,7 +352,7 @@ namespace RT64 {
         int32_t newWindowLeft = INT32_MAX;
         int32_t newWindowTop = INT32_MAX;
 
-#   if defined(_WIN64)
+#   if defined(_WIN32)
         RECT rect;
         GetWindowRect(windowHandle, &rect);
         newWindowLeft = rect.left;

@@ -76,6 +76,7 @@ namespace RT64 {
         ShaderRecord videoInterfaceLinear;
         ShaderRecord videoInterfaceNearest;
         ShaderRecord videoInterfacePixel;
+        ShaderRecord fxaa;
 
         ShaderLibrary(bool usesHDR, bool usesHardwareResolve);
         ~ShaderLibrary();

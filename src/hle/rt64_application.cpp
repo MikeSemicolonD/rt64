@@ -21,6 +21,7 @@
 namespace plume {
     // External functions to create the backends.
     extern std::unique_ptr<RenderInterface> CreateD3D12Interface();
+    extern std::unique_ptr<RenderInterface> CreateD3D11Interface();
     extern std::unique_ptr<RenderInterface> CreateMetalInterface();
 #ifdef RT64_SDL_WINDOW_VULKAN
     extern std::unique_ptr<RenderInterface> CreateVulkanInterface(RenderWindow renderWindow);
@@ -87,7 +88,7 @@ namespace RT64 {
     }
 
     Application::SetupResult Application::setup(uint32_t threadId) {
-#   ifdef _WIN64
+#   ifdef _WIN32
         if (!DynamicLibraries::load()) {
             fprintf(stderr, "Failed to load dynamic libraries. Make sure the dependencies are next to the Plugin's DLL.\n");
             return SetupResult::Success;
@@ -132,15 +133,19 @@ namespace RT64 {
         // Resolve the graphics API option in case it's automatic.
         chosenGraphicsAPI = UserConfiguration::resolveGraphicsAPI(userConfig.graphicsAPI);
 
-#   ifdef _WIN64
-        // Windows can try falling back to the other API option in case of failure.
+#   ifdef _WIN32
+        // Windows can try falling back to the other API option in case of failure, and then to D3D11 for older GPUs.
+#       ifdef PLUME_D3D11_ENABLED
+        const uint32_t CreationAttempts = (userConfig.graphicsAPI == UserConfiguration::GraphicsAPI::Automatic) ? 3 : 1;
+#       else
         const uint32_t CreationAttempts = (userConfig.graphicsAPI == UserConfiguration::GraphicsAPI::Automatic) ? 2 : 1;
+#       endif
 #   else
         const uint32_t CreationAttempts = 1;
 #   endif
 
         for (uint32_t creationAttempt = 0; (creationAttempt < CreationAttempts) && (device == nullptr); creationAttempt++) {
-#       ifdef _WIN64
+#       ifdef _WIN32
             if (creationAttempt == 1) {
                 if (chosenGraphicsAPI == UserConfiguration::GraphicsAPI::D3D12) {
                     fprintf(stderr, "Unable to initialize a D3D12 device. Falling back to Vulkan.\n");
@@ -153,16 +158,29 @@ namespace RT64 {
 
                 renderInterface.reset();
             }
+            else if (creationAttempt == 2) {
+                fprintf(stderr, "Unable to initialize a D3D12 or Vulkan device. Falling back to D3D11.\n");
+                chosenGraphicsAPI = UserConfiguration::GraphicsAPI::D3D11;
+                renderInterface.reset();
+            }
 #       endif
 
             // Create a render interface with the preferred backend.
             switch (chosenGraphicsAPI) {
             case UserConfiguration::GraphicsAPI::D3D12:
-#       ifdef _WIN64
+#       ifdef _WIN32
                 renderInterface = CreateD3D12Interface();
                 break;
 #       else
                 fprintf(stderr, "D3D12 is not supported on this platform. Please select a different Graphics API.\n");
+                return SetupResult::InvalidGraphicsAPI;
+#       endif
+            case UserConfiguration::GraphicsAPI::D3D11:
+#       ifdef PLUME_D3D11_ENABLED
+                renderInterface = CreateD3D11Interface();
+                break;
+#       else
+                fprintf(stderr, "D3D11 is not supported on this platform. Please select a different Graphics API.\n");
                 return SetupResult::InvalidGraphicsAPI;
 #       endif
             case UserConfiguration::GraphicsAPI::Metal:
@@ -202,6 +220,14 @@ namespace RT64 {
         fprintf(stdout, "Device Name: %s\n", deviceDescription.name.c_str());
         fprintf(stdout, "Device Vendor: 0x%X\n", static_cast<unsigned>(deviceDescription.vendor));
         fprintf(stdout, "Driver Version: 0x%" PRIx64 "\n", deviceDescription.driverVersion);
+
+        // Without the ubershader draws wait for their specialized shaders; texture slots imply it, ROGUESQ_UBERSHADER=0 forces it for testing.
+        textureSlots = UsesTextureSlots(chosenGraphicsAPI == UserConfiguration::GraphicsAPI::D3D11, device->getCapabilities());
+        const char *ubershaderSetting = std::getenv("ROGUESQ_UBERSHADER");
+        skipUbershader = textureSlots || ((ubershaderSetting != nullptr) && (ubershaderSetting[0] == '0'));
+        if (skipUbershader) {
+            fprintf(stderr, "[RT64] ubershader off%s: draws wait for their specialized shaders\n", textureSlots ? " (texture slots)" : "");
+        }
 
         // Detect if the application should use hardware resolve or not.
         bool usesHardwareResolve = (userConfig.hardwareResolve != UserConfiguration::HardwareResolve::Disabled);
@@ -353,7 +379,7 @@ namespace RT64 {
         const uint32_t rasterShaderThreads = std::max(threadsAvailable / 2U, 1U);
         const uint32_t ubershaderThreads = uint32_t(std::max(int(threadsAvailable) - 2, 1));
         rasterShaderCache = std::make_unique<RasterShaderCache>(rasterShaderThreads, ubershaderThreads);
-        rasterShaderCache->setup(device.get(), renderInterface->getCapabilities().shaderFormat, shaderLibrary.get(), multisampling);
+        rasterShaderCache->setup(device.get(), renderInterface->getCapabilities().shaderFormat, shaderLibrary.get(), multisampling, textureSlots, skipUbershader, appConfig.shaderComboList);
 
 #   if RT_ENABLED
         if (device->getCapabilities().raytracing) {
@@ -540,7 +566,7 @@ namespace RT64 {
         shaderLibrary->setupMultisamplingShaders(renderInterface.get(), device.get(), multisampling);
 
         // Set up shader cache again with new ubershaders.
-        rasterShaderCache->setup(device.get(), renderInterface->getCapabilities().shaderFormat, shaderLibrary.get(), multisampling);
+        rasterShaderCache->setup(device.get(), renderInterface->getCapabilities().shaderFormat, shaderLibrary.get(), multisampling, textureSlots, skipUbershader, appConfig.shaderComboList);
 
         // Destroy the render target managers for both the state and the queues and configure them with the new multisampling.
         // This also implies the destruction of the contents of the framebuffer managers too.
@@ -626,10 +652,8 @@ namespace RT64 {
     }
 
     void Application::ensureHostInspector() {
-        // Create the inspector (ImGui context + backend) without developer mode
-        // so a registered host ImGui hook has a frame to draw into. In developer
-        // mode the F1 shortcut manages the inspector instead.
-        if (userConfig.developerMode || GetRenderHookImgui() == nullptr) {
+        // Create the inspector (ImGui context + backend) so a registered host ImGui hook has a frame to draw into, with or without the F1 developer UI.
+        if (GetRenderHookImgui() == nullptr) {
             return;
         }
         if (presentQueue == nullptr) {
@@ -649,16 +673,22 @@ namespace RT64 {
         case DeveloperShortcut::Inspector: {
             if (userConfig.developerMode) {
                 const std::lock_guard lock(presentQueue->inspectorMutex);
-                if (presentQueue->inspector == nullptr) {
-                    presentQueue->inspector = std::make_unique<Inspector>(device.get(), swapChain.get(), chosenGraphicsAPI, appWindow->sdlWindow);
-                    if (!userPaths.isEmpty()) {
-                        presentQueue->inspector->setIniPath(userPaths.imguiPath);
+                if (!inspectorVisible) {
+                    if (presentQueue->inspector == nullptr) {
+                        presentQueue->inspector = std::make_unique<Inspector>(device.get(), swapChain.get(), chosenGraphicsAPI, appWindow->sdlWindow);
+                        if (!userPaths.isEmpty()) {
+                            presentQueue->inspector->setIniPath(userPaths.imguiPath);
+                        }
                     }
 
+                    inspectorVisible = true;
                     freeCamClearQueued = true;
                 }
-                else if (presentQueue->inspector != nullptr) {
-                    presentQueue->inspector.reset(nullptr);
+                else {
+                    inspectorVisible = false;
+                    if (GetRenderHookImgui() == nullptr) {
+                        presentQueue->inspector.reset(nullptr);
+                    }
                 }
             }
             else {

@@ -2386,6 +2386,16 @@ namespace RT64 {
                     // Game combine FC11A7FF = color TEXEL0*PRIM, alpha TEXEL1*PRIM_a: TEXEL0 is the light
                     // RGBA16 puff, TEXEL1 the I8 shape mask, PRIM = record w1 the per-sprite tint + fade.
                     state->rdp->setPrimColor(0, 0xFF, w1);
+                    // The ucode sets the fog register per sprite (w2 RGB, alpha = the centre's fog) and leaves it set; the glint faces drawn after it blend fog by FOG
+                    // alpha (otherL C410...), so without this they take the level's fog colour at full alpha. ROGUESQ_F5_SPRITE_FOGCOLOR=0 disables for A/B.
+                    static const bool s_spriteFog = env_on("ROGUESQ_F5_SPRITE_FOGCOLOR", true);
+                    if (s_spriteFog && (state->rsp->geometryModeStack[state->rsp->geometryModeStackSize - 1] & G_FOG)) {
+                        const float cz = (float)c.x * (float)mv[0][2] + (float)c.y * (float)mv[1][2] + (float)c.z * (float)mv[2][2] + (float)mv[3][2];
+                        const float cw = (float)c.x * (float)mv[0][3] + (float)c.y * (float)mv[1][3] + (float)c.z * (float)mv[2][3] + (float)mv[3][3];
+                        const float fog = (cw > 0.0f) ? ((std::max(cz, 0.0f) / cw) * state->rsp->fog.mul + state->rsp->fog.offset) : 255.0f;
+                        const uint32_t fogA = (uint32_t)std::clamp(fog, 0.0f, 255.0f);
+                        state->rdp->setFogColor(((*dl)[1].w0 & 0xFFFFFF00u) | fogA);
+                    }
                     // The game blender runs a FOG cycle first (otherL C4104A54); its color tracks the
                     // scene and washes the sprite. Use the plain non-fog 2-cycle alpha-over the explosion
                     // geometry uses so the sprite keeps its own color. Z_CMP on / Z_UPD off (0x10 set,

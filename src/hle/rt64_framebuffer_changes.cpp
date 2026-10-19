@@ -65,7 +65,8 @@ namespace RT64 {
         RenderFormat pixelFormat;
         switch (type) {
         case FramebufferChange::Type::Color:
-            pixelFormat = RenderTarget::colorBufferFormat(usesHDR);
+            // RDRAM holds at most 8 bits per channel, and FbReadAny*CS declare this output as rgba8 (V3D mis-writes format-less storage images).
+            pixelFormat = RenderFormat::R8G8B8A8_UNORM;
             break;
         case FramebufferChange::Type::Depth:
             pixelFormat = RenderFormat::R32_FLOAT;
@@ -82,8 +83,12 @@ namespace RT64 {
         changes.drawDescSet->setTexture(changes.drawDescSet->gDepth, changes.pixelTexture.get(), RenderTextureLayout::SHADER_READ);
         changes.drawDescSet->setTexture(changes.drawDescSet->gBoolean, changes.booleanTexture.get(), RenderTextureLayout::SHADER_READ);
         changes.readChangesSet = std::make_unique<FramebufferReadChangesDescriptorChangesSet>(renderWorker->device);
-        changes.readChangesSet->setTexture(changes.readChangesSet->gOutputChangeColor, changes.pixelTexture.get(), RenderTextureLayout::GENERAL);
-        changes.readChangesSet->setTexture(changes.readChangesSet->gOutputChangeDepth, changes.pixelTexture.get(), RenderTextureLayout::GENERAL);
+        // D3D11 can't bind one texture to two UAV slots, so the output this type never writes gets a 1x1 stand-in.
+        const bool depthType = (type == FramebufferChange::Type::Depth);
+        const RenderFormat unusedFormat = depthType ? RenderFormat::R8G8B8A8_UNORM : RenderFormat::R32_FLOAT;
+        changes.unusedOutputTexture = renderWorker->device->createTexture(RenderTextureDesc::Texture2D(1, 1, 1, unusedFormat, RenderTextureFlag::STORAGE | RenderTextureFlag::UNORDERED_ACCESS));
+        changes.readChangesSet->setTexture(changes.readChangesSet->gOutputChangeColor, depthType ? changes.unusedOutputTexture.get() : changes.pixelTexture.get(), RenderTextureLayout::GENERAL);
+        changes.readChangesSet->setTexture(changes.readChangesSet->gOutputChangeDepth, depthType ? changes.pixelTexture.get() : changes.unusedOutputTexture.get(), RenderTextureLayout::GENERAL);
         changes.readChangesSet->setTexture(changes.readChangesSet->gOutputChangeBoolean, changes.booleanTexture.get(), RenderTextureLayout::GENERAL);
 
         return changes;

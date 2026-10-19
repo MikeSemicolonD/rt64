@@ -136,6 +136,9 @@ LIBRARY_EXPORT bool RasterPS(const RenderParams rp, float4 vertexPosition, float
         
         const GPUTile gpuTile = GPUTiles[globalTileIndex];
         const float2 textureUV = gpuTileFlagHighRes(gpuTile.flags) ? vertexUV : lowResUV;
+#ifdef RT64_TEXTURE_SLOTS
+        gTextureSlot = tileIndex0;
+#endif
         texVal0 = sampleTexture(otherMode, rp.flags, textureUV, ddx(vertexUV), ddy(vertexUV), rdpTile, gpuTile, false);
     }
     
@@ -152,6 +155,9 @@ LIBRARY_EXPORT bool RasterPS(const RenderParams rp, float4 vertexPosition, float
         const GPUTile gpuTile = GPUTiles[globalTileIndex];
         const float2 textureUV = gpuTileFlagHighRes(gpuTile.flags) ? vertexUV : lowResUV;
         const uint nativeSampler = renderFlagNativeSampler1(rp.flags);
+#ifdef RT64_TEXTURE_SLOTS
+        gTextureSlot = oneCycleHardwareBug ? tileIndex0 : tileIndex1;
+#endif
         texVal1 = sampleTexture(otherMode, rp.flags, textureUV, ddx(vertexUV), ddy(vertexUV), rdpTile, gpuTile, oneCycleHardwareBug);
     }
     

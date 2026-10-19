@@ -4,6 +4,10 @@
 
 #include "rt64_workload_queue.h"
 
+#include <chrono>
+#include <cstdio>
+#include <cstdlib>
+
 #include "common/rt64_thread.h"
 
 #include "rt64_present_queue.h"
@@ -187,6 +191,8 @@ namespace RT64 {
         // Compute the resolution scaling to be used for the frame.
         float resolutionMultiplier;
         const auto resolutionMode = ext.sharedResources->userConfig.resolution;
+        // SSAA downsamples with a compute pass, which feature level 10 devices don't have.
+        const int ssaaMultiplier = ext.device->getCapabilities().computeShaders ? std::max(ext.sharedResources->userConfig.downsampleMultiplier, 1) : 1;
         switch (resolutionMode) {
         case UserConfiguration::Resolution::WindowIntegerScale:
             if (ext.sharedResources->swapChainHeight > 0) {
@@ -196,6 +202,8 @@ namespace RT64 {
                 resolutionMultiplier = 1.0f;
             }
 
+            // SSAA renders at the window's scale times the multiplier and downsamples to the window; without this it downsampled below it.
+            resolutionMultiplier *= float(ssaaMultiplier);
             break;
         case UserConfiguration::Resolution::Manual:
             resolutionMultiplier = float(ext.sharedResources->userConfig.resolutionMultiplier);
@@ -211,7 +219,7 @@ namespace RT64 {
         // Build the resolution scale vector from the configuration.
         workloadConfig.aspectRatioScale = workloadConfig.aspectRatioTarget / workloadConfig.aspectRatioSource;
         workloadConfig.resolutionScale = { resolutionMultiplier * workloadConfig.aspectRatioScale, resolutionMultiplier };
-        workloadConfig.downsampleMultiplier = ext.sharedResources->userConfig.downsampleMultiplier;
+        workloadConfig.downsampleMultiplier = ssaaMultiplier;
         ext.sharedResources->resolutionScale = workloadConfig.resolutionScale;
 
         // Find the target refresh rate from the configuration.
@@ -391,7 +399,8 @@ namespace RT64 {
                 rspProcessor->process(rspParams);
             }
 
-            const bool processWorldVertices = prevFrame.matched || rs64WorldPass;
+            // RSPWorldCS has no CPU path yet, so devices without compute skip world-space vertices (interpolation and ray-traced lighting).
+            const bool processWorldVertices = (prevFrame.matched || rs64WorldPass) && ext.device->getCapabilities().computeShaders;
             if (processWorldVertices) {
                 workload.resetWorldOutputBuffers();
 
@@ -585,6 +594,10 @@ namespace RT64 {
                 }
             }
 
+            if (ext.createdGraphicsAPI == UserConfiguration::GraphicsAPI::D3D11) {
+                fbManager.matchTargetSizes(ext.workloadGraphicsWorker, colorDepthPairs, resizedTargets);
+            }
+
             for (RenderTarget *renderTarget : resizedTargets) {
                 renderFramebufferManager->destroyAllWithRenderTarget(renderTarget);
             }
@@ -658,6 +671,7 @@ namespace RT64 {
                 gpuTileRange.second = workload.drawData.gpuTiles.size();
                 framebufferRenderer->createGPUTiles(workload.drawData.callTiles.data(), uint32_t(workload.drawData.gpuTiles.size()),
                     workload.drawData.gpuTiles.data(), &fbManager, ext.textureCache, workload.submissionFrame);
+                framebufferRenderer->slotGPUTiles = workload.drawData.gpuTiles.data();
 
                 // Upload the GPU tiles.
                 ext.workloadTilesUploader->submit(ext.workloadGraphicsWorker, {
@@ -854,8 +868,26 @@ namespace RT64 {
             // Update the GPU profiler with the results from the timestamps of the frame.
             queryPool->queryResults();
             const uint64_t *frameTimestamps = queryPool->getResults();
-            rendererGPUProfiler.log(double(frameTimestamps[1] - frameTimestamps[0]) / 1000000.0);
+            const double workloadGpuMs = double(frameTimestamps[1] - frameTimestamps[0]) / 1000000.0;
+            rendererGPUProfiler.log(workloadGpuMs);
             framebufferRenderer->rs64TimingReport();
+
+            // ROGUESQ_LOG_GPU_WAIT=1: GPU time of the screen render, beside the native render's wait logged by State.
+            static const bool logGpuWait = []() { const char *e = std::getenv("ROGUESQ_LOG_GPU_WAIT"); return (e != nullptr) && (e[0] == '1'); }();
+            if (logGpuWait) {
+                static auto windowStart = std::chrono::steady_clock::now();
+                static double gpuMs = 0.0;
+                static int renders = 0;
+                gpuMs += workloadGpuMs;
+                renders++;
+                const auto now = std::chrono::steady_clock::now();
+                if (std::chrono::duration<double>(now - windowStart).count() >= 1.0) {
+                    fprintf(stderr, "[gpu-screen] %.1f ms/s over %d renders (avg %.1f ms GPU)\n", gpuMs, renders, gpuMs / renders);
+                    windowStart = now;
+                    gpuMs = 0.0;
+                    renders = 0;
+                }
+            }
 
             // Indicate to the texture cache it's safe to delete the textures if no locks are active.
             ext.textureCache->decrementLock();

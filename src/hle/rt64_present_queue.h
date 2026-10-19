@@ -49,6 +49,13 @@ namespace RT64 {
         FramebufferChangePool screenFbChangePool;
         std::atomic<bool> viewRDRAM = false;
         std::vector<std::unique_ptr<RenderFramebuffer>> swapChainFramebuffers;
+
+        // FXAA: the VI pass draws into this window-sized texture, then FXAA writes the swap chain.
+        std::unique_ptr<RenderTexture> fxaaTexture;
+        std::unique_ptr<RenderFramebuffer> fxaaFramebuffer;
+        std::unique_ptr<VideoInterfaceDescriptorSet> fxaaDescriptorSet;
+        uint32_t fxaaWidth = 0;
+        uint32_t fxaaHeight = 0;
         std::unique_ptr<RenderCommandSemaphore> acquiredSemaphore;
         std::vector<std::unique_ptr<RenderCommandSemaphore>> drawSemaphores;
         std::unique_ptr<VIRenderer> viRenderer;

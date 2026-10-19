@@ -14,6 +14,18 @@
 #define RDP_TMEM_MASK8 0xFFF
 #define RDP_TMEM_MASK16 0x7FF
 
+#ifdef RT64_TEXTURE_SLOTS
+// Only the word fetch switches on the draw's slot, so FXC compiles the decode once instead of once per slot (over a minute per shader).
+uint slotLoadTMEM(uint tmemAddress) {
+#   define RT64_CASE(k) return gTMEM[k].Load(int2(tmemAddress, 0));
+    RT64_TMEM_SLOT_SWITCH(RT64_CASE)
+#   undef RT64_CASE
+}
+#   define RT64_LOAD_TMEM(TMEM, tmemAddress) slotLoadTMEM(tmemAddress)
+#else
+#   define RT64_LOAD_TMEM(TMEM, tmemAddress) TMEM.Load(int2(tmemAddress, 0))
+#endif
+
 uint implLoadTMEM(uint relativeAddress, uint maskAddress, uint orAddress, bool oddRow, uint textureStart, uint rowSize, Texture1D<uint> TMEM) {
     const uint rowStart = (relativeAddress / rowSize) * rowSize;
     const uint wordIndex = (relativeAddress - rowStart) / 4;
@@ -21,11 +33,11 @@ uint implLoadTMEM(uint relativeAddress, uint maskAddress, uint orAddress, bool o
     const uint finalAddress = select_uint(oddRow,
         textureStart + rowStart + (swapWordIndex * 4) + (relativeAddress & 0x3),
         textureStart + relativeAddress);
-    return TMEM.Load(int2(((finalAddress & maskAddress) | orAddress) & RDP_TMEM_MASK8, 0));
+    return RT64_LOAD_TMEM(TMEM, ((finalAddress & maskAddress) | orAddress) & RDP_TMEM_MASK8);
 }
 
 #define loadTMEMMasked(relativeAddress, mask, orAddress) implLoadTMEM(relativeAddress, mask, orAddress, oddRow, address, stride, TMEM)
-#define loadTLUT(paletteAddress) TMEM.Load(uint2((paletteAddress) & RDP_TMEM_MASK8, 0))
+#define loadTLUT(paletteAddress) RT64_LOAD_TMEM(TMEM, (paletteAddress) & RDP_TMEM_MASK8)
 
 float4 sampleTMEMIA4(uint pixelValue4bit) {
     return IA4ToFloat4(pixelValue4bit);

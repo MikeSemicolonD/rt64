@@ -297,13 +297,14 @@ namespace RT64 {
         uint32_t gTextures;
         uint32_t gTMEM;
 
-        FramebufferRendererDescriptorTextureSet(RenderDevice *device = nullptr, uint32_t textureCacheSize = 0) {
+        // Texture-slot sets are a plain range of textureCacheSize entries: drivers without descriptor indexing (Raspberry Pi V3D) reject the boundless layout.
+        FramebufferRendererDescriptorTextureSet(RenderDevice *device = nullptr, uint32_t textureCacheSize = 0, bool slots = false) {
             this->textureCacheSize = textureCacheSize;
 
             builder.begin();
-            gTextures = builder.addTexture(0, UpperRange);
+            gTextures = builder.addTexture(0, slots ? textureCacheSize : UpperRange);
             gTMEM = gTextures;
-            builder.end(true, textureCacheSize);
+            builder.end(!slots, textureCacheSize);
 
             if (device != nullptr) {
                 create(device);

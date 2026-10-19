@@ -16,6 +16,7 @@
 #include "common/rt64_load_types.h"
 #include "common/rt64_thread.h"
 #include "common/rt64_tmem_hasher.h"
+#include "render/rt64_raster_shader.h"
 #include "hle/rt64_workload_queue.h"
 
 #include "rt64_texture_cache.h"
@@ -1269,7 +1270,14 @@ namespace RT64 {
         newUpload.tlut = tlut;
         newUpload.loadTile = loadTile;
         newUpload.bytesTMEM = (bytes != nullptr) ? std::vector<uint8_t>(bytes, bytes + bytesCount) : std::vector<uint8_t>();
-        newUpload.decodeTMEM = decodeTMEM;
+        // TextureDecodeCS needs compute; without it the raster shaders sample raw TMEM instead.
+        newUpload.decodeTMEM = decodeTMEM && DecodesTexturesOnGPU(directWorker->device->getCapabilities());
+
+        // ROGUESQ_LOG_TEX_UPLOADS=1: one line per new texture-cache entry (a cache hit on an existing hash uploads nothing).
+        static const bool logUploads = []() { const char *e = std::getenv("ROGUESQ_LOG_TEX_UPLOADS"); return (e != nullptr) && (e[0] == '1'); }();
+        if (logUploads) {
+            fprintf(stderr, "[tex-upload] frame=%llu hash=%016llX %dx%d fmt=%u siz=%u bytes=%d\n", (unsigned long long)creationFrame, (unsigned long long)hash, width, height, loadTile.fmt, loadTile.siz, bytesCount);
+        }
 
         {
             std::unique_lock queueLock(uploadQueueMutex);

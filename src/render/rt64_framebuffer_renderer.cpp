@@ -17,6 +17,7 @@
 #include "common/rt64_math.h"
 #include "hle/rt64_color_converter.h"
 #include "gbi/rt64_f3d.h"
+#include "render/rt64_raster_shader.h"
 #include "shared/rt64_framebuffer_params.h"
 #include "shared/rt64_raster_params.h"
 #include "shared/rt64_rs64_lights_cb.h"
@@ -164,7 +165,8 @@ namespace RT64 {
         assert(worker != nullptr);
 
         this->shaderLibrary = shaderLibrary;
-
+        textureSlots = UsesTextureSlots(graphicsAPI == UserConfiguration::GraphicsAPI::D3D11, worker->device->getCapabilities());
+        slotTMEMCount = TMEMSlotCount(graphicsAPI == UserConfiguration::GraphicsAPI::D3D11);
         frameParams.frameCount = 0;
         frameParams.viewUbershaders = false;
         frameParams.ditherNoiseStrength = 1.0f;
@@ -352,7 +354,10 @@ namespace RT64 {
         // place). Opt out to the legacy growth with ROGUESQ_FBTEX_FIXED_CAP=0.
         static int s_fixed_cap = -1;
         if (s_fixed_cap < 0) { const char *e = std::getenv("ROGUESQ_FBTEX_FIXED_CAP"); s_fixed_cap = (e && e[0] == '0') ? 0 : 1; }
-        const bool createSet = (descTextureSet == nullptr) || (descTextureSet->textureCacheSize < (textureCacheSize + 1));
+        // Slot mode needs the bindless set only for the ray passes; drivers without descriptor indexing can't allocate it.
+        const RenderDeviceCapabilities &caps = worker->device->getCapabilities();
+        const bool needsBindlessSet = !textureSlots || caps.raytracing || caps.rayQuery;
+        const bool createSet = needsBindlessSet && ((descTextureSet == nullptr) || (descTextureSet->textureCacheSize < (textureCacheSize + 1)));
         if (createSet) {
             const uint32_t legacyCap = ((textureCacheSize + 1) * 3) / 2;
             const uint32_t fixedCap = (textureCacheSize + 1) > (uint32_t)FramebufferRendererDescriptorTextureSet::UpperRange
@@ -428,6 +433,19 @@ namespace RT64 {
 
         // Make sure the versions vector matches the texture cache size.
         descriptorTextureVersions.resize(textureCacheSize, 0);
+        auto setCacheTexture = [&](uint32_t index, const RenderTexture *texture, const RenderTextureView *textureView, bool tmem) {
+            if (descTextureSet != nullptr) {
+                descTextureSet->setTexture(index, texture, RenderTextureLayout::SHADER_READ, textureView);
+            }
+
+            if (textureSlots) {
+                if (slotSources.size() <= index) {
+                    slotSources.resize(index + 1);
+                }
+
+                slotSources[index] = { texture, textureView, tmem };
+            }
+        };
 
         // Update texture vector with static textures from the cache and dynamic resource views.
         if (descriptorTextureGlobalVersion != textureCacheGlobalVersion) {
@@ -439,25 +457,41 @@ namespace RT64 {
 
                 descriptorTextureVersions[i] = textureCacheVersions[i];
                 if (textureCacheTextures[i] == nullptr) {
+                    if (i < slotSources.size()) {
+                        slotSources[i] = {};
+                    }
+
                     continue;
                 }
 
                 if (textureCacheReplacementMapEnabled && (textureCacheTextureReplacements[i] != nullptr)) {
-                    descTextureSet->setTexture(i, textureCacheTextureReplacements[i]->texture.get(), RenderTextureLayout::SHADER_READ);
+                    setCacheTexture(i, textureCacheTextureReplacements[i]->texture.get(), nullptr, false);
                 }
                 else if (textureCacheTextures[i]->texture != nullptr) {
-                    descTextureSet->setTexture(i, textureCacheTextures[i]->texture.get(), RenderTextureLayout::SHADER_READ);
+                    setCacheTexture(i, textureCacheTextures[i]->texture.get(), nullptr, false);
                 }
                 else {
-                    descTextureSet->setTexture(i, textureCacheTextures[i]->tmem.get(), RenderTextureLayout::SHADER_READ);
+                    setCacheTexture(i, textureCacheTextures[i]->tmem.get(), nullptr, true);
                 }
             }
 
             descriptorTextureGlobalVersion = textureCacheGlobalVersion;
         }
 
+        // Slot sources must only hold live textures: last frame's tile copies are freed.
+        for (uint32_t index : slotDynamicIndices) {
+            if (index < slotSources.size()) {
+                slotSources[index] = {};
+            }
+        }
+
+        slotDynamicIndices.clear();
         for (const DynamicTextureView &dynamicView : dynamicTextureViewVector) {
-            descTextureSet->setTexture(dynamicView.dstIndex, dynamicView.texture, RenderTextureLayout::SHADER_READ, dynamicView.textureView);
+            if (textureSlots) {
+                slotDynamicIndices.push_back(dynamicView.dstIndex);
+            }
+
+            setCacheTexture(dynamicView.dstIndex, dynamicView.texture, dynamicView.textureView, false);
             descriptorTextureVersions[dynamicView.dstIndex] = 0;
         }
     }
@@ -533,6 +567,7 @@ namespace RT64 {
         std::unordered_set<const void*> bDistinctPipe;
         std::vector<RenderRect> bDistinctScis;
 
+        bool slotSetBound = false;
         auto switchToGraphicsPipeline = [&]() {
             previousCallType = InstanceDrawCall::Type::Unknown;
             previousVertexTestZ = false;
@@ -540,10 +575,56 @@ namespace RT64 {
             previousScissor = RenderRect();
             worker->commandList->setGraphicsPipelineLayout(rendererPipelineLayout);
             worker->commandList->setGraphicsDescriptorSet(descCommonSet->get(), 0);
-            worker->commandList->setGraphicsDescriptorSet(descTextureSet->get(), 1);
-            worker->commandList->setGraphicsDescriptorSet(descTextureSet->get(), 2);
+            if (!textureSlots) {
+                worker->commandList->setGraphicsDescriptorSet(descTextureSet->get(), 1);
+                worker->commandList->setGraphicsDescriptorSet(descTextureSet->get(), 2);
+            }
+
+            slotSetBound = false;
             worker->commandList->setGraphicsDescriptorSet(depthState ? descRealFbSet : descDummyFbSet, 3);
             worker->commandList->setViewports(framebuffer.viewport);
+        };
+
+        // Vulkan reads descriptor sets when the commands execute, so each distinct set of 8 textures gets its own set from a pool that
+        // recordSetup recycles once the previous command list has finished.
+        // Unused slots get a real texture: plume skips null writes, and drivers like V3D read every slot of the array at draw time.
+        auto nextSlotSet = [&](std::vector<std::unique_ptr<FramebufferRendererDescriptorTextureSet>> &pool, uint32_t &cursor, uint32_t count) {
+            if (cursor == pool.size()) {
+                pool.emplace_back(std::make_unique<FramebufferRendererDescriptorTextureSet>(worker->device, count, true));
+            }
+
+            return pool[cursor++].get();
+        };
+
+        auto bindDrawTextures = [&](uint32_t renderIndex) {
+            const interop::RenderIndices &indices = renderIndicesVector[renderIndex];
+            std::array<SlotSource, 8> sources = {};
+            for (uint32_t k = 0; (k < 8) && (slotGPUTiles != nullptr) && (k < indices.rdpTileCount); k++) {
+                const uint32_t textureIndex = slotGPUTiles[indices.rdpTileIndex + k].textureIndex;
+                if (textureIndex < slotSources.size()) {
+                    sources[k] = slotSources[textureIndex];
+                }
+            }
+
+            if (slotSetBound && (sources == slotTextureSetSources)) {
+                return;
+            }
+
+            FramebufferRendererDescriptorTextureSet *textureSet = nextSlotSet(slotTextureSetPool, slotTextureSetCursor, 8);
+            FramebufferRendererDescriptorTextureSet *tmemSet = nextSlotSet(slotTMEMSetPool, slotTMEMSetCursor, slotTMEMCount);
+            for (uint32_t k = 0; k < 8; k++) {
+                const bool isTexture = (sources[k].texture != nullptr) && !sources[k].tmem;
+                const bool isTMEM = (sources[k].texture != nullptr) && sources[k].tmem;
+                textureSet->setTexture(k, isTexture ? sources[k].texture : slotDummyTexture.get(), RenderTextureLayout::SHADER_READ, isTexture ? sources[k].view : nullptr);
+                if (k < slotTMEMCount) {
+                    tmemSet->setTexture(k, isTMEM ? sources[k].texture : slotDummyTMEM.get(), RenderTextureLayout::SHADER_READ, isTMEM ? sources[k].view : nullptr);
+                }
+            }
+
+            slotTextureSetSources = sources;
+            slotSetBound = true;
+            worker->commandList->setGraphicsDescriptorSet(textureSet->get(), 1);
+            worker->commandList->setGraphicsDescriptorSet(tmemSet->get(), 2);
         };
 
         auto switchToDepthRead = [&]() {
@@ -688,7 +769,25 @@ namespace RT64 {
                 }
 
                 const auto &triangles = drawCall.triangles;
-                assert(triangles.pipeline != nullptr);
+
+                // Without an ubershader (D3D11, slow GPUs), a draw is skipped until its specialized pipeline is compiled.
+                if (triangles.pipeline == nullptr) {
+                    static const bool log_pipe = []{
+                        const char *e = std::getenv("ROGUESQ_LOG_PIPELINE");
+                        return e && *e && *e != '0';
+                    }();
+                    if (log_pipe) {
+                        static std::atomic<int> n_skip{0};
+                        int n = ++n_skip;
+                        if (n <= 20 || (n % 500) == 0) {
+                            std::fprintf(stderr, "[pipe-noshader] skipped=%d otherMode=%08X:%08X combiner=%08X:%08X flags=%08X\n", n,
+                                triangles.shaderDesc.otherMode.L, triangles.shaderDesc.otherMode.H, triangles.shaderDesc.colorCombiner.L, triangles.shaderDesc.colorCombiner.H, triangles.shaderDesc.flags.value);
+                            std::fflush(stderr);
+                        }
+                    }
+
+                    continue;
+                }
 
                 // Draw calls can sometimes end up with empty scissors and cause validation errors. We just skip them.
                 if (triangles.scissor.isEmpty()) {
@@ -763,7 +862,7 @@ namespace RT64 {
                     drawCall.type == InstanceDrawCall::Type::RegularRect;
                 size_t runEnd = sceneIdx;
                 uint32_t runFaces = triangles.faceCount;
-                if (!s_no_coalesce && coalescable && !triangles.postBlendDitherNoise) {
+                if (!s_no_coalesce && !textureSlots && coalescable && !triangles.postBlendDitherNoise) {
                     uint32_t nextIndex = triangles.indexStart + triangles.faceCount * 3;
                     for (size_t j = sceneIdx + 1; j < rasterScene.instanceIndices.size(); ++j) {
                         const InstanceDrawCall &d2 = instanceDrawCallVector[rasterScene.instanceIndices[j]];
@@ -801,6 +900,10 @@ namespace RT64 {
                 }
 
                 if (s_log_batch) ++bRuns;
+                if (textureSlots) {
+                    bindDrawTextures(i);
+                }
+
                 rasterParams.renderIndex = i;
                 rasterParams.useVertexRenderIndex = 0; // single draw: per-draw push-constant path (identical to prior behavior)
                 rasterParams.screenScale = triangles.screenScale;
@@ -1446,6 +1549,18 @@ namespace RT64 {
 
     void FramebufferRenderer::recordSetup(RenderWorker *worker, std::vector<BufferUploader *> bufferUploaders, RSPProcessor *rspProcessor,
         VertexProcessor *vertexProcessor, const OutputBuffers *outputBuffers, bool rtEnabled) {
+        // A new command list starts here and the previous one has finished, so the per-draw slot sets can be reused.
+        slotTextureSetCursor = 0;
+        slotTMEMSetCursor = 0;
+
+        if (textureSlots && !slotDummiesTransitioned) {
+            slotDummyTexture = worker->device->createTexture(RenderTextureDesc::Texture2D(1, 1, 1, RenderFormat::R8G8B8A8_UNORM));
+            slotDummyTMEM = worker->device->createTexture(RenderTextureDesc::Texture1D(1, 1, RenderFormat::R8_UINT));
+            worker->commandList->barriers(RenderBarrierStage::GRAPHICS_AND_COMPUTE, RenderTextureBarrier(slotDummyTexture.get(), RenderTextureLayout::SHADER_READ));
+            worker->commandList->barriers(RenderBarrierStage::GRAPHICS_AND_COMPUTE, RenderTextureBarrier(slotDummyTMEM.get(), RenderTextureLayout::SHADER_READ));
+            slotDummiesTransitioned = true;
+        }
+
         if (!dummyColorTargetTransitioned) {
             worker->commandList->barriers(RenderBarrierStage::GRAPHICS_AND_COMPUTE, RenderTextureBarrier(dummyColorTarget.get(), RenderTextureLayout::SHADER_READ));
             dummyColorTargetTransitioned = true;
@@ -1473,6 +1588,13 @@ namespace RT64 {
         }
 
         if (rspProcessor != nullptr) {
+            // The CPU path reads the upload buffers while recording, so the uploader threads must have finished filling them.
+            if (rspProcessor->cpuProcessing) {
+                for (BufferUploader *uploader : bufferUploaders) {
+                    uploader->wait();
+                }
+            }
+
             rspProcessor->recordCommandList(worker, shaderLibrary, outputBuffers);
         }
 

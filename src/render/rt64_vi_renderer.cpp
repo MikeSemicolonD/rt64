@@ -96,10 +96,10 @@ namespace RT64 {
             return (v && *v) ? float(std::atof(v)) : 0.0f;
         }();
 
-        // ROGUESQ_VI_OVERSCAN=<native pixels>: pull the right edge of the sampled region in by this
+        // ROGUESQ_VI_OVERSCAN=<native pixels>: pull the right and bottom edges of the sampled region in by this
         // many native pixels so the composite never samples the render target's stale outermost
-        // column (pooled targets keep prior-frame pixels there -> flickering saturated sliver on
-        // dark full-frame screens). Default 1; 0 disables (A/B against the raw edge).
+        // column or row (pooled targets keep prior-frame pixels there -> a flickering or light line
+        // at the edge). Default 1; 0 disables (A/B against the raw edge).
         static const float s_overscan = []() {
             const char *v = std::getenv("ROGUESQ_VI_OVERSCAN");
             return (v && *v) ? float(std::atof(v)) : 1.0f;
@@ -115,7 +115,8 @@ namespace RT64 {
         // the linear tap land on the last texel of the KEPT region instead of blending back into the
         // stale outer column (a plain 1-native-px inset still bleeds ~half the garbage through).
         const float texelsPerNativeX = (nativeSize.x > 0) ? (float(p.textureWidth) / float(nativeSize.x)) : 0.0f;
-        pushConstants.overscan = { (s_overscan > 0.0f) ? (s_overscan * texelsPerNativeX + 0.5f) : 0.0f, 0.0f };
+        const float texelsPerNativeY = (nativeSize.y > 0) ? (float(p.textureHeight) / float(nativeSize.y)) : 0.0f;
+        pushConstants.overscan = (s_overscan > 0.0f) ? hlslpp::float2(s_overscan * texelsPerNativeX + 0.5f, s_overscan * texelsPerNativeY + 0.5f) : hlslpp::float2(0.0f, 0.0f);
 
         p.commandList->setPipeline(shader->pipeline.get());
         p.commandList->setGraphicsPipelineLayout(shader->pipelineLayout.get());

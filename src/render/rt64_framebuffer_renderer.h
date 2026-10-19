@@ -4,6 +4,8 @@
 
 #pragma once
 
+#include <array>
+
 #include <stdint.h>
 
 #include "common/rt64_emulator_configuration.h"
@@ -97,6 +99,32 @@ namespace RT64 {
         RenderPipeline *postBlendDitherNoiseSubNegativePipeline = nullptr;
         std::unique_ptr<FramebufferRendererDescriptorCommonSet> descCommonSet;
         std::unique_ptr<FramebufferRendererDescriptorTextureSet> descTextureSet;
+
+        // D3D11 and small GPUs bind each draw's tiles to 8 fixed slots instead of indexing the bindless cache.
+        // Set 1 holds 2D textures and set 2 holds 1D TMEM; each slot's other set gets a dummy of the matching type.
+        struct SlotSource {
+            const RenderTexture *texture = nullptr;
+            const RenderTextureView *view = nullptr;
+            bool tmem = false;
+
+            bool operator==(const SlotSource &other) const {
+                return (texture == other.texture) && (view == other.view) && (tmem == other.tmem);
+            }
+        };
+
+        bool textureSlots = false;
+        std::vector<std::unique_ptr<FramebufferRendererDescriptorTextureSet>> slotTextureSetPool;
+        uint32_t slotTextureSetCursor = 0;
+        std::vector<std::unique_ptr<FramebufferRendererDescriptorTextureSet>> slotTMEMSetPool;
+        uint32_t slotTMEMSetCursor = 0;
+        uint32_t slotTMEMCount = 8;
+        std::array<SlotSource, 8> slotTextureSetSources = {};
+        std::vector<SlotSource> slotSources;
+        std::vector<uint32_t> slotDynamicIndices;
+        std::unique_ptr<RenderTexture> slotDummyTexture;
+        std::unique_ptr<RenderTexture> slotDummyTMEM;
+        bool slotDummiesTransitioned = false;
+        const interop::GPUTile *slotGPUTiles = nullptr;
         std::unique_ptr<RenderTexture> dummyColorTarget;
         std::unique_ptr<RenderTexture> dummyDepthTarget;
         std::unique_ptr<RenderTextureView> dummyColorTargetView;

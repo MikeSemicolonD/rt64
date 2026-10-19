@@ -16,6 +16,8 @@ namespace RT64 {
         struct Framebuffer {
             bool renderToRAM;
             bool copyWithGPU;
+            // Copy rendered color/depth back to RDRAM. Off keeps renderToRAM's RDRAM-to-GPU change detection but skips the readback and its GPU wait.
+            bool writeBack;
         };
 
         Dither dither;

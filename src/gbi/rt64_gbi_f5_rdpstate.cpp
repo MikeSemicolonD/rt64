@@ -644,6 +644,32 @@ namespace RT64 {
                 const float ulx = ((w1 >> 12) & 0xFFFu) / 4.0f, uly = (w1 & 0xFFFu) / 4.0f;
                 f5_hud_probe(state, "texrect", 0.5f * (ulx + lrx), 0.5f * (uly + lry), lrx - ulx, lry - uly);
             }
+            // ROGUESQ_LOG_TEXRECT_TALL=<min px>: every texrect at least this tall and 16 px wide (menu background strips and sweeps), with its texture start/step and cycle type.
+            {
+                static const int s_tall = []() { const char* v = std::getenv("ROGUESQ_LOG_TEXRECT_TALL"); return v ? std::atoi(v) : 0; }();
+                const uint32_t w0 = (*dl)->w0, w1 = (*dl)->w1;
+                const int32_t lrx = (w0 >> 12) & 0xFFF, lry = w0 & 0xFFF, ulx = (w1 >> 12) & 0xFFF, uly = w1 & 0xFFF;
+                if (s_tall > 0 && (lry - uly) >= s_tall * 4 && (lrx - ulx) >= 16 * 4) {
+                    static int s_n = 0;
+                    if (++s_n <= 400000) {
+                        const int16_t s = (int16_t)((*dl)[1].w0 >> 16), t = (int16_t)((*dl)[1].w0 & 0xFFFF);
+                        const int16_t ds = (int16_t)((*dl)[1].w1 >> 16), dt = (int16_t)((*dl)[1].w1 & 0xFFFF);
+                        const FixedRect &sc = state->rdp->scissorRectStack[state->rdp->scissorStackSize - 1];
+                        const auto &prim = state->rdp->primColorStack[state->rdp->primColorStackSize - 1];
+                        const auto &comb = state->rdp->colorCombinerStack[state->rdp->colorCombinerStackSize - 1];
+                        const LoadTile &rt = state->rdp->tiles[(w1 >> 24) & 7];
+                        const LoadTile &lt = state->rdp->tiles[7];
+                        std::fprintf(stderr, "[tall-rect] x=%.2f..%.2f y=%.2f..%.2f s=%.3f t=%.3f dsdx=%.4f dtdy=%.4f cyc=%u fb=%06X sc=%.2f..%.2f,%.2f..%.2f tex=%06X texw=%u load=%.2f,%.2f..%.2f,%.2f tile%u=%.2f,%.2f..%.2f,%.2f line=%u tmem=%u fmt=%u siz=%u primA=%.3f omL=%08X filt=%u cc=%08X:%08X\n",
+                            ulx / 4.0f, lrx / 4.0f, uly / 4.0f, lry / 4.0f, s / 32.0f, t / 32.0f, ds / 1024.0f, dt / 1024.0f,
+                            (state->rdp->otherMode.H >> 20) & 3, state->rdp->colorImage.address & 0xFFFFFF,
+                            sc.ulx / 4.0f, sc.lrx / 4.0f, sc.uly / 4.0f, sc.lry / 4.0f,
+                            state->rdp->texture.address & 0xFFFFFF, state->rdp->texture.width,
+                            lt.uls / 4.0f, lt.ult / 4.0f, lt.lrs / 4.0f, lt.lrt / 4.0f, (w1 >> 24) & 7, rt.uls / 4.0f, rt.ult / 4.0f, rt.lrs / 4.0f, rt.lrt / 4.0f,
+                            rt.line, rt.tmem, rt.fmt, rt.siz,
+                            (float)prim.w, state->rdp->otherMode.L, (state->rdp->otherMode.H >> 12) & 3, comb.L, comb.H);
+                    }
+                }
+            }
             if (f5_crosshair_quad(state, *dl)) {
                 (*dl)++;
                 return;

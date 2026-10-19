@@ -19,6 +19,10 @@
 #include "shaders/PostBlendDitherNoiseAddPS.hlsl.spirv.h"
 #include "shaders/PostBlendDitherNoiseSubPS.hlsl.spirv.h"
 #include "shaders/PostBlendDitherNoiseSubNegativePS.hlsl.spirv.h"
+#include "shaders/RasterPSSpecConstantSlots.hlsl.spirv.h"
+#include "shaders/RasterPSSpecConstantSlotsMS.hlsl.spirv.h"
+#include "shaders/RasterPSSpecConstantSlotsFlat.hlsl.spirv.h"
+#include "shaders/RasterPSSpecConstantSlotsFlatMS.hlsl.spirv.h"
 #ifdef _WIN32
 #   include "shaders/RasterPSLibrary.hlsl.dxil.h"
 #   include "shaders/RasterPSLibraryMS.hlsl.dxil.h"
@@ -71,13 +75,22 @@ namespace RT64 {
 
     // OptimizerCacheSPIRV
 
-    void OptimizerCacheSPIRV::initialize() {
+    void OptimizerCacheSPIRV::initialize(bool textureSlots) {
         rasterVS.parse(RasterVSSpecConstantBlobSPIRV, std::size(RasterVSSpecConstantBlobSPIRV));
         rasterVSFlat.parse(RasterVSSpecConstantFlatBlobSPIRV, std::size(RasterVSSpecConstantFlatBlobSPIRV));
-        rasterPS.parse(RasterPSSpecConstantBlobSPIRV, std::size(RasterPSSpecConstantBlobSPIRV));
-        rasterPSMS.parse(RasterPSSpecConstantMSBlobSPIRV, std::size(RasterPSSpecConstantMSBlobSPIRV));
-        rasterPSFlat.parse(RasterPSSpecConstantFlatBlobSPIRV, std::size(RasterPSSpecConstantFlatBlobSPIRV));
-        rasterPSFlatMS.parse(RasterPSSpecConstantFlatMSBlobSPIRV, std::size(RasterPSSpecConstantFlatMSBlobSPIRV));
+        if (textureSlots) {
+            rasterPS.parse(RasterPSSpecConstantSlotsBlobSPIRV, std::size(RasterPSSpecConstantSlotsBlobSPIRV));
+            rasterPSMS.parse(RasterPSSpecConstantSlotsMSBlobSPIRV, std::size(RasterPSSpecConstantSlotsMSBlobSPIRV));
+            rasterPSFlat.parse(RasterPSSpecConstantSlotsFlatBlobSPIRV, std::size(RasterPSSpecConstantSlotsFlatBlobSPIRV));
+            rasterPSFlatMS.parse(RasterPSSpecConstantSlotsFlatMSBlobSPIRV, std::size(RasterPSSpecConstantSlotsFlatMSBlobSPIRV));
+        }
+        else {
+            rasterPS.parse(RasterPSSpecConstantBlobSPIRV, std::size(RasterPSSpecConstantBlobSPIRV));
+            rasterPSMS.parse(RasterPSSpecConstantMSBlobSPIRV, std::size(RasterPSSpecConstantMSBlobSPIRV));
+            rasterPSFlat.parse(RasterPSSpecConstantFlatBlobSPIRV, std::size(RasterPSSpecConstantFlatBlobSPIRV));
+            rasterPSFlatMS.parse(RasterPSSpecConstantFlatMSBlobSPIRV, std::size(RasterPSSpecConstantFlatMSBlobSPIRV));
+        }
+
         assert(!rasterVS.empty());
         assert(!rasterVSFlat.empty());
         assert(!rasterPS.empty());
@@ -412,7 +425,7 @@ namespace RT64 {
     const uint64_t RasterShaderUber::RasterPSLibraryHash = 0;
 #endif
 
-    RasterShaderUber::RasterShaderUber(RenderDevice *device, RenderShaderFormat shaderFormat, const RenderMultisampling &multisampling, const ShaderLibrary *shaderLibrary, uint32_t threadCount) {
+    RasterShaderUber::RasterShaderUber(RenderDevice *device, RenderShaderFormat shaderFormat, const RenderMultisampling &multisampling, const ShaderLibrary *shaderLibrary, uint32_t threadCount, bool textureSlots, bool buildPipelines) {
         assert(device != nullptr);
 
         // Create the shaders.
@@ -450,23 +463,27 @@ namespace RT64 {
         }
 
         vertexShader = device->createShader(VSBlob, VSBlobSize, "VSMain", shaderFormat);
-        pixelShader = device->createShader(PSBlob, PSBlobSize, "PSMain", shaderFormat);
+        if (!textureSlots && buildPipelines) {
+            pixelShader = device->createShader(PSBlob, PSBlobSize, "PSMain", shaderFormat);
+        }
 
         FramebufferRendererDescriptorCommonSet descriptorCommonSet(shaderLibrary->samplerLibrary, device->getCapabilities().raytracing);
-        FramebufferRendererDescriptorTextureSet descriptorTextureSet;
+        FramebufferRendererDescriptorTextureSet descriptorTextureSet(nullptr, 8, textureSlots);
+        FramebufferRendererDescriptorTextureSet descriptorTMEMSet(nullptr, TMEMSlotCount(shaderFormat != RenderShaderFormat::SPIRV), textureSlots);
         FramebufferRendererDescriptorFramebufferSet descriptorFramebufferSet;
         RenderPipelineLayoutBuilder layoutBuilder;
         layoutBuilder.begin(false, true);
         layoutBuilder.addPushConstant(0, 0, sizeof(interop::RasterParams), RenderShaderStageFlag::VERTEX | RenderShaderStageFlag::PIXEL);
         layoutBuilder.addDescriptorSet(descriptorCommonSet);
         layoutBuilder.addDescriptorSet(descriptorTextureSet);
-        layoutBuilder.addDescriptorSet(descriptorTextureSet);
+        layoutBuilder.addDescriptorSet(descriptorTMEMSet);
         layoutBuilder.addDescriptorSet(descriptorFramebufferSet);
         layoutBuilder.end();
         pipelineLayout = layoutBuilder.create(device);
 
         // Generate all possible combinations of pipeline creations and assign them to each thread. Skip the ones that are invalid.
-        uint32_t pipelineCount = uint32_t(std::size(pipelines));
+        // Texture slots can't express the bindless ubershader, and some GPUs take minutes to compile it, so then draws wait for their specialized pipeline instead.
+        uint32_t pipelineCount = (textureSlots || !buildPipelines) ? 0 : uint32_t(std::size(pipelines));
         pipelineThreadCreations.clear();
         pipelineThreadCreations.resize(std::min(threadCount, pipelineCount));
 

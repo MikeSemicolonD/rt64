@@ -44,9 +44,24 @@ elseif (WIN32)
     set (DXC "${PROJECT_SOURCE_DIR}/src/contrib/dxc/bin/x64/dxc.exe")
     add_compile_definitions(NOMINMAX)
 
+    # Shaders are always compiled by the x64 dxc.exe; a 32-bit game needs the x86 runtime DLL, which dxc-bin doesn't carry.
+    if (CMAKE_SIZEOF_VOID_P EQUAL 4)
+        include(FetchContent)
+        FetchContent_Declare(dxc_x86 URL https://github.com/microsoft/DirectXShaderCompiler/releases/download/v1.8.2403.2/dxc_2024_03_29.zip
+            URL_HASH SHA256=74874e9741f027d4321263af58d24ae0f6dde2351230680b151c87144cc0a02a)
+        FetchContent_MakeAvailable(dxc_x86)
+        set (RT64_DXC_BIN_DIR "${dxc_x86_SOURCE_DIR}/bin/x86" CACHE INTERNAL "")
+        set (RT64_DXC_LIB "${dxc_x86_SOURCE_DIR}/lib/x86/dxcompiler.lib")
+        set (RT64_WIN_ARCH x86)
+    else()
+        set (RT64_DXC_BIN_DIR "${PROJECT_SOURCE_DIR}/src/contrib/dxc/bin/x64" CACHE INTERNAL "")
+        set (RT64_DXC_LIB "${PROJECT_SOURCE_DIR}/src/contrib/dxc/lib/x64/dxcompiler.lib")
+        set (RT64_WIN_ARCH x64)
+    endif()
+
     # Dependencies that must be next to the DLL.
-    configure_file("${PROJECT_SOURCE_DIR}/src/contrib/dxc/bin/x64/dxcompiler.dll" "dxcompiler.dll" COPYONLY)
-    configure_file("${PROJECT_SOURCE_DIR}/src/contrib/dxc/bin/x64/dxil.dll" "dxil.dll" COPYONLY)
+    configure_file("${RT64_DXC_BIN_DIR}/dxcompiler.dll" "dxcompiler.dll" COPYONLY)
+    configure_file("${RT64_DXC_BIN_DIR}/dxil.dll" "dxil.dll" COPYONLY)
 elseif (APPLE)
     if (CMAKE_SYSTEM_PROCESSOR STREQUAL "x86_64")
         # find zlib and include in dyld path
@@ -107,6 +122,19 @@ if (CMAKE_SYSTEM_NAME MATCHES "Linux" AND RT64_SDL_WINDOW_VULKAN)
     set(PLUME_SDL_VULKAN_ENABLED TRUE)
 elseif (APPLE)
     set(PLUME_APPLE_RETINA_ENABLED OFF)
+endif()
+
+# plume's D3D11 backend translates SPIR-V to HLSL at run time.
+if (WIN32)
+    set(SPIRV_CROSS_CLI OFF CACHE BOOL "" FORCE)
+    set(SPIRV_CROSS_ENABLE_TESTS OFF CACHE BOOL "" FORCE)
+    set(SPIRV_CROSS_ENABLE_MSL OFF CACHE BOOL "" FORCE)
+    set(SPIRV_CROSS_ENABLE_CPP OFF CACHE BOOL "" FORCE)
+    set(SPIRV_CROSS_ENABLE_REFLECT OFF CACHE BOOL "" FORCE)
+    set(SPIRV_CROSS_ENABLE_C_API OFF CACHE BOOL "" FORCE)
+    set(SPIRV_CROSS_ENABLE_UTIL OFF CACHE BOOL "" FORCE)
+    set(SPIRV_CROSS_SKIP_INSTALL ON CACHE BOOL "" FORCE)
+    add_subdirectory(src/contrib/spirv-cross)
 endif()
 
 add_subdirectory(src/contrib/plume)
@@ -332,7 +360,7 @@ endfunction()
 if (WIN32)
     set(SDL2_INCLUDE_DIRS "${PROJECT_SOURCE_DIR}/src/contrib/mupen64plus-win32-deps/SDL2-2.26.3/include")
     set(SDL2_LIBRARIES "SDL2" "SDL2main")
-    link_directories("${PROJECT_SOURCE_DIR}/src/contrib/mupen64plus-win32-deps/SDL2-2.26.3/lib/x64")
+    link_directories("${PROJECT_SOURCE_DIR}/src/contrib/mupen64plus-win32-deps/SDL2-2.26.3/lib/${RT64_WIN_ARCH}")
 elseif (TARGET SDL2::SDL2)
     get_target_property(SDL2_INCLUDE_DIRS SDL2::SDL2 INTERFACE_INCLUDE_DIRECTORIES)
 else()
@@ -524,6 +552,7 @@ endif()
 # Add any Windows-specific source files and libraries
 if (WIN32)
     target_sources(rt64 PRIVATE
+        "${PROJECT_SOURCE_DIR}/src/contrib/imgui/backends/imgui_impl_dx11.cpp"
         "${PROJECT_SOURCE_DIR}/src/contrib/imgui/backends/imgui_impl_dx12.cpp"
         "${PROJECT_SOURCE_DIR}/src/contrib/imgui/backends/imgui_impl_win32.cpp"
     )
@@ -532,7 +561,7 @@ if (WIN32)
         D3D12
         DXGI
         Shcore.lib
-        ${PROJECT_SOURCE_DIR}/src/contrib/dxc/lib/x64/dxcompiler.lib)
+        ${RT64_DXC_LIB})
 
     target_include_directories(rt64 PRIVATE ${zstd_SOURCE_DIR}/lib)
 endif()
@@ -567,6 +596,11 @@ build_pixel_shader_spec_constants(rt64 "src/shaders/RasterPS.hlsl" "src/shaders/
 build_pixel_shader_spec_constants(rt64 "src/shaders/RasterPS.hlsl" "src/shaders/RasterPSSpecConstantMS.hlsl" "-D SPEC_CONSTANT_RENDER_PARAMS" "-D MULTISAMPLING")
 build_pixel_shader_spec_constants(rt64 "src/shaders/RasterPS.hlsl" "src/shaders/RasterPSSpecConstantFlat.hlsl" "-D SPEC_CONSTANT_RENDER_PARAMS" "-D VERTEX_FLAT_COLOR")
 build_pixel_shader_spec_constants(rt64 "src/shaders/RasterPS.hlsl" "src/shaders/RasterPSSpecConstantFlatMS.hlsl" "-D SPEC_CONSTANT_RENDER_PARAMS" "-D VERTEX_FLAT_COLOR" "-D MULTISAMPLING")
+# D3D11 and GPUs with small per-stage texture limits (Raspberry Pi) bind each draw's tiles to 8 fixed slots instead of indexing the bindless texture cache.
+build_shader_spirv(rt64 "src/shaders/RasterPS.hlsl" "${DXC_PS_OPTS}" "src/shaders/RasterPSSpecConstantSlots.hlsl" "-D SPEC_CONSTANT_RENDER_PARAMS" "-D RT64_TEXTURE_SLOTS" "-D RT64_TMEM_SLOTS=4")
+build_shader_spirv(rt64 "src/shaders/RasterPS.hlsl" "${DXC_PS_OPTS}" "src/shaders/RasterPSSpecConstantSlotsMS.hlsl" "-D SPEC_CONSTANT_RENDER_PARAMS" "-D MULTISAMPLING" "-D RT64_TEXTURE_SLOTS" "-D RT64_TMEM_SLOTS=4")
+build_shader_spirv(rt64 "src/shaders/RasterPS.hlsl" "${DXC_PS_OPTS}" "src/shaders/RasterPSSpecConstantSlotsFlat.hlsl" "-D SPEC_CONSTANT_RENDER_PARAMS" "-D VERTEX_FLAT_COLOR" "-D RT64_TEXTURE_SLOTS" "-D RT64_TMEM_SLOTS=4")
+build_shader_spirv(rt64 "src/shaders/RasterPS.hlsl" "${DXC_PS_OPTS}" "src/shaders/RasterPSSpecConstantSlotsFlatMS.hlsl" "-D SPEC_CONSTANT_RENDER_PARAMS" "-D VERTEX_FLAT_COLOR" "-D MULTISAMPLING" "-D RT64_TEXTURE_SLOTS" "-D RT64_TMEM_SLOTS=4")
 build_vertex_shader( rt64 "src/shaders/RasterVS.hlsl" "src/shaders/RasterVSDynamic.hlsl" "-D DYNAMIC_RENDER_PARAMS")
 build_vertex_shader_spec_constants( rt64 "src/shaders/RasterVS.hlsl" "src/shaders/RasterVSSpecConstant.hlsl" "-D SPEC_CONSTANT_RENDER_PARAMS")
 build_vertex_shader_spec_constants( rt64 "src/shaders/RasterVS.hlsl" "src/shaders/RasterVSSpecConstantFlat.hlsl" "-D SPEC_CONSTANT_RENDER_PARAMS" "-D VERTEX_FLAT_COLOR")
@@ -621,6 +655,7 @@ build_pixel_shader(  rt64 "src/shaders/TextureResolvePS.hlsl" "src/shaders/Textu
 build_pixel_shader(  rt64 "src/shaders/VideoInterfacePS.hlsl" "src/shaders/VideoInterfacePSRegular.hlsl")
 build_pixel_shader(  rt64 "src/shaders/VideoInterfacePS.hlsl" "src/shaders/VideoInterfacePSPixel.hlsl" "-D PIXEL_ANTIALIASING")
 build_vertex_shader( rt64 "src/shaders/FullScreenVS.hlsl")
+build_pixel_shader(  rt64 "src/shaders/FxaaPS.hlsl")
 build_vertex_shader( rt64 "src/shaders/Im3DVS.hlsl")
 build_pixel_shader(  rt64 "src/shaders/ComposePS.hlsl")
 build_pixel_shader(  rt64 "src/shaders/DebugPS.hlsl")

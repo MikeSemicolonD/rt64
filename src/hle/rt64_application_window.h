@@ -77,7 +77,7 @@ namespace RT64 {
 
 #   ifdef _WIN32
         void windowMessage(UINT message, WPARAM wParam, LPARAM lParam);
-        static LRESULT windowHookCallback(int nCode, WPARAM wParam, LPARAM lParam);
+        static LRESULT CALLBACK windowHookCallback(int nCode, WPARAM wParam, LPARAM lParam);
 #   endif
     };
 };

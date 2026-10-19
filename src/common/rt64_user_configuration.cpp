@@ -23,6 +23,7 @@ namespace RT64 {
         j["extAspectTarget"] = cfg.extAspectTarget;
         j["upscale2D"] = cfg.upscale2D;
         j["threePointFiltering"] = cfg.threePointFiltering;
+        j["fxaa"] = cfg.fxaa;
         j["refreshRate"] = cfg.refreshRate;
         j["refreshRateTarget"] = cfg.refreshRateTarget;
         j["internalColorFormat"] = cfg.internalColorFormat;
@@ -46,6 +47,7 @@ namespace RT64 {
         cfg.extAspectTarget = j.value("extAspectTarget", defaultCfg.extAspectTarget);
         cfg.upscale2D = j.value("upscale2D", defaultCfg.upscale2D);
         cfg.threePointFiltering = j.value("threePointFiltering", defaultCfg.threePointFiltering);
+        cfg.fxaa = j.value("fxaa", defaultCfg.fxaa);
         cfg.refreshRate = j.value("refreshRate", defaultCfg.refreshRate);
         cfg.refreshRateTarget = j.value("refreshRateTarget", defaultCfg.refreshRateTarget);
         cfg.internalColorFormat = j.value("internalColorFormat", defaultCfg.internalColorFormat);
@@ -77,6 +79,7 @@ namespace RT64 {
         extAspectTarget = 16.0f / 9.0f;
         upscale2D = Upscale2D::ScaledOnly;
         threePointFiltering = true;
+        fxaa = false;
         refreshRate = RefreshRate::Original;
         refreshRateTarget = 60;
         internalColorFormat = InternalColorFormat::Automatic;
@@ -126,6 +129,11 @@ namespace RT64 {
     }
 
     bool UserConfiguration::isGraphicsAPISupported(GraphicsAPI graphicsAPI) {
+#   if !defined(PLUME_D3D11_ENABLED)
+        if (graphicsAPI == GraphicsAPI::D3D11) {
+            return false;
+        }
+#   endif
 #   if defined(_WIN32)
         if (graphicsAPI == GraphicsAPI::Metal) {
 #   elif defined(__APPLE__)
@@ -141,7 +149,7 @@ namespace RT64 {
 
     UserConfiguration::GraphicsAPI UserConfiguration::resolveGraphicsAPI(GraphicsAPI graphicsAPI) {
         if (graphicsAPI == UserConfiguration::GraphicsAPI::Automatic) {
-#       if defined(_WIN64)
+#       if defined(_WIN32)
             // Change the default graphics API when running under Wine to avoid using the D3D12 translation layer when possible. Recreate the default user configuration right afterwards so this new value is assigned.
             return Sommelier::detectWine() ? UserConfiguration::GraphicsAPI::Vulkan : UserConfiguration::GraphicsAPI::D3D12;
 #       elif defined(__APPLE__)

@@ -7,6 +7,7 @@
 #include "rt64_state.h"
 
 #include <cassert>
+#include <chrono>
 #include <cinttypes>
 
 #include "im3d/im3d.h"
@@ -18,6 +19,7 @@
 #include "common/rt64_elapsed_timer.h"
 #include "common/rt64_math.h"
 #include "common/rt64_tmem_hasher.h"
+#include "render/rt64_raster_shader.h"
 #include "preset/rt64_preset_draw_call.h"
 #include "preset/rt64_preset_light.h"
 
@@ -40,6 +42,23 @@ extern "C" { std::atomic<uint32_t> g_rs64_frame_texloads{0}; }
 
 #define MI_INTR_DP          0x00000020
 #define MI_INTR_SP          0x00000001
+
+// Set to anything but empty or "0".
+static bool rs64EnvOn(const char *name) {
+    const char *e = std::getenv(name);
+    return (e != nullptr) && (e[0] != '\0') && (e[0] != '0');
+}
+
+// ROGUESQ_SKIP_COLOR_READBACK / ROGUESQ_SKIP_DEPTH_READBACK force the write-back off regardless of the framebuffer.writeBack setting.
+static bool rs64SkipColorReadbackEnv() {
+    static const bool v = rs64EnvOn("ROGUESQ_SKIP_COLOR_READBACK");
+    return v;
+}
+
+static bool rs64SkipDepthReadbackEnv() {
+    static const bool v = rs64EnvOn("ROGUESQ_SKIP_DEPTH_READBACK");
+    return v;
+}
 
 namespace RT64 {
     const float ShiftScaleMap[] = {
@@ -267,6 +286,27 @@ namespace RT64 {
             }
         }
 
+        // ROGUESQ_LOG_FOG_DRAWS=1: each distinct draw state whose blender reads the fog colour (P or M = CLR_FOG in either cycle), once.
+        {
+            static const bool s_logFog = [](){ const char *e = std::getenv("ROGUESQ_LOG_FOG_DRAWS"); return e && e[0] == '1'; }();
+            const uint32_t L = rdp->otherMode.L;
+            const bool blendsFog = (((L >> 30) & 3) == 3) || (((L >> 22) & 3) == 3) || (((L >> 28) & 3) == 3) || (((L >> 20) & 3) == 3);
+            if (s_logFog && blendsFog) {
+                static rt64diag::BoundedMap<uint64_t, uint32_t> s_seen;
+                const interop::float4 &prim = rdp->primColorStack[rdp->primColorStackSize - 1];
+                const interop::float4 &fog = rdp->fogColorStack[rdp->fogColorStackSize - 1];
+                const uint32_t fogKey = ((uint32_t)(fog.x * 255.0f) << 24) | ((uint32_t)(fog.y * 255.0f) << 16) | ((uint32_t)(fog.z * 255.0f) << 8) | (uint32_t)(fog.w * 15.0f);
+                const uint64_t key = ((uint64_t)L << 32) ^ ((uint64_t)drawCall.colorCombiner.L << 8) ^ drawCall.colorCombiner.H ^ ((uint64_t)(drawCall.geometryMode & G_FOG) << 20) ^ (uint64_t)(prim.x * 255.0f) ^ ((uint64_t)fogKey << 3);
+                uint32_t &n = s_seen[key];
+                ++n;
+                if (n == 1 || n == 1000) {
+                    fprintf(stderr, "[fog-draw] L=%08X H=%08X cc=%08X:%08X geo=%08X fogOn=%d prim=(%.2f %.2f %.2f %.2f) fogC=(%.2f %.2f %.2f %.2f) fogMul=%.1f fogOff=%.1f n=%u\n",
+                        L, rdp->otherMode.H, drawCall.colorCombiner.L, drawCall.colorCombiner.H, drawCall.geometryMode, (drawCall.geometryMode & G_FOG) ? 1 : 0,
+                        prim.x, prim.y, prim.z, prim.w, fog.x, fog.y, fog.z, fog.w, rsp->fog.mul, rsp->fog.offset, n);
+                }
+            }
+        }
+
         if (drawStatus.isChanged(DrawAttribute::Texture) || textureCheck) {
             // Detect the tile count based on the LOD setting.
             const bool usesLOD = (drawCall.otherMode.textLOD() == G_TL_LOD);
@@ -341,7 +381,8 @@ namespace RT64 {
 
                     // Check if we need to use raw TMEM decoding because the tile can sample more bytes than TMEM actually allows.
                     assert((dstCallTile.sampleWidth > 0) && (dstCallTile.sampleHeight > 0) && "Sample size calculation can only result in non-zero values.");
-                    dstCallTile.rawTMEM = TMEMHasher::requiresRawTMEM(tile, dstCallTile.sampleWidth, dstCallTile.sampleHeight);
+                    // Without compute (D3D10-class devices) textures aren't decoded ahead of time, so every tile samples raw TMEM.
+                    dstCallTile.rawTMEM = TMEMHasher::requiresRawTMEM(tile, dstCallTile.sampleWidth, dstCallTile.sampleHeight) || !DecodesTexturesOnGPU(ext.device->getCapabilities());
                     
                     auto &dstRDPTile = drawData.rdpTiles[drawCall.tileIndex + t];
                     dstRDPTile.fmt = tile.fmt;
@@ -1031,7 +1072,7 @@ namespace RT64 {
                 if (bigTextureCheck) {
                     callTile.sampleWidth = maxTexcoord.x;
                     callTile.sampleHeight = maxTexcoord.y;
-                    callTile.rawTMEM = TMEMHasher::requiresRawTMEM(callTile.loadTile, maxTexcoord.x, maxTexcoord.y);
+                    callTile.rawTMEM = TMEMHasher::requiresRawTMEM(callTile.loadTile, maxTexcoord.x, maxTexcoord.y) || !DecodesTexturesOnGPU(ext.device->getCapabilities());
                 }
             }
 
@@ -1367,6 +1408,10 @@ namespace RT64 {
                             resizedTargets.emplace(colorDepthPair.second);
                         }
                     }
+
+                    if (ext.createdGraphicsAPI == UserConfiguration::GraphicsAPI::D3D11) {
+                        framebufferManager.matchTargetSizes(ext.framebufferGraphicsWorker, colorDepthPairs, resizedTargets);
+                    }
                 }
 
                 for (RenderTarget *renderTarget : resizedTargets) {
@@ -1437,6 +1482,7 @@ namespace RT64 {
                     gpuTileRange.second = rdpTileCursor;
                     framebufferRenderer->createGPUTiles(&workload.drawData.callTiles[gpuTileCursor], rdpTileCursor - gpuTileCursor,
                         &workload.drawData.gpuTiles[gpuTileCursor], &framebufferManager, ext.textureCache, workload.submissionFrame);
+                    framebufferRenderer->slotGPUTiles = workload.drawData.gpuTiles.data();
 
                     // Upload the GPU tiles.
                     ext.tilesUploader->submit(ext.framebufferGraphicsWorker, {
@@ -1567,10 +1613,13 @@ namespace RT64 {
                             depthFb->lastWriteType = Framebuffer::Type::Depth;
                         }
 
-                        // Copy results from render targets back to RAM.
-                        colorFb->copyRenderTargetToNative(ext.framebufferGraphicsWorker, colorTarget, colorWriteWidth, colorRowStart, colorRowEnd, colorImg.fmt, ditherRandomSeed++, ext.shaderLibrary);
+                        // Copy results from render targets back to RAM. ROGUESQ_SKIP_COLOR_READBACK=1 skips it (A/B for games that never read their color buffers back).
+                        const bool s_skip_color_rb = !ext.emulatorConfig->framebuffer.writeBack || rs64SkipColorReadbackEnv();
+                        if (!s_skip_color_rb) {
+                            colorFb->copyRenderTargetToNative(ext.framebufferGraphicsWorker, colorTarget, colorWriteWidth, colorRowStart, colorRowEnd, colorImg.fmt, ditherRandomSeed++, ext.shaderLibrary);
+                        }
 
-                        static const bool s_skip_depth_rb = std::getenv("ROGUESQ_SKIP_DEPTH_READBACK") != nullptr;
+                        const bool s_skip_depth_rb = !ext.emulatorConfig->framebuffer.writeBack || rs64SkipDepthReadbackEnv();
                         if (depthWriteWidth > 0 && !s_skip_depth_rb) {
                             depthFb->copyRenderTargetToNative(ext.framebufferGraphicsWorker, depthTarget, depthWriteWidth, depthRowStart, depthRowEnd, G_IM_FMT_DEPTH, ditherRandomSeed++, ext.shaderLibrary);
                         }
@@ -1584,8 +1633,25 @@ namespace RT64 {
 
                 ext.framebufferGraphicsWorker->commandList->end();
                 framebufferRenderer->waitForUploaders();
+                // ROGUESQ_LOG_GPU_WAIT=1: per second, how long the DL walk blocks on the framebuffer GPU work it just submitted.
+                static const bool logGpuWait = []() { const char *e = std::getenv("ROGUESQ_LOG_GPU_WAIT"); return (e != nullptr) && (e[0] == '1'); }();
+                const auto gpuWaitStart = std::chrono::steady_clock::now();
                 ext.framebufferGraphicsWorker->execute();
                 ext.framebufferGraphicsWorker->wait();
+                if (logGpuWait) {
+                    static auto windowStart = gpuWaitStart;
+                    static double waitMs = 0.0;
+                    static int waits = 0;
+                    const auto now = std::chrono::steady_clock::now();
+                    waitMs += std::chrono::duration<double, std::milli>(now - gpuWaitStart).count();
+                    waits++;
+                    if (std::chrono::duration<double>(now - windowStart).count() >= 1.0) {
+                        fprintf(stderr, "[gpu-wait] %.1f ms/s over %d submits (avg %.1f ms)\n", waitMs, waits, waitMs / waits);
+                        windowStart = now;
+                        waitMs = 0.0;
+                        waits = 0;
+                    }
+                }
 
                 pairCursor = framebufferPairCursor;
                 while (pairCursor < maxFramebufferPair) {
@@ -1631,7 +1697,8 @@ namespace RT64 {
                         // Width is not usable here (a width test blanked the display); alignment only. The
                         // width-1 garbage registrations are rejected upstream in setColorImage_filtered.
                         const bool colorFbPlausible = !s_wbStrict || (colorFb->addressStart & 0x3F) == 0;
-                        if (colorFbPlausible && colorFb->addressStart >= kFbMinAddr && colorFb->addressStart < kFbMaxAddr) {
+                        const bool s_skip_color_wb = !ext.emulatorConfig->framebuffer.writeBack || rs64SkipColorReadbackEnv();
+                        if (!s_skip_color_wb && colorFbPlausible && colorFb->addressStart >= kFbMinAddr && colorFb->addressStart < kFbMaxAddr) {
                             colorFb->copyNativeToRAM(&(writeBackRDRAM ? writeBackRDRAM : RDRAM)[colorFb->addressStart], colorWriteWidth, colorRowStart, std::min(colorRowEnd, colorFb->height));
                             if (rs64LogTransition() && (colorFb->siz == G_IM_SIZ_16b)) {
                                 const uint8_t *wbRAM = writeBackRDRAM ? writeBackRDRAM : RDRAM;
@@ -1654,7 +1721,8 @@ namespace RT64 {
                             if (seenD.insert(key).second) { fprintf(stderr, "[wb] depth addr=0x%06X width=%u rows=%u..%u" "\n", depthFb->addressStart, depthWriteWidth, depthRowStart, std::min(depthRowEnd, depthFb->height)); fflush(stderr); }
                         }
                         const bool depthFbPlausible = !s_wbStrict || (depthFb->addressStart & 0x3F) == 0;
-                        if (depthFbPlausible && depthWriteWidth > 0 && depthFb->addressStart >= kFbMinAddr && depthFb->addressStart < kFbMaxAddr) {
+                        const bool s_skip_depth_wb = !ext.emulatorConfig->framebuffer.writeBack || rs64SkipDepthReadbackEnv();
+                        if (!s_skip_depth_wb && depthFbPlausible && depthWriteWidth > 0 && depthFb->addressStart >= kFbMinAddr && depthFb->addressStart < kFbMaxAddr) {
                             depthFb->copyNativeToRAM(&(writeBackRDRAM ? writeBackRDRAM : RDRAM)[depthFb->addressStart], depthWriteWidth, depthRowStart, std::min(depthRowEnd, depthFb->height));
                         }
                     }
@@ -1812,7 +1880,7 @@ namespace RT64 {
 
         // Inspect the current workload before submission.
         lastWorkloadIndex = ext.workloadQueue->writeCursor;
-        if (ext.userConfig->developerMode) {
+        if (ext.userConfig->developerMode && ext.app->inspectorVisible) {
             inspect();
         } else if (GetRenderHookImgui() != nullptr) {
             // Host-facing ImGui UI (controls/rebind) without developer mode:
@@ -2326,7 +2394,7 @@ namespace RT64 {
         // full developer inspector UI. endFrame() pairs with newFrame() (renders
         // + releases frameMutex) exactly as the dev path does at its end, so the
         // next newFrame() doesn't deadlock; draw() then renders the frame.
-        if (!ext.userConfig->developerMode) {
+        if (!ext.userConfig->developerMode || !ext.app->inspectorVisible) {
             inspector->endFrame();
             ext.presentQueue->inspectorMutex.unlock();
             return;
@@ -2505,6 +2573,7 @@ namespace RT64 {
                     }
 
                     genConfigChanged = ImGui::Checkbox("Three-Point Filtering", &userConfig.threePointFiltering) || genConfigChanged;
+                    genConfigChanged = ImGui::Checkbox("FXAA", &userConfig.fxaa) || genConfigChanged;
                     genConfigChanged = ImGui::Checkbox("High Performance State", &userConfig.idleWorkActive) || genConfigChanged;
                     
                     // Emulator configuration.
@@ -2890,6 +2959,9 @@ namespace RT64 {
                         break;
                     case UserConfiguration::GraphicsAPI::Metal:
                         ImGui::Text("Graphics API: Metal");
+                        break;
+                    case UserConfiguration::GraphicsAPI::D3D11:
+                        ImGui::Text("Graphics API: D3D11");
                         break;
                     default:
                         ImGui::Text("Graphics API: Unknown");

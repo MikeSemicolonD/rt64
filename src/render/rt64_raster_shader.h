@@ -7,6 +7,7 @@
 #include "rt64_shader_common.h"
 
 #include <condition_variable>
+#include <cstdlib>
 #include <mutex>
 #include <thread>
 
@@ -24,6 +25,25 @@
 #define SAMPLE_LOCATIONS_REQUIRED 1
 
 namespace RT64 {
+    // D3D11, and GPUs whose per-stage texture limit can't hold the bindless texture array (Raspberry Pi), bind each draw's tiles to 8 fixed
+    // slots and have no ubershader. ROGUESQ_TEXTURE_SLOTS=1 forces it for testing.
+    inline bool UsesTextureSlots(bool d3d11, const RenderDeviceCapabilities &capabilities) {
+        static const bool forced = []() { const char *e = std::getenv("ROGUESQ_TEXTURE_SLOTS"); return (e != nullptr) && (e[0] == '1'); }();
+        return d3d11 || forced || (capabilities.maxTexturesPerStage < 8192);
+    }
+
+    // Textures are decoded ahead of time by TextureDecodeCS when compute is available; otherwise draws sample raw TMEM.
+    // ROGUESQ_GPU_TEXTURE_DECODE=0 forces raw TMEM to isolate decode problems on a new GPU.
+    inline bool DecodesTexturesOnGPU(const RenderDeviceCapabilities &capabilities) {
+        static const bool allowed = []() { const char *e = std::getenv("ROGUESQ_GPU_TEXTURE_DECODE"); return (e == nullptr) || (e[0] != '0'); }();
+        return allowed && capabilities.computeShaders;
+    }
+
+    // Must match RT64_TMEM_SLOTS in the slot shaders: the SPIR-V ones use 4 so a draw's textures fit 16 per stage.
+    inline uint32_t TMEMSlotCount(bool d3d11) {
+        return d3d11 ? 8 : 4;
+    }
+
     struct OptimizerCacheSPIRV {
         respv::Shader rasterVS;
         respv::Shader rasterVSFlat;
@@ -36,7 +56,7 @@ namespace RT64 {
         respv::Shader rasterPSFlat;
         respv::Shader rasterPSFlatMS;
 
-        void initialize();
+        void initialize(bool textureSlots);
     };
 
     struct PipelineCreation {
@@ -91,7 +111,7 @@ namespace RT64 {
         std::unique_ptr<RenderShader> vertexShader;
         std::unique_ptr<RenderShader> pixelShader;
 
-        RasterShaderUber(RenderDevice *device, RenderShaderFormat shaderFormat, const RenderMultisampling &multisampling, const ShaderLibrary *shaderLibrary, uint32_t threadCount);
+        RasterShaderUber(RenderDevice *device, RenderShaderFormat shaderFormat, const RenderMultisampling &multisampling, const ShaderLibrary *shaderLibrary, uint32_t threadCount, bool textureSlots, bool buildPipelines = true);
         ~RasterShaderUber();
         void threadCreatePipelines(uint32_t threadIndex);
         void waitForPipelineCreation();

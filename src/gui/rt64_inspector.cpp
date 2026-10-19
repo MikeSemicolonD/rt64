@@ -10,6 +10,7 @@
 #include "im3d/im3d.h"
 #include "im3d/im3d_math.h"
 #include "imgui/imgui.h"
+#include "imgui/imgui_internal.h"
 #include "implot/implot.h"
 
 // Volk must be included before the ImGui Vulkan backend.
@@ -26,6 +27,11 @@
 
 #if defined(_WIN32)
 #   include "plume_d3d12.h"
+#endif
+
+#ifdef PLUME_D3D11_ENABLED
+#   include "imgui/backends/imgui_impl_dx11.h"
+#   include "plume_d3d11.h"
 #endif
 
 static std::string IniFilenameUTF8;
@@ -135,6 +141,13 @@ namespace RT64 {
             ImGui_ImplVulkan_Init(&initInfo);
             break;
         }
+#   ifdef PLUME_D3D11_ENABLED
+        case UserConfiguration::GraphicsAPI::D3D11: {
+            D3D11Device *interfaceDevice = static_cast<D3D11Device *>(device);
+            ImGui_ImplDX11_Init(interfaceDevice->d3d.Get(), interfaceDevice->immediateContext.Get());
+            break;
+        }
+#   endif
         default:
             assert(false && "Unknown Graphics API.");
             return;
@@ -156,6 +169,13 @@ namespace RT64 {
             vulkanContext.reset(nullptr);
             break;
         }
+#   ifdef PLUME_D3D11_ENABLED
+        case UserConfiguration::GraphicsAPI::D3D11: {
+            std::scoped_lock lock(static_cast<D3D11Device *>(device)->contextMutex);
+            ImGui_ImplDX11_Shutdown();
+            break;
+        }
+#   endif
         default:
             assert(false && "Unknown Graphics API.");
             break;
@@ -207,6 +227,12 @@ namespace RT64 {
             ImGui_ImplVulkan_NewFrame();
             break;
         }
+#   ifdef PLUME_D3D11_ENABLED
+        case UserConfiguration::GraphicsAPI::D3D11: {
+            ImGui_ImplDX11_NewFrame();
+            break;
+        }
+#   endif
         default:
             assert(false && "Unknown Graphics API.");
             break;
@@ -217,6 +243,22 @@ namespace RT64 {
     }
 
     void Inspector::endFrame() {
+        // Positions saved in the ini can fall outside a smaller window, so top-level windows keep their title bar on screen.
+        const ImVec2 displaySize = ImGui::GetIO().DisplaySize;
+        for (ImGuiWindow *window : ImGui::GetCurrentContext()->Windows) {
+            if ((window->Flags & ImGuiWindowFlags_ChildWindow) || !window->Active || (displaySize.x <= 0.0f) || (displaySize.y <= 0.0f)) {
+                continue;
+            }
+
+            const float keepVisible = 48.0f;
+            ImVec2 clamped = window->Pos;
+            clamped.x = std::clamp(clamped.x, keepVisible - window->Size.x, std::max(displaySize.x - keepVisible, 0.0f));
+            clamped.y = std::clamp(clamped.y, 0.0f, std::max(displaySize.y - ImGui::GetFrameHeight(), 0.0f));
+            if ((clamped.x != window->Pos.x) || (clamped.y != window->Pos.y)) {
+                ImGui::SetWindowPos(window, clamped);
+            }
+        }
+
         ImGui::Render();
         Im3d::EndFrame();
         frameMutex.unlock();
@@ -242,6 +284,32 @@ namespace RT64 {
                 ImGui_ImplVulkan_RenderDrawData(drawData, interfaceCommandList->vk);
                 break;
             }
+#       ifdef PLUME_D3D11_ENABLED
+            case UserConfiguration::GraphicsAPI::D3D11: {
+                // D3D11 commands replay at submission, after ImGui may have started the next frame, so the draw lists are copied.
+                std::shared_ptr<ImDrawData> drawCopy(new ImDrawData(*drawData), [](ImDrawData *data) {
+                    for (ImDrawList *drawList : data->CmdLists) {
+                        IM_DELETE(drawList);
+                    }
+
+                    delete data;
+                });
+
+                for (ImDrawList *&drawList : drawCopy->CmdLists) {
+                    drawList = drawList->CloneOutput();
+                }
+
+                static_cast<D3D11CommandList *>(commandList)->commands.emplace_back([drawCopy](D3D11Context &c) {
+                    c.applyFramebuffer();
+                    ImGui_ImplDX11_RenderDrawData(drawCopy.get());
+                    c.graphicsPipelineDirty = true;
+                    c.graphics.bindingsDirty = true;
+                    c.framebufferDirty = true;
+                });
+
+                break;
+            }
+#       endif
             default:
                 assert(false && "Unknown Graphics API.");
                 break;

@@ -40,6 +40,8 @@ namespace RT64 {
         std::filesystem::path dataPath;
         bool detectDataPath = true;
         bool useConfigurationFile = true;
+        // Shader combinations compiled at startup when there is no ubershader (one "otherMode combiner flags" line each).
+        std::string shaderComboList;
     };
 
     struct Application : public ApplicationWindow::Listener {
@@ -107,8 +109,12 @@ namespace RT64 {
         EmulatorConfiguration emulatorConfig;
         EnhancementConfiguration enhancementConfig;
         ApplicationConfiguration appConfig;
+        bool skipUbershader = false;
+        bool textureSlots = false;
         UserConfiguration::GraphicsAPI chosenGraphicsAPI;
         bool freeCamClearQueued;
+        // F1 shows the developer UI; the inspector itself may also exist only for the host ImGui hook.
+        std::atomic<bool> inspectorVisible = false;
         UserPaths userPaths;
         std::unique_ptr<Interpreter> interpreter;
         std::unique_ptr<State> state;

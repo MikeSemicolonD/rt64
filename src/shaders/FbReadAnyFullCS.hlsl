@@ -7,9 +7,9 @@
 
 [[vk::push_constant]] ConstantBuffer<FbCommonCB> gConstants : register(b0, space0);
 Buffer<uint> gNewInput : register(t1, space0);
-RWTexture2D<float4> gOutputChangeColor : register(u0, space1);
-RWTexture2D<float> gOutputChangeDepth : register(u1, space1);
-RWTexture2D<uint> gOutputChangeBoolean : register(u2, space1);
+[[vk::image_format("rgba8")]] RWTexture2D<float4> gOutputChangeColor : register(u0, space1);
+[[vk::image_format("r32f")]] RWTexture2D<float> gOutputChangeDepth : register(u1, space1);
+[[vk::image_format("r8ui")]] RWTexture2D<uint> gOutputChangeBoolean : register(u2, space1);
 
 [numthreads(FB_COMMON_WORKGROUP_SIZE, FB_COMMON_WORKGROUP_SIZE, 1)]
 void CSMain(uint2 coord : SV_DispatchThreadID) {

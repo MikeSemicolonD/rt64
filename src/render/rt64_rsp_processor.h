@@ -35,9 +35,22 @@ namespace RT64 {
         std::unique_ptr<RSPProcessDescriptorSet> processSet;
         std::unique_ptr<RSPModifyDescriptorSet> modifySet;
 
+        // Devices without compute (D3D10-class) run RSPProcessCS and RSPModifyCS on the CPU from the upload buffers' contents.
+        bool cpuProcessing = false;
+        const DrawBuffers *cpuDrawBuffers = nullptr;
+        std::vector<hlslpp::float4> cpuScreenPos;
+        std::vector<hlslpp::float2> cpuTexcoords;
+        std::vector<hlslpp::float4> cpuColors;
+        std::unique_ptr<RenderBuffer> cpuPosUpload;
+        std::unique_ptr<RenderBuffer> cpuTcUpload;
+        std::unique_ptr<RenderBuffer> cpuColUpload;
+        uint64_t cpuUploadCapacity = 0;
+
         RSPProcessor(RenderDevice *device);
         ~RSPProcessor();
         void process(const ProcessParams &p);
         void recordCommandList(RenderWorker *worker, const ShaderLibrary *shaderLibrary, const OutputBuffers *outputBuffers);
+        void processOnCPU();
+        void recordCPUUploads(RenderWorker *worker, const OutputBuffers *outputBuffers);
     };
 };

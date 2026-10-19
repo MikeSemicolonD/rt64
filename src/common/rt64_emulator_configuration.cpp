@@ -12,5 +12,6 @@ namespace RT64 {
         dither.postBlendNoiseNegative = false;
         framebuffer.renderToRAM = true;
         framebuffer.copyWithGPU = true;
+        framebuffer.writeBack = true;
     }
 };

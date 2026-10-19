@@ -46,19 +46,24 @@ float3 computeSmoothNormal(uint vertexIndex) {
 
 [numthreads(GROUP_SIZE, 1, 1)]
 void CSMain(uint triangleIndex : SV_DispatchThreadID) {
-    if ((triangleIndex * 3) >= gConstants.indexCount) {
-        return;
+    // Every thread reaches the barrier; FXC rejects a sync after a divergent return.
+    const bool active = (triangleIndex * 3) < gConstants.indexCount;
+    uint v0 = 0, v1 = 0, v2 = 0;
+    float3 n0 = 0.0f, n1 = 0.0f, n2 = 0.0f;
+    if (active) {
+        const uint baseIndex = gConstants.indexStart + triangleIndex * 3;
+        v0 = srcFaceIndices[baseIndex + 0];
+        v1 = srcFaceIndices[baseIndex + 1];
+        v2 = srcFaceIndices[baseIndex + 2];
+        n0 = computeSmoothNormal(v0);
+        n1 = computeSmoothNormal(v1);
+        n2 = computeSmoothNormal(v2);
     }
 
-    const uint baseIndex = gConstants.indexStart + triangleIndex * 3;
-    const uint v0 = srcFaceIndices[baseIndex + 0];
-    const uint v1 = srcFaceIndices[baseIndex + 1];
-    const uint v2 = srcFaceIndices[baseIndex + 2];
-    const float3 n0 = computeSmoothNormal(v0);
-    const float3 n1 = computeSmoothNormal(v1);
-    const float3 n2 = computeSmoothNormal(v2);
     AllMemoryBarrierWithGroupSync();
-    dstWorldNorm[v0] = float4(n0, 1.0f);
-    dstWorldNorm[v1] = float4(n1, 1.0f);
-    dstWorldNorm[v2] = float4(n2, 1.0f);
+    if (active) {
+        dstWorldNorm[v0] = float4(n0, 1.0f);
+        dstWorldNorm[v1] = float4(n1, 1.0f);
+        dstWorldNorm[v2] = float4(n2, 1.0f);
+    }
 }

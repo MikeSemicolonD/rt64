@@ -191,7 +191,8 @@ namespace RT64 {
         RenderBufferBarrier counterBarrier = RenderBufferBarrier(changeCountBuffer.get(), RenderBufferAccess::WRITE);
         RenderTextureBarrier beforeBarriers[] = {
             RenderTextureBarrier(emptyFbChange.pixelTexture.get(), RenderTextureLayout::GENERAL),
-            RenderTextureBarrier(emptyFbChange.booleanTexture.get(), RenderTextureLayout::GENERAL)
+            RenderTextureBarrier(emptyFbChange.booleanTexture.get(), RenderTextureLayout::GENERAL),
+            RenderTextureBarrier(emptyFbChange.unusedOutputTexture.get(), RenderTextureLayout::GENERAL)
         };
 
         RenderTextureBarrier afterBarriers[] = {
