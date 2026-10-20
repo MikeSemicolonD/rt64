@@ -134,6 +134,37 @@ namespace RT64 {
         return RenderViewport(left, top, right - left, bottom - top);
     }
 
+    float FramebufferRenderer::aspectRatioScaleFor(const FixedRect &scissorRect, float pixelAspect, float aspectRatioSource, float aspectRatioTarget) {
+        const float SimilarityPercentage = 0.1f; // TODO: Make more strict once VI ratios are in.
+        const float scissorRatio = pixelAspect * static_cast<float>(scissorRect.width(false, true)) / static_cast<float>(scissorRect.height(false, true));
+        const bool adjustRatio = (abs((scissorRatio / aspectRatioSource) - 1.0f) < SimilarityPercentage);
+        return adjustRatio ? (aspectRatioTarget / aspectRatioSource) : 1.0f;
+    }
+
+    // Native draw rect to target pixels as addFramebuffer places it: partial-width rects sit in the centered original-aspect area, and an edge touching the scissor reaches the widened edge.
+    FixedRect FramebufferRenderer::targetWriteRect(const FixedRect &rect, const FixedRect &scissorRect, hlslpp::float2 resolutionScale, int32_t fbWidth, float aspectRatioScale) {
+        FixedRect r = rect.scaled(resolutionScale.x, resolutionScale.y);
+        if ((aspectRatioScale == 1.0f) || scissorRect.isNull()) {
+            return r;
+        }
+
+        const int32_t Slack = 4;
+        const bool touchesLeft = (rect.ulx <= scissorRect.ulx + Slack);
+        const bool touchesRight = (rect.lrx + Slack >= scissorRect.lrx);
+        const float center = float(fbWidth) / 2.0f;
+        auto centered = [&](float x) { return (center + (x - center) / aspectRatioScale) * resolutionScale.x; };
+        if (!touchesLeft || touchesRight) {
+            if (!touchesLeft) {
+                r.ulx = int32_t(floorf(centered(float(rect.left(false))))) << 2;
+            }
+            if (!touchesRight) {
+                r.lrx = int32_t(ceilf(centered(float(rect.right(true))))) << 2;
+            }
+        }
+
+        return r;
+    }
+
     hlslpp::float3 viewPositionFrom(hlslpp::float4x4 viewI) {
         return viewI[3].xyz;
     }
@@ -1929,10 +1960,7 @@ namespace RT64 {
         targetDrawCall.fbStorage = p.fbStorage;
         targetDrawCall.sceneIndices.clear();
 
-        const float SimilarityPercentage = 0.1f; // TODO: Make more strict once VI ratios are in.
-        const float scissorRatio = p.pixelAspect * static_cast<float>(fbPair.scissorRect.width(false, true)) / static_cast<float>(fbPair.scissorRect.height(false, true));
-        const bool adjustRatio = (abs((scissorRatio / p.aspectRatioSource) - 1.0f) < SimilarityPercentage);
-        const float aspectRatioScale = adjustRatio ? (p.aspectRatioTarget / p.aspectRatioSource) : 1.0f;
+        const float aspectRatioScale = aspectRatioScaleFor(fbPair.scissorRect, p.pixelAspect, p.aspectRatioSource, p.aspectRatioTarget);
         // Full-width test for widescreen expansion, with one native pixel of slack (the game scissors 3D to 0..W-1 but clears 0..W).
         const auto coversFbWidth = [&](int32_t ulx, int32_t lrx) {
             const int32_t Slack = 4;
@@ -1975,8 +2003,12 @@ namespace RT64 {
 
         if ((aspectRatioScale > 1.0f) && firstPassForColorImage && (p.fbStorage->colorTarget != nullptr) && !fbPair.scissorRect.isNull()) {
             const RenderRect full = convertFixedRect(fbPair.scissorRect, p.resolutionScale, p.fbWidth, 1.0f, extOriginPercentage, 0, G_EX_ORIGIN_NONE, G_EX_ORIGIN_NONE);
-            const RenderRect inner = convertFixedRect(fbPair.scissorRect, p.resolutionScale, p.fbWidth, 1.0f / aspectRatioScale, extOriginPercentage, 0, G_EX_ORIGIN_NONE, G_EX_ORIGIN_NONE);
-            const RenderRect strips[2] = { RenderRect(full.left, full.top, inner.left, full.bottom), RenderRect(inner.right, full.top, full.right, full.bottom) };
+            // Inner edges round inward: the partial target column at the original-aspect edge is never drawn and would keep stale pixels.
+            const float center = float(p.fbWidth) / 2.0f;
+            auto centered = [&](float x) { return (center + (x - center) / aspectRatioScale) * p.resolutionScale.x; };
+            const int32_t innerLeft = int32_t(std::ceil(centered(float(fbPair.scissorRect.left(true)))));
+            const int32_t innerRight = int32_t(std::floor(centered(float(fbPair.scissorRect.right(false)))));
+            const RenderRect strips[2] = { RenderRect(full.left, full.top, innerLeft, full.bottom), RenderRect(innerRight, full.top, full.right, full.bottom) };
             for (const RenderRect &strip : strips) {
                 if (strip.right <= strip.left) {
                     continue;
@@ -2289,13 +2321,18 @@ namespace RT64 {
                             // The call's scissor spans the whole width of the framebuffer pair scissor. The rect must not be using extended origins.
                             const bool regularOrigins = (call.callDesc.rectLeftOrigin == G_EX_ORIGIN_NONE) && (call.callDesc.rectRightOrigin == G_EX_ORIGIN_NONE);
                             const bool coversScissorWidth = regularOrigins && coversFbWidth(call.callDesc.rect.ulx, call.callDesc.rect.lrx);
-                            if (tileCopiesUsed || coversScissorWidth) {
+                            // A full-height rect touching a scissor side (the mission-start wipe panel) stretches like a full-width one, so its moving edge sweeps the widened screen.
+                            const FixedRect &sc = fbPair.scissorRect;
+                            const FixedRect &rc = call.callDesc.rect;
+                            const bool edgePanel = regularOrigins && !sc.isNull() && (rc.uly <= sc.uly + 4) && (rc.lry + 4 >= sc.lry) && ((rc.ulx <= sc.ulx + 4) || (rc.lrx + 4 >= sc.lrx));
+                            if (tileCopiesUsed || coversScissorWidth || edgePanel) {
                                 invRatioScale = 1.0f;
                             }
                             else {
                                 horizontalMisalignment = p.horizontalMisalignment;
                             }
                             RenderViewport viewportRect = convertViewportRect(call.callDesc.rect, p.resolutionScale, p.fbWidth, invRatioScale, extOriginPercentage, horizontalMisalignment, call.callDesc.rectLeftOrigin, call.callDesc.rectRightOrigin);
+
                             triangles.screenScale = { viewportRect.width / framebuffer.viewport.width, viewportRect.height / framebuffer.viewport.height };
                             triangles.screenOffset.x = halfPixelOffset.x + ((viewportRect.x + viewportRect.width / 2.0f) - halfViewportSize.x) / halfViewportSize.x;
                             triangles.screenOffset.y = halfPixelOffset.y + (halfViewportSize.y - (viewportRect.y + viewportRect.height / 2.0f)) / halfViewportSize.y;

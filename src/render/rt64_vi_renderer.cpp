@@ -4,6 +4,7 @@
 
 #include "rt64_vi_renderer.h"
 
+#include <cmath>
 #include <cstdlib>
 
 #include "shared/rt64_hlsl.h"
@@ -164,7 +165,10 @@ namespace RT64 {
         bottomRightScissor = fromHDtoWindow(bottomRightScissor, hdSize, windowSize);
 
         const float shift = presentShiftY.load(std::memory_order_relaxed) * windowSize.y;
-        viewport = RenderViewport(topLeftViewport.x, topLeftViewport.y - shift, bottomRightViewport.x - topLeftViewport.x, bottomRightViewport.y - topLeftViewport.y);
+        // Whole-pixel edges: float drift in a widescreen hdSize left the viewport ~0.07 px short of the window edge, so the last column never rasterized.
+        const hlslpp::float2 vpTopLeft = { std::round(topLeftViewport.x), std::round(topLeftViewport.y - shift) };
+        const hlslpp::float2 vpBottomRight = { std::round(bottomRightViewport.x), std::round(bottomRightViewport.y - shift) };
+        viewport = RenderViewport(vpTopLeft.x, vpTopLeft.y, vpBottomRight.x - vpTopLeft.x, vpBottomRight.y - vpTopLeft.y);
         scissor = RenderRect(lround(topLeftScissor.x), std::max(0L, lround(topLeftScissor.y - shift)), lround(bottomRightScissor.x), lround(bottomRightScissor.y - shift));
     }
 };

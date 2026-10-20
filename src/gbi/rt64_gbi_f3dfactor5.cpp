@@ -2900,8 +2900,20 @@ namespace RT64 {
                 if (f5_ring_buffer(s_mv_last_w1 & 0x00FFFFFFu) > 1 || f5_ring_buffer(s_mv_last_w1 & 0x00FFFFFFu) < 0) {
                     f5_hud_probe_slot(state, (f5_ring_buffer(s_mv_last_w1 & 0x00FFFFFFu) < 0) ? "face-fixedmtx" : "face-ring2", F5_FACE_SLOT, n);
                 }
+                // Menu backdrop JPEG tiles (64x32 RGBA16 at k*0x1000+0xA10) are drawn as triangles only by the screen-change wipe strip; the game leaves them unclamped and unmasked, so filtering past the last texel reads the next TMEM row. Clamp them.
+                const uint8_t rtile = state->rsp->textureState.tile & 7;
+                const LoadTile savedTile = state->rdp->tiles[rtile];
+                const uint32_t texAddr = state->rdp->texture.address & 0x00FFFFFFu;
+                const bool backdropTile = (st != nullptr) && ((texAddr & 0xFFFu) == 0xA10u) && (texAddr >= 0x620000u) && (texAddr < 0x720000u) &&
+                    (savedTile.siz == G_IM_SIZ_16b) && ((((savedTile.lrs - savedTile.uls) >> 2) + 1) == 64) && ((((savedTile.lrt - savedTile.ult) >> 2) + 1) == 32);
+                if (backdropTile) {
+                    state->rdp->setTile(rtile, savedTile.fmt, savedTile.siz, savedTile.line, savedTile.tmem, savedTile.palette, savedTile.cmt | G_TX_CLAMP, savedTile.cms | G_TX_CLAMP, savedTile.maskt, savedTile.masks, savedTile.shiftt, savedTile.shifts);
+                }
                 state->rsp->drawIndexedTri(F5_FACE_SLOT, F5_FACE_SLOT + 1, F5_FACE_SLOT + 2);
                 if (n == 4) state->rsp->drawIndexedTri(F5_FACE_SLOT, F5_FACE_SLOT + 2, F5_FACE_SLOT + 3);
+                if (backdropTile) {
+                    state->rdp->setTile(rtile, savedTile.fmt, savedTile.siz, savedTile.line, savedTile.tmem, savedTile.palette, savedTile.cmt, savedTile.cms, savedTile.maskt, savedTile.masks, savedTile.shiftt, savedTile.shifts);
+                }
                 if (flattened) {
                     state->rdp->setOtherMode(state->rdp->otherMode.H, savedL);
                 }

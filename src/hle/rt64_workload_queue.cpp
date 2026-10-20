@@ -833,9 +833,14 @@ namespace RT64 {
                     }
 
                     const uint64_t writeTimestamp = fbManager.nextWriteTimestamp();
+                    const float pairAspectRatioScale = fbPair.scissorRect.isNull() ? 1.0f : FramebufferRenderer::aspectRatioScaleFor(fbPair.scissorRect, workloadConfig.pixelAspect, workloadConfig.aspectRatioSource, workloadConfig.aspectRatioTarget);
+                    auto toTargetRect = [&](const FixedRect &rect) {
+                        return FramebufferRenderer::targetWriteRect(rect, fbPair.scissorRect, fixedResScale, int32_t(nativeColorWidth), pairAspectRatioScale);
+                    };
+
                     FixedRect depthFbRect;
                     if (colorFb != nullptr) {
-                        colorFb->lastWriteRect.merge(fbPair.drawColorRect.scaled(fixedResScale.x, fixedResScale.y));
+                        colorFb->lastWriteRect.merge(toTargetRect(fbPair.drawColorRect));
                         colorFb->lastWriteType = Framebuffer::Type::Color;
                         colorFb->lastWriteFmt = colorImg.fmt;
                         colorFb->lastWriteTimestamp = writeTimestamp;
@@ -847,7 +852,7 @@ namespace RT64 {
                     
                     const bool depthWrite = ((colorFb == nullptr) || depthFbChanged || depthFbTypeChanged || fbPair.depthWrite) && (depthFb != nullptr);
                     if (depthWrite && !depthFbRect.isNull()) {
-                        depthFb->lastWriteRect.merge(depthFbRect.scaled(fixedResScale.x, fixedResScale.y));
+                        depthFb->lastWriteRect.merge(toTargetRect(depthFbRect));
                         depthFb->lastWriteType = Framebuffer::Type::Depth;
                         depthFb->lastWriteFmt = G_IM_FMT_DEPTH;
                         depthFb->lastWriteTimestamp = writeTimestamp;

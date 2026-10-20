@@ -305,6 +305,8 @@ namespace RT64 {
         bool submitDepthAccess(RenderWorker *worker, RenderFramebufferStorage *fbStorage, bool readOnly, bool &depthState);
         void submitRasterScene(RenderWorker *worker, const Framebuffer &framebuffer, RenderFramebufferStorage *fbStorage, const RasterScene &rasterScene, bool &depthState);
         void addFramebuffer(const DrawParams &p);
+        static float aspectRatioScaleFor(const FixedRect &scissorRect, float pixelAspect, float aspectRatioSource, float aspectRatioTarget);
+        static FixedRect targetWriteRect(const FixedRect &rect, const FixedRect &scissorRect, hlslpp::float2 resolutionScale, int32_t fbWidth, float aspectRatioScale);
         bool fillRS64Lights(const DrawParams &p, Framebuffer &framebuffer, uint32_t transformsIndex, hlslpp::float2 screenScale, hlslpp::float2 screenOffset);
         bool rs64ViewFromScreen(const DrawParams &p, uint32_t transformsIndex, hlslpp::float2 screenScale, hlslpp::float2 screenOffset, rs64lights::Mat4 &out);
         bool fillRS64Shadows(const DrawParams &p, Framebuffer &framebuffer, uint32_t transformsIndex, hlslpp::float2 screenScale, hlslpp::float2 screenOffset, const rs64lights::Sun &sun);
