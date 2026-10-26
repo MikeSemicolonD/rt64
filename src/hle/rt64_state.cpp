@@ -1156,7 +1156,13 @@ namespace RT64 {
                     // Set whether the texture coordinates should be scaled or not based on the current configuration mode and the extended GBI flags.
                     const bool forcedUpscale2D = (flags.rect == 0) || (upscale2D == UserConfiguration::Upscale2D::All) || callDesc.extendedFlags.forceUpscale2D;
                     const bool upscaleIfScaledRect = (upscale2D == UserConfiguration::Upscale2D::ScaledOnly) && flags.rect && !callDesc.identityRectScale();
-                    flags.upscale2D = forcedUpscale2D || upscaleIfScaledRect;
+
+                    // RS64: 1:1 text (I4 fonts) upscales too, so it is as smooth as the text the game scales; RGBA 1:1 rects (the menu backdrop's
+                    // 64x32 tiles) stay native, as they seam when upscaled.
+                    const bool upscaleNonRgbaRect = (upscale2D == UserConfiguration::Upscale2D::ScaledOnly) && flags.rect && (callDesc.tileCount > 0) &&
+                        (workload.drawData.callTiles[callDesc.tileIndex].loadTile.fmt != G_IM_FMT_RGBA);
+
+                    flags.upscale2D = forcedUpscale2D || upscaleIfScaledRect || upscaleNonRgbaRect;
 
                     if (proj.usesViewport()) {
                         // F5 cull=BOTH means double-sided (draw both faces), not single-face cull.
