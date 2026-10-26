@@ -19,6 +19,12 @@ namespace interop {
         float2 pad;
         // AO strength, debug view (5 shadow, 6 AO, 7 indirect, 8 reflection; 0 compose), unused x2.
         float4 aoParams;
+        // Temporal pass: this frame's view position -> the previous frame's screen (final ndc x, y, depth), and -> the previous frame's view.
+        float4x4 prevScreenFromView;
+        float4x4 prevViewFromView;
+        float4 prevViewport;
+        // History valid (0/1), distance tolerance (fraction), weight of the new frame, unused.
+        float4 temporal;
     };
 #ifdef HLSL_CPU
 };

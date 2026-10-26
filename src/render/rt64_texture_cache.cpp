@@ -1236,6 +1236,12 @@ namespace RT64 {
                 {
                     std::unique_lock lock(textureMapMutex);
                     for (const TextureMapAddition &addition : textureMapAdditions) {
+                        // The terrain pass queues its tiles from another thread than the RDP, so the same texture can arrive twice: keep the first.
+                        if (textureMap.hashMap.find(addition.hash) != textureMap.hashMap.end()) {
+                            delete addition.texture;
+                            continue;
+                        }
+
                         textureMap.add(addition.hash, addition.texture->creationFrame, addition.texture);
                     }
 
@@ -1442,9 +1448,12 @@ namespace RT64 {
         std::unique_lock lock(textureMapMutex);
         textureMap.clearReplacements();
         textureMap.replacementMap.clear(textureMap.evictedTextures);
+        replacementGeneration++;
     }
 
     void TextureCache::reloadReplacements(bool clearQueue, uint64_t exclusiveDbHash) {
+        replacementGeneration++;
+
         // Queue all currently loaded hashes to detect replacements with.
         {
             std::unique_lock queueLock(uploadQueueMutex);

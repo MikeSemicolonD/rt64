@@ -222,7 +222,7 @@ namespace RT64 {
         fprintf(stdout, "Driver Version: 0x%" PRIx64 "\n", deviceDescription.driverVersion);
 
         // Without the ubershader draws wait for their specialized shaders; texture slots imply it, ROGUESQ_UBERSHADER=0 forces it for testing.
-        textureSlots = UsesTextureSlots(chosenGraphicsAPI == UserConfiguration::GraphicsAPI::D3D11, device->getCapabilities());
+        textureSlots = UsesTextureSlots(chosenGraphicsAPI == UserConfiguration::GraphicsAPI::D3D11, chosenGraphicsAPI == UserConfiguration::GraphicsAPI::D3D12, device->getCapabilities());
         const char *ubershaderSetting = std::getenv("ROGUESQ_UBERSHADER");
         skipUbershader = textureSlots || ((ubershaderSetting != nullptr) && (ubershaderSetting[0] == '0'));
         if (skipUbershader) {
@@ -370,6 +370,7 @@ namespace RT64 {
         // Create the shader library.
         const RenderMultisampling multisampling = RasterShader::generateMultisamplingPattern(userConfig.msaaSampleCount(), device->getCapabilities().sampleLocations);
         shaderLibrary = std::make_unique<ShaderLibrary>(usesHDR, usesHardwareResolve);
+        shaderLibrary->textureSlots = textureSlots;
         shaderLibrary->setupCommonShaders(renderInterface.get(), device.get());
         shaderLibrary->setupMultisamplingShaders(renderInterface.get(), device.get(), multisampling);
 

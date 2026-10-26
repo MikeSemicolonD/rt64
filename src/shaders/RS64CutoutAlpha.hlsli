@@ -105,9 +105,35 @@ uint rs64HitEntry(uint prim, uint count, bool emissive) {
     return lo;
 }
 
+// Static terrain hit colours (rs64lights::terrainHitColors): header (triangles per ground cell, first water triangle or 0, ground cells, drawn water
+// surface y in map space), then rgba8 per ground cell and per water quad. A zero header (the placeholder) means no table.
+ByteAddressBuffer gTerrainColors : register(t11, space3);
+
+bool rs64TerrainCellColor(uint prim, out float3 rgb) {
+    rgb = float3(0.0f, 0.0f, 0.0f);
+    const uint per = gTerrainColors.Load(0);
+    if (per == 0) {
+        return false;
+    }
+
+    const uint waterPrim = gTerrainColors.Load(4);
+    const uint slot = ((waterPrim > 0) && (prim >= waterPrim)) ? (gTerrainColors.Load(8) + (prim - waterPrim) / 2) : (prim / per);
+    rgb = rs64UnpackHit(gTerrainColors.Load(16 + slot * 4)).rgb;
+    return true;
+}
+
+// Whether a static terrain hit at map-space height y lies at or under the drawn water (heights grow downward), so the pixel shows water.
+bool rs64UnderWater(float y) {
+    return (gTerrainColors.Load(4) > 0) && (y >= asfloat(gTerrainColors.Load(12)) - 1.0f);
+}
+
 // Mirrors rs64lights::hitColorFor; rgb = hit colour, a = 1 when emissive. hitParams: x hit count, y emissive count, z terrain colour, w caster average
-// (cutout and history hits use the average).
+// (cutout and history hits use the average); static terrain hits take their cell's colour when the table is bound.
 float4 rs64HitColor(uint instanceId, uint prim, uint4 hitParams) {
+    float3 cell;
+    if ((instanceId == 1) && rs64TerrainCellColor(prim, cell)) {
+        return float4(cell, 0.0f);
+    }
     if ((instanceId == 0) && (hitParams.x > 0)) {
         return rs64UnpackHit(gHitColors[rs64HitEntry(prim, hitParams.x, false)].y);
     }

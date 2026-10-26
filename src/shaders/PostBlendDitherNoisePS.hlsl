@@ -13,6 +13,8 @@ void PSMain(
       in float4 vertexPosition : SV_POSITION
     , in float2 vertexUV : TEXCOORD
     , in float4 vertexSmoothColor : COLOR0
+    // Unused, but D3D12 links stages by register: without it COLOR1 lands in another register than RasterVSDynamic's and the pipeline fails.
+    , nointerpolation in uint vertexRenderIndex : RIDX
     , nointerpolation in float4 vertexFlatColor : COLOR1
     , [[vk::location(0)]] [[vk::index(0)]] out float4 resultColor : SV_TARGET0
 )

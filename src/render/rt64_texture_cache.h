@@ -240,6 +240,8 @@ namespace RT64 {
         bool useTexture(uint64_t hash, uint64_t submissionFrame, uint32_t &textureIndex);
         bool addReplacement(uint64_t hash, const std::string &relativePath, ReplacementShift shift);
         bool hasReplacement(uint64_t hash);
+        // Changes whenever the loaded replacements do, so callers that checked hasReplacement once know to check again.
+        std::atomic<uint32_t> replacementGeneration = 0;
         void clearReplacementDirectories();
         void reloadReplacements(bool clearQueue, uint64_t exclusiveDbHash = 0);
         bool loadReplacementDirectory(const ReplacementDirectory &replacementDirectory);

@@ -223,6 +223,7 @@ namespace RT64 {
         std::vector<rs64lights::Candidate> rs64Lights;
         rs64lights::Sun rs64Sun;
         rs64lights::TerrainFrame rs64Terrain;
+        rs64lights::TerrainPassFrame rs64TerrainPass;
         std::vector<uint32_t> rs64NoCast;
         // Glow-card transforms: their cutout faces never cast (opaque parts on the transform still do).
         std::vector<uint32_t> rs64NoCastCutout;

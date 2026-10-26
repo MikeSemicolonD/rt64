@@ -43,6 +43,9 @@ namespace rs64lights {
         float intensity = 0.0f;
         float falloff = 2.0f;
         float shadowStart = 0.0f;
+        uint8_t kind = KindNone;
+        // An engine exhaust light (a mesh light in model units).
+        bool engine = false;
     };
 
     // Row-vector convention (v * M), matching hlslpp::mul(float4, float4x4).
@@ -186,6 +189,11 @@ namespace rs64lights {
         }
         static const char* const kCraft[] = { "xwing", "ywing", "awing", "vwing", "snowspeeder", "falcon", "tie_inter", "tie_fighter", "tie_d", "imp_shuttle" };
         const size_t len = size_t(hash - meshKey);
+        // Wingmen use their own models, "wm" + craft + "wng" (wmxwng, wmvwng).
+        if ((len == 6) && (std::strncmp(meshKey, "wm", 2) == 0) && (std::strncmp(meshKey + 3, "wng", 3) == 0)) {
+            return true;
+        }
+
         for (const char* c : kCraft) {
             if ((std::strlen(c) == len) && (std::strncmp(c, meshKey, len) == 0)) {
                 return true;
@@ -331,6 +339,44 @@ namespace rs64lights {
         out.kind = KindMesh;
     }
 
+    // Level-select preview image (RGBA16 texrects fading in over the hologram): texel colour weighted by texel and fade alpha, gathered over one frame
+    // (active while the briefing room is up) and lit the next. weight / samples is how much of the image is showing.
+    struct MenuImageGlow {
+        bool active = false;
+        double rgb[3] = {};
+        double weight = 0.0;
+        double samples = 0.0;
+    };
+
+    inline MenuImageGlow& menuImageGlow() {
+        static MenuImageGlow g;
+        return g;
+    }
+
+    // Adds an RGBA16 big-endian texel (rdram is byte-swapped per word) seen at fade alpha `fade`.
+    inline void menuImageSample(MenuImageGlow& g, uint16_t texel, float fade) {
+        const double a = (texel & 1) ? fade : 0.0;
+        g.rgb[0] += a * ((texel >> 11) & 31) / 31.0;
+        g.rgb[1] += a * ((texel >> 6) & 31) / 31.0;
+        g.rgb[2] += a * ((texel >> 1) & 31) / 31.0;
+        g.weight += a;
+        g.samples += 1.0;
+    }
+
+    // The image's light: its average colour at the hologram, as strong as the image is visible. False when nothing showed.
+    inline bool menuImageLight(const MenuImageGlow& g, const float pos[3], float radius, float intensity, float falloff, Candidate& out) {
+        if (!(g.weight > 0.0) || !(intensity > 0.0f)) {
+            return false;
+        }
+
+        menuHoloLight(pos, radius, intensity * float(g.weight / g.samples), falloff, out);
+        for (int c = 0; c < 3; ++c) {
+            out.color[c] = float(g.rgb[c] / g.weight);
+        }
+
+        return true;
+    }
+
     // Warm glow of the table's lit ring: `count` camera-space lights on a circle in the table plane (axisX, axisD), lifted along `up`. Zero intensity = none.
     inline uint32_t menuRingLights(const float center[3], const float axisX[3], const float axisD[3], const float up[3], float ringRadius, float lift, uint32_t count, float radius, float intensity, Candidate* out, uint32_t maxOut) {
         if (!(intensity > 0.0f)) {
@@ -405,6 +451,37 @@ namespace rs64lights {
         return std::sqrt(m.m[0][0] * m.m[0][0] + m.m[0][1] * m.m[0][1] + m.m[0][2] * m.m[0][2]);
     }
 
+    // One light per spot: a part drawn in several vertex loads emits its exhaust lights once per load, which tripled them and overflowed MaxLights
+    // (the nearest-first cut then changed frame to frame). Lights within `eps` of each other with the same colour keep the strongest. An engine's
+    // animated glow sprite also makes a sprite light that pulses and drops out; within half an exhaust light's reach, the exhaust light stands for it.
+    // Returns the count.
+    inline size_t dedupeLights(Resolved* lights, size_t n, float eps) {
+        size_t out = 0;
+        for (size_t i = 0; i < n; ++i) {
+            bool merged = false;
+            for (size_t j = 0; (j < n) && !merged && (lights[i].kind == KindSprite); ++j) {
+                const Resolved& m = lights[j];
+                const float dx = m.pos[0] - lights[i].pos[0], dy = m.pos[1] - lights[i].pos[1], dz = m.pos[2] - lights[i].pos[2];
+                merged = m.engine && ((dx * dx + dy * dy + dz * dz) <= (0.25f * m.radius * m.radius));
+            }
+            for (size_t j = 0; (j < out) && !merged; ++j) {
+                Resolved& k = lights[j];
+                const float dx = k.pos[0] - lights[i].pos[0], dy = k.pos[1] - lights[i].pos[1], dz = k.pos[2] - lights[i].pos[2];
+                const bool sameColor = (k.color[0] == lights[i].color[0]) && (k.color[1] == lights[i].color[1]) && (k.color[2] == lights[i].color[2]);
+                if (sameColor && ((dx * dx + dy * dy + dz * dz) <= (eps * eps))) {
+                    if (lights[i].intensity > k.intensity) {
+                        k = lights[i];
+                    }
+                    merged = true;
+                }
+            }
+            if (!merged) {
+                lights[out++] = lights[i];
+            }
+        }
+        return out;
+    }
+
     // Nearest light edge to the camera (origin) first; zero-intensity lights are dropped.
     inline size_t selectLights(const Resolved* in, size_t n, Resolved* out, size_t maxOut) {
         std::vector<std::pair<float, size_t>> order;
@@ -431,6 +508,10 @@ namespace rs64lights {
         // Boot sequence: dir is the authored light in camera space until the renderer rotates it by the frame's view.
         bool worldAuthored = false;
         float skip[4] = {};
+        // Level sun: its world direction (levelSunWorld), which the renderer turns to camera space through the frame's terrain transform; the RDRAM
+        // camera matrix the GBI uses is not always the live one (Calamari: the sun stayed fixed to the camera).
+        bool levelWorld = false;
+        float world[3] = {};
     };
 
     // The level light points toward the sun with y flipped relative to the y-down world (Tatooine's sun meshes); R maps world to camera as out = R * v.
@@ -449,8 +530,10 @@ namespace rs64lights {
         return true;
     }
 
-    inline bool sunCameraDir(const float worldL[3], const float viewR[9], float out[3]) {
-        const float w[3] = { worldL[0], -std::fabs(worldL[1]), worldL[2] };
+    // minTanElev lifts a sun lower than atan(minTanElev) above the horizon to that elevation.
+    inline bool sunCameraDir(const float worldL[3], const float viewR[9], float out[3], float minTanElev = 0.0f) {
+        const float horizontal = std::sqrt(worldL[0] * worldL[0] + worldL[2] * worldL[2]);
+        const float w[3] = { worldL[0], -std::max(std::fabs(worldL[1]), horizontal * minTanElev), worldL[2] };
         float v[3];
         for (int i = 0; i < 3; ++i) {
             v[i] = viewR[i * 3 + 0] * w[0] + viewR[i * 3 + 1] * w[1] + viewR[i * 3 + 2] * w[2];
@@ -481,6 +564,76 @@ namespace rs64lights {
             }
         }
         return sunCameraDir(modelL, R, out);
+    }
+
+    // The up direction most of the scene agrees on: each candidate (xyz per entry) scores the weight of every candidate within acos(cosTol) of it.
+    // Hangar: floor, walls, platform and parked ships share it; a tilted prop or the bobbing selected ship is outvoted.
+    inline bool consensusUp(const float* ups, const uint32_t* weights, size_t n, float cosTol, float out[3]) {
+        uint64_t bestScore = 0;
+        size_t best = n;
+        for (size_t i = 0; i < n; ++i) {
+            uint64_t score = 0;
+            for (size_t j = 0; j < n; ++j) {
+                const float d = ups[i * 3] * ups[j * 3] + ups[i * 3 + 1] * ups[j * 3 + 1] + ups[i * 3 + 2] * ups[j * 3 + 2];
+                score += (d > cosTol) ? weights[j] : 0;
+            }
+            if (score > bestScore) {
+                bestScore = score;
+                best = i;
+            }
+        }
+        if (best == n) {
+            return false;
+        }
+
+        for (int k = 0; k < 3; ++k) {
+            out[k] = ups[best * 3 + k];
+        }
+
+        return true;
+    }
+
+    // Camera motion since the previous frame (row vectors: previous camera space = current * out), voted over static objects: each candidate is an
+    // object's inverse(current) * previous, weighted by its triangles; a moving object (the selected ship, a fighter) disagrees with the rest.
+    // Rotation within rotTol per entry, translation within posTol + 0.002 x its length. False when no candidate carries half the weight.
+    inline bool consensusCameraDelta(const Mat4* deltas, const uint32_t* weights, size_t n, float rotTol, float posTol, Mat4& out) {
+        auto agree = [&](const Mat4& a, const Mat4& b) {
+            for (int r = 0; r < 3; ++r) {
+                for (int c = 0; c < 3; ++c) {
+                    if (std::fabs(a.m[r][c] - b.m[r][c]) > rotTol) {
+                        return false;
+                    }
+                }
+            }
+            const float len = std::sqrt(a.m[3][0] * a.m[3][0] + a.m[3][1] * a.m[3][1] + a.m[3][2] * a.m[3][2]);
+            for (int c = 0; c < 3; ++c) {
+                if (std::fabs(a.m[3][c] - b.m[3][c]) > (posTol + 0.002f * len)) {
+                    return false;
+                }
+            }
+            return true;
+        };
+        uint64_t total = 0;
+        uint64_t bestScore = 0;
+        size_t best = n;
+        for (size_t i = 0; i < n; ++i) {
+            total += weights[i];
+            uint64_t score = 0;
+            for (size_t j = 0; j < n; ++j) {
+                score += agree(deltas[i], deltas[j]) ? weights[j] : 0;
+            }
+            if (score > bestScore) {
+                bestScore = score;
+                best = i;
+            }
+        }
+        if ((best == n) || ((bestScore * 2) < total)) {
+            return false;
+        }
+
+        out = deltas[best];
+
+        return true;
     }
 
     // Hangar floor: receivers whose normal is within acos(skip.w) of the world up (skip.xyz, camera space) keep the game's painted shadow; w == 0 disables. Mirrored by RS64ShadowsPS.
@@ -593,6 +746,13 @@ namespace rs64lights {
         return uint32_t(lo);
     }
 
+    // Self-lit surfaces (the briefing room's light strips): emitters for GI and reflections, never casters.
+    inline bool emissiveSurface(const char* meshKey) {
+        static const char kName[] = "lights";
+        const size_t n = sizeof(kName) - 1;
+        return (meshKey != nullptr) && (std::strncmp(meshKey, kName, n) == 0) && (meshKey[n] == '#');
+    }
+
     // Light-source glow cards are cutouts that must never cast.
     inline bool cutoutDenied(const char* meshKey) {
         static const char* const kDenied[] = { "i_ltsrc_hi", "i_lnd_hi" };
@@ -610,6 +770,17 @@ namespace rs64lights {
 
     // HMP terrain (descriptor 0x80136DC0): W*H cells, each a 512-unit tile of 5x5 s8 heights (y = h << 4, base 0).
     constexpr int32_t TerrainTileSpan = 512;
+    // The traced water surface's depth under the water level, heightmap units: at the level, just under the drawn water (lifted 2 record units), so
+    // a pixel's terrain lookup finds it. Heights grow downward: water is where the ground is at or above the level (selectGridCellTileVariant 0x80046030).
+    constexpr int32_t TerrainWaterDip = 0;
+
+    // Inputs of the game's terrain vertex lighting: descriptor 0x80136DC0 ambient (+0x3C), cell scale (+0x10) and sun (light object at +0x48).
+    struct TerrainShade {
+        float ambient[3] = {};
+        float sunRgb[3] = {};
+        float sunDir[3] = {};
+        float cellScale = 12.8f;
+    };
 
     struct TerrainMap {
         uint32_t width = 0, height = 0;
@@ -618,7 +789,92 @@ namespace rs64lights {
         std::vector<int32_t> tileCell;
         float heightScale = 1.0f;
         uint64_t version = 0;
+        // Cells that changed since map baseVersion (runtime edits; inclusive, with the one-cell border their normals and colours reach); baseVersion 0 = a new map.
+        uint64_t baseVersion = 0;
+        uint32_t dirtyX0 = 0, dirtyZ0 = 0, dirtyX1 = 0, dirtyZ1 = 0;
+        // 25 RGB vertex colours per cell (row-major, like heights), filled only for the static terrain renderer.
+        std::vector<uint8_t> colors;
+        // Per cell: the tile's texture id (tile +0, an index into the level's lv_X_TEX table). Level id (gCurrentLevel) at capture.
+        std::vector<uint16_t> texIds;
+        uint32_t level = 0;
+        // Per cell: 0 ground, 1 water (tile flag 0x08), 2 shore (0x10); the water surface itself animates and is drawn from TerrainPassFrame.
+        std::vector<uint8_t> waterKind;
+        // Water level at capture ([0x801375C0], heightmap units); ground below it shows the wave tiles instead.
+        int32_t waterLevel = 0;
+        TerrainShade shade;
     };
+
+    // A cell's 25 vertex colours as the game lit them this frame (its record's colours, every light included), harvested for the terrain pass.
+    struct TerrainCellColors {
+        uint32_t cell = 0;
+        uint8_t rgb[75] = {};
+    };
+
+    // Whole-map terrain pass for one workload: the anchor game call the GBI emitted at the first terrain record and the record-space origin (in cells).
+    struct TerrainPassFrame {
+        std::shared_ptr<const TerrainMap> map;
+        uint32_t anchorCall = UINT32_MAX;
+        int32_t originX = 0, originZ = 0;
+        int32_t offsetX = 0, offsetZ = 0;
+        // This frame's water level (heightmap units).
+        int32_t waterLevel = 0;
+        std::vector<TerrainCellColors> harvest;
+        // The game's task counter (30 a second), the clock for the texture animations.
+        uint64_t task = 0;
+    };
+
+    // A texture animation from lv_X_TEX: after the plain id -> bank entries come blocks of (id, frame count, frames per second, banks...), ending at 0xFFFF.
+    struct TerrainTexAnim {
+        uint32_t id = 0;
+        uint32_t fps = 0;
+        std::vector<uint32_t> banks;
+    };
+
+    // The table's own layout has no count of plain entries: blocks start at the first index at or above minFirst from which they parse cleanly to the 0xFFFF end.
+    inline std::vector<TerrainTexAnim> terrainTextureAnims(const uint8_t* ids, uint32_t idsSize, uint32_t bankEntries, uint32_t minFirst) {
+        const uint32_t n = idsSize / 4;
+        auto at = [&](uint32_t i) {
+            return (uint32_t(ids[i * 4]) << 8) | ids[i * 4 + 1];
+        };
+        for (uint32_t first = minFirst; first < n; ++first) {
+            std::vector<TerrainTexAnim> anims;
+            uint32_t i = first;
+            bool ok = true;
+            while (ok && (i < n) && (at(i) != 0xFFFF)) {
+                const uint32_t count = (i + 2 < n) ? at(i + 1) : 0;
+                ok = (at(i) < first) && (count > 0) && (at(i + 2) > 0) && (i + 3 + count <= n);
+                if (ok) {
+                    TerrainTexAnim &a = anims.emplace_back();
+                    a.id = at(i);
+                    a.fps = at(i + 2);
+                    for (uint32_t k = 0; ok && (k < count); ++k) {
+                        a.banks.push_back(at(i + 3 + k));
+                        ok = a.banks.back() < bankEntries;
+                    }
+                    i += 3 + count;
+                }
+            }
+            if (ok && (i < n)) {
+                return anims;
+            }
+        }
+        return {};
+    }
+
+    // CI4 64x64 + 16 RGBA5551 bank entry (level/tex, 2080 bytes; odd rows TMEM word-swapped) to 4096 RGBA8 texels, as the explorer's decodeTerrainTex.
+    constexpr uint32_t TerrainTexBytes = 2080;
+    inline void decodeTerrainTexture(const uint8_t* e, uint32_t out[4096]) {
+        auto c5 = [](uint32_t v) {
+            return (v << 3) | (v >> 2);
+        };
+        for (uint32_t i = 0; i < 4096; ++i) {
+            const uint32_t src = ((i >> 6) & 1) ? (i ^ 8) : i;
+            const uint8_t byte = e[src >> 1];
+            const uint32_t idx = (src & 1) ? (byte & 15) : (byte >> 4);
+            const uint32_t v = (uint32_t(e[2048 + idx * 2]) << 8) | e[2048 + idx * 2 + 1];
+            out[i] = c5((v >> 11) & 31) | (c5((v >> 6) & 31) << 8) | (c5((v >> 1) & 31) << 16) | ((v & 1) ? 0xFF000000u : 0u);
+        }
+    }
 
     struct TerrainSample {
         int32_t x = 0, z = 0;
@@ -631,6 +887,9 @@ namespace rs64lights {
         uint32_t transformIndex = UINT32_MAX;
         std::vector<uint32_t> transforms;
         bool mixed = false;
+        // The whole-map terrain pass knows the record-space origin exactly (in solveTerrainOrigin's terms); it replaces the vote, which open water starves.
+        bool exact = false;
+        int32_t exactX = 0, exactZ = 0;
     };
 
     // The game reloads the terrain root matrix mid-list under new transform indices; only a different matrix marks the frame mixed.
@@ -703,6 +962,33 @@ namespace rs64lights {
         }
     }
 
+    // Cells past each map edge the water draw covers (RS64TerrainVS): past the game's terrain reach (64 cells around the camera at most), so an
+    // ocean level's sea fogs out instead of ending in view.
+    constexpr int32_t TerrainWaterMargin = 96;
+    // How far (cells) the water's outer ring reaches past the margin, past any far plane (RS64TerrainVS kWaterFarCells).
+    constexpr int32_t TerrainWaterFarCells = 4096;
+
+    // The water draw's cells, row-major over the map and its margin: water and shore cells in the map, and every margin cell (so the map
+    // never ends in a void); none on a map without water. fn(col, row, map cell), past the edge the nearest edge cell.
+    template <typename F>
+    inline void forEachTerrainWaterCell(const TerrainMap& m, F&& fn) {
+        const int32_t w = int32_t(m.width), h = int32_t(m.height);
+        const bool anyWater = std::any_of(m.waterKind.begin(), m.waterKind.end(), [](uint8_t k) { return k != 0; });
+        if ((w == 0) || (h == 0) || !anyWater) {
+            return;
+        }
+
+        for (int32_t row = -TerrainWaterMargin; row < h + TerrainWaterMargin; ++row) {
+            for (int32_t col = -TerrainWaterMargin; col < w + TerrainWaterMargin; ++col) {
+                const bool outside = (col < 0) || (row < 0) || (col >= w) || (row >= h);
+                const size_t c = size_t(std::clamp(row, 0, h - 1)) * m.width + size_t(std::clamp(col, 0, w - 1));
+                if (outside || ((c < m.waterKind.size()) && (m.waterKind[c] != 0))) {
+                    fn(col, row, c);
+                }
+            }
+        }
+    }
+
     inline void buildTerrainMesh(const TerrainMap& m, int sub, std::vector<float>& pos, std::vector<uint32_t>& idx) {
         pos.clear();
         idx.clear();
@@ -714,6 +1000,182 @@ namespace rs64lights {
                 }
                 terrainTileMesh(&m.heights[c * 25], sub, int32_t(col) * TerrainTileSpan, int32_t(row) * TerrainTileSpan, m.heightScale, pos, idx);
             }
+        }
+
+        // Water and shore cells also get a flat surface just under the drawn water (flat at the level), so traced rays meet water instead of the
+        // seabed without the water surface shadowing itself.
+        const float y = float((m.waterLevel + TerrainWaterDip) << 4) * m.heightScale;
+        forEachTerrainWaterCell(m, [&](int32_t col, int32_t row, size_t) {
+            const uint32_t a = uint32_t(pos.size() / 3);
+            // The outer ring reaches TerrainWaterFarCells further, as the drawn water does.
+            const float reach = float(TerrainWaterFarCells * TerrainTileSpan);
+            const int32_t lastCol = int32_t(m.width) + TerrainWaterMargin - 1, lastRow = int32_t(m.height) + TerrainWaterMargin - 1;
+            const float x0 = float(col * TerrainTileSpan) - ((col == -TerrainWaterMargin) ? reach : 0.0f), x1 = float((col + 1) * TerrainTileSpan) + ((col == lastCol) ? reach : 0.0f);
+            const float z0 = float(row * TerrainTileSpan) - ((row == -TerrainWaterMargin) ? reach : 0.0f), z1 = float((row + 1) * TerrainTileSpan) + ((row == lastRow) ? reach : 0.0f);
+            const float corners[12] = { x0, y, z0, x1, y, z0, x0, y, z1, x1, y, z1 };
+            pos.insert(pos.end(), corners, corners + 12);
+            const uint32_t tri[6] = { a, a + 3, a + 2, a, a + 1, a + 3 };
+            idx.insert(idx.end(), tri, tri + 6);
+        });
+    }
+
+    // The drawn water surface's lift over the water level (record units; heights grow downward), as kWaterLift in RS64Terrain.hlsli; the water fades
+    // out over it as a shore rises.
+    constexpr float TerrainWaterLift = 16.0f;
+
+    // Hit colours for buildTerrainMesh's triangles, in its cell order: header (triangles per ground cell, first water triangle or 0, ground cells, the
+    // drawn water surface's map-space y as float bits), then one rgba8 per ground cell and per water quad: the cell's texture average (texAvg, rgb8 per
+    // cell) times its average vertex colour.
+    inline void terrainHitColors(const TerrainMap& m, int sub, const std::vector<uint32_t>& texAvg, std::vector<uint32_t>& out) {
+        const uint32_t per = uint32_t(2 * (4 * sub) * (4 * sub));
+        out.assign(4, 0);
+        auto cellColor = [&](size_t c) {
+            uint32_t rgb = 0;
+            for (int ch = 0; ch < 3; ++ch) {
+                uint32_t sum = 0;
+                for (int k = 0; (k < 25) && ((c + 1) * 75 <= m.colors.size()); ++k) {
+                    sum += m.colors[c * 75 + k * 3 + ch];
+                }
+                const uint32_t shade = ((c + 1) * 75 <= m.colors.size()) ? (sum / 25) : 255;
+                const uint32_t tex = (c < texAvg.size()) ? ((texAvg[c] >> (8 * ch)) & 0xFF) : 255;
+                rgb |= ((tex * shade + 127) / 255) << (8 * ch);
+            }
+            return rgb;
+        };
+
+        uint32_t ground = 0;
+        for (size_t c = 0; c < size_t(m.width) * m.height; ++c) {
+            if ((c >= m.present.size()) || !m.present[c] || ((c + 1) * 25 > m.heights.size())) {
+                continue;
+            }
+            out.push_back(cellColor(c));
+            ++ground;
+        }
+
+        bool water = false;
+        forEachTerrainWaterCell(m, [&](int32_t, int32_t, size_t c) {
+            out.push_back(cellColor(c));
+            water = true;
+        });
+
+        out[0] = per;
+        out[1] = water ? ground * per : 0;
+        out[2] = ground;
+        const float surfaceY = (float(m.waterLevel * 16) - TerrainWaterLift) * m.heightScale;
+        memcpy(&out[3], &surfaceY, sizeof(float));
+    }
+
+    // A level light from the HMP lighting block, as the terrain lighting reads it (rgb +0, type byte +0xE, pos +0x10, radius +0x1C).
+    struct TerrainLight {
+        float rgb[3] = {};
+        float pos[3] = {};
+        float radius = 0.0f;
+        bool box = false;
+    };
+
+    inline int8_t terrainHeight(const TerrainMap& m, uint32_t col, uint32_t row, int k) {
+        return m.heights[(size_t(row) * m.width + col) * 25 + size_t(k)];
+    }
+
+    // Central differences over the height lattice, as emitGridCellTileStrip 0x80049814 builds them; past the map edge the cell's own tile stands in.
+    inline void terrainVertexNormal(const TerrainMap& m, uint32_t col, uint32_t row, int px, int py, float cellScale, float out[3]) {
+
+#if defined(__clang__)
+#pragma clang fp contract(off)
+#endif
+
+        const uint32_t l = (col > 0) ? col - 1 : col;
+        const uint32_t r = (col + 1 < m.width) ? col + 1 : col;
+        const uint32_t u = (row > 0) ? row - 1 : row;
+        const uint32_t d = (row + 1 < m.height) ? row + 1 : row;
+        const int hx0 = (px > 0) ? terrainHeight(m, col, row, py * 5 + px - 1) : terrainHeight(m, l, row, py * 5 + 3);
+        const int hx1 = (px < 4) ? terrainHeight(m, col, row, py * 5 + px + 1) : terrainHeight(m, r, row, py * 5 + 1);
+        const int hz0 = (py > 0) ? terrainHeight(m, col, row, (py - 1) * 5 + px) : terrainHeight(m, col, u, 15 + px);
+        const int hz1 = (py < 4) ? terrainHeight(m, col, row, (py + 1) * 5 + px) : terrainHeight(m, col, d, 5 + px);
+        const float ny = 256.0f / cellScale;
+        const float nx = float(hx0 - hx1);
+        const float nz = float(hz0 - hz1);
+        const float len = std::sqrt(nx * nx + ny * ny + nz * nz);
+
+        out[0] = nx / len;
+        out[1] = ny / len;
+        out[2] = nz / len;
+    }
+
+    // transformWorldPosToGridSpace 0x8004A6C0 (misnamed): ambient + sun * N.L, plus box and point lights; p = (col + px/4, height, row + py/4).
+    inline void terrainVertexColor(const TerrainShade& s, const float n[3], const float p[3], const TerrainLight* lights, size_t count, uint8_t out[3]) {
+
+#if defined(__clang__)
+#pragma clang fp contract(off)
+#endif
+
+        float c[3] = { s.ambient[0], s.ambient[1], s.ambient[2] };
+        const float ndl = n[0] * s.sunDir[0] + n[1] * s.sunDir[1] + n[2] * s.sunDir[2];
+
+        if (0.0f < ndl) {
+            for (int i = 0; i < 3; ++i) {
+                c[i] = s.ambient[i] + s.sunRgb[i] * ndl;
+            }
+        }
+
+        for (size_t k = 0; k < count; ++k) {
+            const TerrainLight& L = lights[k];
+            float scale = 1.0f;
+
+            if (L.box) {
+                const float dx = std::fabs(p[0] - L.pos[0]);
+                const float dz = std::fabs(p[2] - L.pos[2]);
+
+                if ((L.radius <= dx) || (L.radius <= dz)) {
+                    continue;
+                }
+
+                scale = std::sqrt(1.0f - (((dz < dx) ? dx : dz) / L.radius));
+            }
+            else {
+                const float dx = p[0] - L.pos[0];
+                const float dy = p[1] - L.pos[1];
+                const float dz = p[2] - L.pos[2];
+                const float nd = n[0] * dx + n[1] * dy + n[2] * dz;
+                const float d2 = dx * dx + dy * dy + dz * dz;
+
+                if (!(0.01f < nd) || !(d2 < L.radius * L.radius)) {
+                    continue;
+                }
+
+                if (!(d2 < 1e-4f)) {
+                    scale = nd * ((1.0f / std::sqrt(d2)) - (1.0f / L.radius));
+                }
+            }
+
+            for (int i = 0; i < 3; ++i) {
+                c[i] = c[i] + L.rgb[i] * scale;
+            }
+        }
+
+        for (int i = 0; i < 3; ++i) {
+            out[i] = (c[i] >= 256.0f) ? 255 : ((c[i] < 0.0f) ? 0 : uint8_t(c[i]));
+        }
+    }
+
+    // The 25 colours of one cell; matches the game's cell+0x54 block (verified bit-exact on PJ64 Tatooine goldens, lights untested).
+    inline void terrainCellColors(const TerrainMap& m, uint32_t col, uint32_t row, const TerrainShade& s, const TerrainLight* lights, size_t count, uint8_t out[25 * 3]) {
+
+#if defined(__clang__)
+#pragma clang fp contract(off)
+#endif
+
+        const float hscale = s.cellScale * (1.0f / 256.0f) * 0.5f;
+
+        for (int k = 0; k < 25; ++k) {
+            const int px = k % 5, py = k / 5;
+            float n[3];
+
+            terrainVertexNormal(m, col, row, px, py, s.cellScale, n);
+
+            const float p[3] = { float(col) + float(px) * 0.25f, float(terrainHeight(m, col, row, k)) * hscale, float(row) + float(py) * 0.25f };
+
+            terrainVertexColor(s, n, p, lights, count, out + k * 3);
         }
     }
 
@@ -864,6 +1326,8 @@ namespace rs64lights {
         float menuHoloGain;
         float menuHoloFalloff;
         float menuRingGain;
+        float menuImageGain;
+        float temporalAlpha;
         float hangarFloorCos;
         float torpedoRadius;
         std::atomic<bool> fogShafts;
@@ -902,6 +1366,8 @@ namespace rs64lights {
         float reflRoughnessDeg;
         float reflRange;
         float reflStrength;
+        // A level sun lower than this (degrees) is lifted to it: a near-horizon sun throws long shadows and the terminator blackens gentle slopes.
+        float sunMinElevationDeg;
     };
 
     // ROGUESQ_RT_LIGHTS=1 enables the pass; the rest are tuning and debug knobs.
@@ -931,6 +1397,8 @@ namespace rs64lights {
             envFloat("ROGUESQ_RT_MENU_HOLO_GAIN", 1.0f),
             envFloat("ROGUESQ_RT_MENU_HOLO_FALLOFF", 1.0f),
             envFloat("ROGUESQ_RT_MENU_RING_GAIN", 3.0f),
+            envFloat("ROGUESQ_RT_MENU_IMAGE_GAIN", 2.0f),
+            std::clamp(envFloat("ROGUESQ_RT_TEMPORAL", 0.2f), 0.0f, 1.0f),
             envFloat("ROGUESQ_RT_HANGAR_FLOOR_COS", 0.995f),
             envFloat("ROGUESQ_RT_LIGHTS_TORPEDO_RADIUS", 750.0f),
             envFloat("ROGUESQ_RT_FOG_SHAFTS", 0.0f) != 0.0f,
@@ -969,6 +1437,7 @@ namespace rs64lights {
             envFloat("ROGUESQ_RT_REFL_ROUGHNESS", 20.0f),
             envFloat("ROGUESQ_RT_REFL_RANGE", 0.1f),
             envFloat("ROGUESQ_RT_REFL_STRENGTH", 3.0f),
+            std::clamp(envFloat("ROGUESQ_RT_SUN_MIN_ELEVATION", 25.0f), 0.0f, 89.0f),
         };
         return c;
     }
@@ -1026,6 +1495,51 @@ namespace rs64lights {
             default: c.fogShafts = on; break;
         }
         return true;
+    }
+
+    // Debug views in one cycle (F9 / Shift+F9): off, the trace views (ROGUESQ_RT_SHADOWS_DEBUG 1-10), then the light views (ROGUESQ_RT_LIGHTS_DEBUG 1-3).
+    struct DebugView {
+        int shadows;
+        int lights;
+        const char* name;
+    };
+
+    inline const DebugView* debugViews(size_t& count) {
+        static const DebugView kViews[] = {
+            { 0, 0, "off" },
+            { 1, 0, "shadow mask" },
+            { 2, 0, "shadow mask + self-hits" },
+            { 3, 0, "shadow mask + cutout casters" },
+            { 4, 0, "shadow casters" },
+            { 5, 0, "soft shadow" },
+            { 6, 0, "ambient occlusion" },
+            { 7, 0, "indirect light (GI + reflections)" },
+            { 8, 0, "reflection strength" },
+            { 9, 0, "reflection hit colour" },
+            { 10, 0, "reflection hit instance" },
+            { 0, 1, "view distance" },
+            { 0, 2, "light reach" },
+            { 0, 3, "light visibility" },
+        };
+        count = sizeof(kViews) / sizeof(kViews[0]);
+        return kViews;
+    }
+
+    // Steps the live debug view by dir (+1 / -1) from the one in use; returns it.
+    inline const DebugView& stepDebugView(int dir) {
+        size_t n = 0;
+        const DebugView* views = debugViews(n);
+        Config& c = mutableConfig();
+        size_t cur = 0;
+        for (size_t i = 0; i < n; ++i) {
+            if ((views[i].shadows == c.shadowsDebug) && (views[i].lights == c.debugMode)) {
+                cur = i;
+            }
+        }
+        const size_t next = (cur + n + size_t(dir < 0 ? n - 1 : 1)) % n;
+        c.shadowsDebug = views[next].shadows;
+        c.debugMode = views[next].lights;
+        return views[next];
     }
 
     // A framebuffer pair's own main fragment always casts; other same-view fragments need 8+ draws (the trailing radar has ~4).

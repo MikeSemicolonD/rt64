@@ -41,11 +41,15 @@ namespace interop {
         float4 sunColor;
         // Hit colours (patched when the scene is built): hit table count, emissive table count, terrain colour, caster average (rgba8).
         uint4 hitParams;
-        // 1 sun shadows, 2 AO, 4 GI, 8 reflections.
+        // 1 sun shadows, 2 AO, 4 GI, 8 reflections, 16 water reflections.
         uint featureMask;
-        uint featurePad0;
+        // First water triangle of the static terrain mesh (0 = no water).
+        uint waterPrim;
         uint featurePad1;
         uint featurePad2;
+        // The frame's vertex fog (RSPFog mul, offset; z = 1 when valid) and colour, for fogging what water reflects as the view fogs it.
+        float4 fogParams;
+        float4 fogColor;
     };
 #ifdef HLSL_CPU
 };

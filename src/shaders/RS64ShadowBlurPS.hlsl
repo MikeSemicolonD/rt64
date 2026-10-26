@@ -109,7 +109,7 @@ BlurOut PSMain(in float4 pos : SV_Position, in float2 uv : TEXCOORD0) {
         return float4(ind.rgb, 1.0f);
     }
     if (dbg > 7.5f) {
-        return float4(ind.aaa, 1.0f);
+        return float4(abs(ind.aaa), 1.0f);
     }
     if (dbg > 6.5f) {
         return float4(ind.rgb, 1.0f);
@@ -120,9 +120,10 @@ BlurOut PSMain(in float4 pos : SV_Position, in float2 uv : TEXCOORD0) {
     if (dbg > 4.5f) {
         return float4((1.0f - s).xxx, 1.0f);
     }
-    // Mirrors rs64lights::composeFactor (blend dst * src + dst * srcA).
+    // Mirrors rs64lights::composeFactor (blend dst * src + dst * srcA). A water mix (alpha -F) keeps 1 - F of the water under its reflection.
     const float dark = (1.0f - gBlur.params.x * s) * (1.0f - gBlur.aoParams.x * ao);
-    return float4(dark * saturate(ind.rgb), dark);
+    const float keep = (ind.a < 0.0f) ? saturate(1.0f + ind.a) : 1.0f;
+    return float4(dark * saturate(ind.rgb), dark * keep);
 #else
     BlurOut o;
     o.mask = float4(s, radius, c.b, ao);

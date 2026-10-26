@@ -16,7 +16,9 @@
 #include "shared/rt64_frame_params.h"
 #include "shared/rt64_gpu_tile.h"
 #include "shared/rt64_render_indices.h"
+#include "shared/rt64_rs64_shadow_blur_cb.h"
 #include "shared/rt64_render_params.h"
+#include "shared/rt64_rs64_terrain_cb.h"
 
 #include "rt64_buffer_uploader.h"
 #include "rt64_descriptor_sets.h"
@@ -182,6 +184,18 @@ namespace RT64 {
             std::unique_ptr<RenderBuffer> rs64BlurHBuffer;
             std::unique_ptr<RenderBuffer> rs64BlurVBuffer;
             bool rs64ShadowsSoft = false;
+            // Temporal AO / indirect history (mask + indirect), two sets alternating: the pass writes rs64HistWrite and reads the other.
+            std::unique_ptr<RenderTexture> rs64HistMask[2];
+            std::unique_ptr<RenderTexture> rs64HistIndirect[2];
+            std::unique_ptr<RenderFramebuffer> rs64HistFb[2];
+            std::unique_ptr<RS64ShadowTemporalDescriptorSet> rs64TemporalSet;
+            uint32_t rs64HistWrite = 0;
+            bool rs64TemporalOn = false;
+            // The previous frame of this slot: its main view's objects by matrix id, screen-from-view and viewport (history is reprojected through them).
+            std::unordered_map<uint32_t, rs64lights::Mat4> rs64PrevObjects;
+            rs64lights::Mat4 rs64PrevScreenFromView = {};
+            float rs64PrevViewport[4] = {};
+            bool rs64HistValid = false;
         };
 
         // Per displayed frame: the main view's opaque casters as one mesh over worldPosBuffer (plume's Vulkan BLAS build handles one mesh only).
@@ -213,6 +227,11 @@ namespace RT64 {
             std::unique_ptr<RenderBuffer> terrainPosBuffer, terrainIndexBuffer, terrainBlasBuffer, terrainScratch;
             std::unique_ptr<RenderBuffer> terrainNormalBuffer, terrainIndexGpu, terrainNormalGpu;
             uint64_t terrainIndexBytes = 0, terrainNormalBytes = 0;
+            // First water triangle in the terrain mesh (the water quads follow the ground); 0 when the map has none.
+            uint32_t terrainWaterPrim = 0;
+            // Hit colours of the terrain mesh's cells (header: triangles per ground cell, first water triangle, ground cells; then rgba8 per cell).
+            std::unique_ptr<RenderBuffer> terrainColorBuffer, terrainColorGpu;
+            uint64_t terrainColorBytes = 0;
             std::unique_ptr<RenderAccelerationStructure> terrainBlas;
             float terrainTransform[3][4] = {};
             bool terrainActive = false;
@@ -256,6 +275,51 @@ namespace RT64 {
         RS64ShadowScene rs64Shadow;
         rs64lights::FogCache rs64FogCache;
         std::unique_ptr<RenderBuffer> rs64CutoutPlaceholder;
+
+        // RS64 whole-map terrain pass: GPU copies of the map, rebuilt when its version changes, and this workload's anchor call parameters.
+        struct RS64TerrainGPU {
+            uint64_t version = 0;
+            uint32_t layers = 0;
+            // Per layer: its texture as the game loads it into TMEM and RT64's hash of that, so texture packs can replace it; the replacement's
+            // texture cache index this frame (UINT32_MAX = none, the ROM texels are drawn). The first layersQueued went to the cache (rs64TerrainTextures).
+            std::vector<std::array<uint8_t, 4096>> layerTMEM;
+            std::vector<uint64_t> layerHash;
+            std::vector<uint32_t> layerReplaced;
+            size_t layersQueued = 0;
+            uint32_t replacementGeneration = 0;
+            // Keyed by bank, or 0x10000 | id for an animated id (recordRS64TerrainSetup); kept across runtime edits.
+            std::unordered_map<uint32_t, uint32_t> layerOf;
+            // This frame's gFrame carries replacement indices (recordRS64Terrain then draws the pack variant).
+            bool anyReplaced = false;
+            std::unique_ptr<RenderBuffer> staging, heights, colors, cellLayers, texels;
+            uint64_t heightsBytes = 0, colorsBytes = 0, cellLayersBytes = 0, texelsBytes = 0;
+            // Per frame: lighting, the animated water surface and each layer's current animation frame (RS64TerrainVS gFrame), rewritten in recordSetup.
+            std::unique_ptr<RenderBuffer> frame;
+            uint32_t frameFloat4s = 0;
+            // Animated textures: the cells' layer and the layer of each frame.
+            struct Anim {
+                uint32_t layer = 0;
+                uint32_t fps = 0;
+                std::vector<uint32_t> frames;
+            };
+            std::vector<Anim> anims;
+            // Water and shore cells, drawn again as the flat water mesh.
+            uint32_t waterCells = 0;
+            // Per frame: each chunk's LOD (0xFF culled) then the per-LOD chunk lists (gChunks); lodBase/lodCount index the lists.
+            std::unique_ptr<RenderBuffer> chunks;
+            uint32_t chunksCapacity = 0;
+            static constexpr uint32_t MaxLods = 8;
+            uint32_t lodBase[MaxLods] = {}, lodCount[MaxLods] = {};
+            // Per chunk: ground height range (record units), for frustum culling.
+            std::vector<int32_t> chunkMinH, chunkMaxH;
+            std::unique_ptr<RS64TerrainDescriptorSet> set;
+        };
+        RS64TerrainGPU rs64TerrainGpu;
+        std::shared_ptr<const rs64lights::TerrainMap> rs64TerrainMap;
+        rs64lights::TerrainPassFrame rs64TerrainFrame;
+        interop::RS64TerrainCB rs64TerrainCB = {};
+        // The anchor's record space to clip space this frame (world * viewProj, row vectors), for chunk culling and LOD.
+        hlslpp::float4x4 rs64TerrainMvp = hlslpp::float4x4(0.0f);
 
         std::vector<Framebuffer> framebufferVector;
         std::vector<BufferUploader *> pendingUploaders;
@@ -309,7 +373,8 @@ namespace RT64 {
         static FixedRect targetWriteRect(const FixedRect &rect, const FixedRect &scissorRect, hlslpp::float2 resolutionScale, int32_t fbWidth, float aspectRatioScale);
         bool fillRS64Lights(const DrawParams &p, Framebuffer &framebuffer, uint32_t transformsIndex, hlslpp::float2 screenScale, hlslpp::float2 screenOffset);
         bool rs64ViewFromScreen(const DrawParams &p, uint32_t transformsIndex, hlslpp::float2 screenScale, hlslpp::float2 screenOffset, rs64lights::Mat4 &out);
-        bool fillRS64Shadows(const DrawParams &p, Framebuffer &framebuffer, uint32_t transformsIndex, hlslpp::float2 screenScale, hlslpp::float2 screenOffset, const rs64lights::Sun &sun);
+        bool fillRS64Shadows(const DrawParams &p, Framebuffer &framebuffer, uint32_t transformsIndex, hlslpp::float2 screenScale, hlslpp::float2 screenOffset, const rs64lights::Sun &sun, const rs64lights::FogParams &fog);
+        void fillRS64Temporal(const DrawParams &p, Framebuffer &framebuffer, uint32_t transformsIndex, const rs64lights::Mat4 &viewFromScreen, interop::RS64ShadowBlurCB &bcb);
         void recordRS64Shadows(RenderWorker *worker, const Framebuffer &framebuffer, bool &depthState);
         void ensureRS64SoftTargets(RenderWorker *worker, Framebuffer &framebuffer, uint32_t width, uint32_t height);
         void buildRS64HitColors(const DrawParams &p, const std::vector<std::pair<rs64lights::IndexRange, uint32_t>> &terrainCalls, const float *floorUp);
@@ -319,6 +384,10 @@ namespace RT64 {
         void bindRS64Traced(RenderWorker *worker, RS64TracedDescriptorSet &set, RenderBuffer *paramsBuffer, uint64_t countOffset, bool countAsFloat);
         void recordRS64ShadowScene(RenderWorker *worker, bool dynamic);
         void recordRS64TerrainBLAS(RenderWorker *worker);
+        void recordRS64TerrainSetup(RenderWorker *worker);
+        void recordRS64TerrainFrame(RenderWorker *worker);
+        void rs64TerrainTextures(TextureCache *textureCache, uint64_t submissionFrame);
+        void recordRS64Terrain(RenderWorker *worker, const Framebuffer &framebuffer, const InstanceDrawCall &anchor);
         void endFramebuffers(RenderWorker *worker, const DrawBuffers *drawBuffers, const OutputBuffers *outputBuffers, bool rtEnabled);
         void recordSetup(RenderWorker *worker, std::vector<BufferUploader *> bufferUploaders, RSPProcessor *rspProcessor, VertexProcessor *vertexProcessor, const OutputBuffers *outputBuffers, bool rtEnabled);
         void recordFramebuffer(RenderWorker *worker, uint32_t framebufferIndex);

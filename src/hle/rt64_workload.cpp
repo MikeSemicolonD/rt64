@@ -32,11 +32,13 @@ namespace RT64 {
         rs64Terrain.samples.clear();
         rs64Terrain.transformIndex = UINT32_MAX;
         rs64Terrain.transforms.clear();
+        rs64TerrainPass = rs64lights::TerrainPassFrame{};
         rs64NoCast.clear();
         rs64NoCastCutout.clear();
         rs64Craft.clear();
         rs64CallTex.clear();
         rs64Terrain.mixed = false;
+        rs64Terrain.exact = false;
         fbChangePool.reset();
         fbStorage.reset();
         physicalAddressTransformMap.clear();

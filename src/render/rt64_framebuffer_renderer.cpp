@@ -15,6 +15,8 @@
 
 #include "common/rt64_elapsed_timer.h"
 #include "common/rt64_math.h"
+#include "xxHash/xxh3.h"
+#include "common/rt64_tmem_hasher.h"
 #include "hle/rt64_color_converter.h"
 #include "gbi/rt64_f3d.h"
 #include "render/rt64_raster_shader.h"
@@ -64,6 +66,12 @@ namespace interop {
         float2 TexelSize;
     };
 };
+
+// RS64 whole-map terrain pass: cells per chunk edge (one instance, one LOD and one frustum test per chunk).
+static constexpr uint32_t RS64TerrainChunkCells = 8;
+
+// Host (hook_helpers.cpp): the ROM's terrain texture bank and a level's lv_X_TEX table; 0 when the level has none.
+extern "C" int rs64_terrain_textures(uint32_t level, const uint8_t **bank, uint32_t *bankSize, const uint8_t **ids, uint32_t *idsSize);
 
 namespace RT64 {
     // ROGUESQ_LOG_BATCH: per-vertex renderIndex stamp collisions (a vertex stamped
@@ -196,7 +204,7 @@ namespace RT64 {
         assert(worker != nullptr);
 
         this->shaderLibrary = shaderLibrary;
-        textureSlots = UsesTextureSlots(graphicsAPI == UserConfiguration::GraphicsAPI::D3D11, worker->device->getCapabilities());
+        textureSlots = UsesTextureSlots(graphicsAPI == UserConfiguration::GraphicsAPI::D3D11, graphicsAPI == UserConfiguration::GraphicsAPI::D3D12, worker->device->getCapabilities());
         slotTMEMCount = TMEMSlotCount(graphicsAPI == UserConfiguration::GraphicsAPI::D3D11);
         frameParams.frameCount = 0;
         frameParams.viewUbershaders = false;
@@ -221,6 +229,7 @@ namespace RT64 {
     }
     
     void FramebufferRenderer::resetFramebuffers(RenderWorker *worker, bool ubershadersVisible, float ditherNoiseStrength, const RenderMultisampling &multisampling) {
+        rs64TerrainMap.reset();
         instanceDrawCallVector.clear();
         hitGroupVector.clear();
         renderIndicesVector.clear();
@@ -372,6 +381,19 @@ namespace RT64 {
     void FramebufferRenderer::updateShaderDescriptorSet(RenderWorker *worker, const DrawBuffers *drawBuffers, const OutputBuffers *outputBuffers, const bool raytracingEnabled) {
         assert(worker != nullptr);
         assert(drawBuffers != nullptr);
+
+        // The terrain pass transforms the map like RSPProcessCS does the game's vertices: through the frame's (interpolated) transform buffers.
+        if (rs64TerrainMap) {
+            if (rs64TerrainGpu.set == nullptr) {
+                rs64TerrainGpu.set = std::make_unique<RS64TerrainDescriptorSet>(shaderLibrary->samplerLibrary, worker->device);
+            }
+
+            RS64TerrainDescriptorSet &ts = *rs64TerrainGpu.set;
+            ts.setBuffer(ts.gWorldTransforms, drawBuffers->worldTransformsBuffer.get(), RenderBufferStructuredView(sizeof(interop::float4x4)));
+            ts.setBuffer(ts.gViewProjTransforms, drawBuffers->viewProjTransformsBuffer.get(), RenderBufferStructuredView(sizeof(interop::float4x4)));
+            ts.setBuffer(ts.gViewports, drawBuffers->rspViewportsBuffer.get(), RenderBufferStructuredView(sizeof(interop::RSPViewport)));
+            ts.setBuffer(ts.gFog, drawBuffers->rspFogBuffer.get(), RenderBufferStructuredView(sizeof(interop::RSPFog)));
+        }
         
         // Size the boundless texture descriptor set at a stable ceiling (the shader's
         // UpperRange=8192) and build it ONCE, rather than rebuilding it ever-larger each
@@ -777,6 +799,13 @@ namespace RT64 {
                     break;
                 }
 
+                if (drawCall.rs64TerrainAnchor) {
+                    switchToDepthWrite();
+                    recordRS64Terrain(worker, framebuffer, drawCall);
+                    switchToGraphicsPipeline();
+                    break;
+                }
+
                 const bool typeDifferent = (drawCall.type != previousCallType);
                 const bool testZDifferent = (drawCall.type == InstanceDrawCall::Type::IndexedTriangles) && (drawCall.triangles.vertexTestZ != previousVertexTestZ);
                 if (typeDifferent || testZDifferent) {
@@ -898,6 +927,7 @@ namespace RT64 {
                     for (size_t j = sceneIdx + 1; j < rasterScene.instanceIndices.size(); ++j) {
                         const InstanceDrawCall &d2 = instanceDrawCallVector[rasterScene.instanceIndices[j]];
                         if (d2.type != drawCall.type) break;
+                        if (d2.rs64TerrainAnchor) break;
                         const auto &t2 = d2.triangles;
                         if (t2.pipeline != triangles.pipeline) break;
                         if (t2.vertexTestZ != triangles.vertexTestZ) break;
@@ -1618,6 +1648,11 @@ namespace RT64 {
             uploader->commandListAfterBarriers(worker);
         }
 
+        if (rs64TerrainMap) {
+            recordRS64TerrainSetup(worker);
+            recordRS64TerrainFrame(worker);
+        }
+
         if (rspProcessor != nullptr) {
             // The CPU path reads the upload buffers while recording, so the uploader threads must have finished filling them.
             if (rspProcessor->cpuProcessing) {
@@ -1676,6 +1711,11 @@ namespace RT64 {
         rs64Shadow.emissiveRanges.clear();
         rs64Shadow.emissiveCalls.clear();
         rs64Shadow.craftRanges.clear();
+        // Gathered per frame with this frame's vertex buffer: a frame that builds no scene must not reuse them (the buffer may have been reallocated).
+        rs64Shadow.indices.clear();
+        rs64Shadow.craftIndices.clear();
+        rs64Shadow.emissiveIndices.clear();
+        rs64Shadow.worldPos = nullptr;
 
 #   if RT_ENABLED
         if (rtEnabled) {
@@ -1854,6 +1894,7 @@ namespace RT64 {
                 framebufferVector.back().rs64FogSet = std::make_unique<RS64TracedDescriptorSet>(p.worker->device);
                 framebufferVector.back().rs64BlurHSet = std::make_unique<RS64ShadowBlurDescriptorSet>(p.worker->device);
                 framebufferVector.back().rs64BlurVSet = std::make_unique<RS64ShadowBlurDescriptorSet>(p.worker->device);
+                framebufferVector.back().rs64TemporalSet = std::make_unique<RS64ShadowTemporalDescriptorSet>(p.worker->device);
                 framebufferVector.back().rs64BlurHBuffer = p.worker->device->createBuffer(RenderBufferDesc::UploadBuffer(sizeof(interop::RS64ShadowBlurCB), RenderBufferFlag::CONSTANT));
                 framebufferVector.back().rs64BlurVBuffer = p.worker->device->createBuffer(RenderBufferDesc::UploadBuffer(sizeof(interop::RS64ShadowBlurCB), RenderBufferFlag::CONSTANT));
             }
@@ -2053,13 +2094,34 @@ namespace RT64 {
         uint32_t lightsSplitProj = UINT32_MAX;
         uint32_t lightsSplitCall = UINT32_MAX;
         if (postWanted) {
-            uint32_t mostCalls = 0;
+            // Ranked by scene-geometry draws (depth-writing casters), then by draws.
+            uint64_t best = 0;
             for (uint32_t pr = 0; pr < fbPair.projectionCount; pr++) {
                 const Projection &proj = fbPair.projections[pr];
-                if ((proj.type == Projection::Type::Perspective) && !proj.scissorRect.isNull() && (proj.gameCallCount > mostCalls)) {
-                    mostCalls = proj.gameCallCount;
+                if ((proj.type != Projection::Type::Perspective) || proj.scissorRect.isNull() || (proj.gameCallCount == 0)) {
+                    continue;
+                }
+                uint64_t casters = 0;
+                for (uint32_t d = 0; d < proj.gameCallCount; d++) {
+                    const interop::OtherMode &om = proj.gameCalls[d].callDesc.otherMode;
+                    rs64lights::CasterMode cm;
+                    cm.zUpd = om.zUpd();
+                    cm.primDepth = (om.zSource() == G_ZS_PRIM);
+                    cm.xlu = ((om.L & ZMODE_MASK) == ZMODE_XLU);
+                    cm.fillOrCopy = (om.cycleType() == G_CYC_FILL) || (om.cycleType() == G_CYC_COPY);
+                    cm.extended = (proj.gameCalls[d].callDesc.extendedType != DrawExtendedType::None);
+                    cm.triangles = proj.gameCalls[d].callDesc.triangleCount;
+                    casters += (rs64lights::casterClass(cm) != rs64lights::CasterNone) ? 1 : 0;
+                }
+                const uint64_t score = (casters << 32) | proj.gameCallCount;
+                if (score > best) {
+                    best = score;
                     lightsProjIndex = pr;
                 }
+            }
+            // A view with no scene geometry has nothing to light (the pause menu's emblem over the held mission frame, which already carries its passes).
+            if ((best >> 32) == 0) {
+                lightsProjIndex = UINT32_MAX;
             }
             if (lightsProjIndex != UINT32_MAX) {
                 const uint32_t mainTi = fbPair.projections[lightsProjIndex].transformsIndex;
@@ -2178,6 +2240,24 @@ namespace RT64 {
                 renderIndices.rdpTileCount = call.callDesc.tileCount;
                 renderIndices.highlightColor = call.debuggerDesc.highlightColor;
                 renderIndicesVector.push_back(renderIndices);
+                instanceDrawCall.rs64TerrainAnchor = (p.curWorkload != nullptr) && (call.callDesc.callIndex == p.curWorkload->rs64TerrainPass.anchorCall) && proj.usesViewport();
+                if (instanceDrawCall.rs64TerrainAnchor) {
+                    const rs64lights::TerrainPassFrame &tp = p.curWorkload->rs64TerrainPass;
+                    const uint32_t v = drawData.faceIndices[call.meshDesc.faceIndicesStart];
+                    rs64TerrainMap = tp.map;
+                    rs64TerrainFrame = tp;
+                    rs64TerrainCB.worldIndex = drawData.worldIndices[v];
+                    rs64TerrainCB.viewProjIndex = drawData.viewProjIndices[v];
+                    rs64TerrainMvp = hlslpp::mul(hlslpp::float4x4(drawData.worldTransforms[rs64TerrainCB.worldIndex]), hlslpp::float4x4(drawData.viewProjTransforms[rs64TerrainCB.viewProjIndex]));
+                    rs64TerrainCB.fogIndex = drawData.fogIndices[v];
+                    rs64TerrainCB.originX = tp.originX;
+                    rs64TerrainCB.originZ = tp.originZ;
+                    rs64TerrainCB.offsetX = float(tp.offsetX);
+                    rs64TerrainCB.offsetZ = float(tp.offsetZ);
+                    rs64TerrainCB.fogColor = drawData.rdpParams[call.callDesc.callIndex].fogColor;
+                    rs64TerrainCB.resolution = fbParams.resolution;
+                    rs64TerrainCB.heightScale = tp.map ? tp.map->heightScale : 1.0f;
+                }
 
                 uint32_t cycleType = call.callDesc.otherMode.cycleType();
                 if (cycleType == G_CYC_FILL) {
@@ -2489,7 +2569,14 @@ namespace RT64 {
             uint32_t terrainVotes = 0;
             if (lightsCfg.shadowTerrain && tf.map && !tf.mixed && (tf.transformIndex < terrainWorld.size())) {
                 const bool hasPrev = (rs64Shadow.terrainOriginVersion == tf.map->version);
-                terrainVotes = rs64lights::solveTerrainOrigin(*tf.map, tf.samples.data(), tf.samples.size(), terrainOx, terrainOz, hasPrev, rs64Shadow.terrainOriginX, rs64Shadow.terrainOriginZ);
+                if (tf.exact) {
+                    terrainOx = tf.exactX;
+                    terrainOz = tf.exactZ;
+                    terrainVotes = 1;
+                }
+                else {
+                    terrainVotes = rs64lights::solveTerrainOrigin(*tf.map, tf.samples.data(), tf.samples.size(), terrainOx, terrainOz, hasPrev, rs64Shadow.terrainOriginX, rs64Shadow.terrainOriginZ);
+                }
             }
             rs64Shadow.terrainActive = (terrainVotes > 0);
             if (rs64Shadow.terrainActive) {
@@ -2499,7 +2586,7 @@ namespace RT64 {
                 rs64Shadow.terrainMap = tf.map;
                 rs64lights::terrainInstanceTransform(rs64ToMat4(terrainWorld[tf.transformIndex]), terrainOx, terrainOz, rs64Shadow.terrainTransform);
             }
-            const bool hitColors = lightsCfg.gi || lightsCfg.reflections;
+            const bool hitColors = lightsCfg.gi || lightsCfg.reflections || (rs64Shadow.terrainWaterPrim > 0);
             thread_local std::vector<std::pair<rs64lights::IndexRange, uint32_t>> terrainCalls;
             terrainCalls.clear();
             // Ranges accumulate over the workload's framebuffer pairs (the game can split one view across pairs); recordSetup consumes them.
@@ -2570,22 +2657,32 @@ namespace RT64 {
             if (sun.worldAuthored && (mainTi < drawData.viewTransforms.size()) && rs64lights::viewRotation(rs64ToMat4(drawData.viewTransforms[mainTi]), viewR)) {
                 sun.valid = rs64lights::sunCameraDir(rs64lights::menuSunDir(), viewR, sun.dir);
             }
+
+            // Level sun: through the (interpolated) terrain transform, the same frame the terrain casters use, so it stays fixed to the world.
+            if (sun.levelWorld && rs64Shadow.terrainActive && rs64lights::viewRotation(rs64ToMat4(terrainWorld[tf.transformIndex]), viewR)) {
+                sun.valid = rs64lights::sunCameraDir(sun.world, viewR, sun.dir, std::tan(lightsCfg.sunMinElevationDeg * 3.14159265f / 180.0f));
+            }
             if (sun.fromModel) {
+                // World up by triangle-weighted vote over the main view's draws: the single largest draw alternates between tilted props in the fly-in.
                 const Projection &mainProj = fbPair.projections[lightsProjIndex];
-                uint32_t bestTris = 0;
-                uint32_t bestTi = UINT32_MAX;
-                for (uint32_t d = 0; d < mainProj.gameCallCount; d++) {
-                    const GameCall &call = mainProj.gameCalls[d];
-                    if (call.callDesc.triangleCount > bestTris) {
-                        bestTris = call.callDesc.triangleCount;
-                        bestTi = call.callDesc.minWorldMatrix;
-                    }
-                }
                 const bool sunLerp = drawData.lerpWorldTransforms.size() == drawData.worldTransforms.size();
                 const auto &sunWorld = sunLerp ? drawData.lerpWorldTransforms : drawData.worldTransforms;
                 static const float kStraightDown[3] = { 0.0f, 1.0f, 0.0f };
+                thread_local std::vector<float> ups;
+                thread_local std::vector<uint32_t> upWeights;
+                ups.clear();
+                upWeights.clear();
+                for (uint32_t d = 0; d < mainProj.gameCallCount; d++) {
+                    const GameCall &call = mainProj.gameCalls[d];
+                    const uint32_t ti = call.callDesc.minWorldMatrix;
+                    float u[3];
+                    if ((call.callDesc.triangleCount > 0) && (ti == call.callDesc.maxWorldMatrix) && (ti < sunWorld.size()) && rs64lights::modelSunDir(kStraightDown, rs64ToMat4(sunWorld[ti]), u)) {
+                        ups.insert(ups.end(), u, u + 3);
+                        upWeights.push_back(call.callDesc.triangleCount);
+                    }
+                }
                 float up[3];
-                if ((bestTi < sunWorld.size()) && rs64lights::modelSunDir(kStraightDown, rs64ToMat4(sunWorld[bestTi]), up)) {
+                if (rs64lights::consensusUp(ups.data(), upWeights.data(), upWeights.size(), 0.9994f, up)) {
                     sun.skip[0] = up[0];
                     sun.skip[1] = up[1];
                     sun.skip[2] = up[2];
@@ -2595,10 +2692,10 @@ namespace RT64 {
             if (hitColors) {
                 buildRS64HitColors(p, terrainCalls, (sun.fromModel && (sun.skip[3] > 0.0f)) ? sun.skip : nullptr);
             }
-            shadowsFilled = shadowsWanted && sceneHasCasters && fillRS64Shadows(p, framebuffer, lightsTransformsIndex, lightsScreenScale, lightsScreenOffset, sun);
-            if (fogWanted && sceneHasCasters) {
-                // The game fogs only terrain and a few models, and terrain often draws in its own same-view projection.
-                rs64lights::FogParams fogPick;
+            // The frame's fog, for the shafts and for fogging what water reflects. The game fogs only terrain and a few models, and terrain often draws
+            // in its own same-view projection.
+            rs64lights::FogParams fogPick;
+            if ((fogWanted || shadowsWanted) && sceneHasCasters) {
                 for (uint32_t pr = 0; pr < fbPair.projectionCount; pr++) {
                     const Projection &fogProj = fbPair.projections[pr];
                     if ((fogProj.type != Projection::Type::Perspective) || !rs64SameView(drawData, fogProj.transformsIndex, mainTi)) {
@@ -2621,7 +2718,11 @@ namespace RT64 {
                         rs64lights::considerFogCall(fogPick, call.callDesc.triangleCount, rf.mul, rf.offset, color);
                     }
                 }
-                const rs64lights::FogParams &fog = rs64lights::workloadFog(rs64FogCache, p.curWorkload->workloadId, fogPick);
+            }
+
+            const rs64lights::FogParams &fog = rs64lights::workloadFog(rs64FogCache, p.curWorkload->workloadId, fogPick);
+            shadowsFilled = shadowsWanted && sceneHasCasters && fillRS64Shadows(p, framebuffer, lightsTransformsIndex, lightsScreenScale, lightsScreenOffset, sun, fog);
+            if (fogWanted && sceneHasCasters) {
                 const bool fogVisible = (lightsCfg.fogShaftsDebug != 0) || rs64lights::fogShaftsVisible(fog.color, lightsCfg.fogShaftsStrength);
                 fogFilled = fogVisible && fillRS64FogShafts(p, framebuffer, lightsTransformsIndex, lightsScreenScale, lightsScreenOffset, sun, fog);
                 if (lightsCfg.log) {
@@ -2636,7 +2737,7 @@ namespace RT64 {
                 static uint32_t s_n = 0;
                 if ((++s_n % 120) == 1) {
                     std::fprintf(stderr, "[rt-shadows] casters: ranges=%zu indices=%zu cutouts=%zu cutoutTris=%zu vertices=%u filled=%d sun=(%.3f,%.3f,%.3f)\n", rs64Shadow.ranges.size(), rs64Shadow.indices.size(), rs64Shadow.cutoutTable.size(), rs64Shadow.cutoutIndices.size() / 3, rs64Shadow.vertexCount, (int)shadowsFilled,
-                        p.curWorkload->rs64Sun.dir[0], p.curWorkload->rs64Sun.dir[1], p.curWorkload->rs64Sun.dir[2]);
+                        sun.dir[0], sun.dir[1], sun.dir[2]);
                     std::fprintf(stderr, "[rt-terrain] origin: noCast=%zu samples=%zu votes=%u ti=%u transforms=%zu mixed=%d origin=(%d,%d) active=%d lightsShadowed=%d\n", p.curWorkload->rs64NoCast.size(), tf.samples.size(), terrainVotes, tf.transformIndex, tf.transforms.size(), (int)tf.mixed, terrainOx, terrainOz, (int)rs64Shadow.terrainActive, (int)framebuffer.rs64LightsShadowed);
                 }
             }
@@ -2745,6 +2846,8 @@ namespace RT64 {
             r.intensity = c.intensity;
             r.falloff = c.falloff;
             r.shadowStart = c.shadowStart * rs64lights::config().spriteShadowStart;
+            r.kind = c.kind;
+            r.engine = (c.kind == rs64lights::KindMesh) && c.modelUnits;
             if (c.modelUnits && !cameraSpace) {
                 const float s = rs64lights::transformScale(rs64ToMat4(world[c.transformIndex]));
                 r.radius = c.radius * s;
@@ -2753,6 +2856,7 @@ namespace RT64 {
             resolved.push_back(r);
         }
 
+        resolved.resize(rs64lights::dedupeLights(resolved.data(), resolved.size(), 1.0f));
         rs64lights::Resolved chosen[rs64lights::MaxLights];
         const size_t count = rs64lights::selectLights(resolved.data(), resolved.size(), chosen, rs64lights::MaxLights);
         if (count == 0) {
@@ -2801,7 +2905,7 @@ namespace RT64 {
         return true;
     }
 
-    bool FramebufferRenderer::fillRS64Shadows(const DrawParams &p, Framebuffer &framebuffer, uint32_t transformsIndex, hlslpp::float2 screenScale, hlslpp::float2 screenOffset, const rs64lights::Sun &sun) {
+    bool FramebufferRenderer::fillRS64Shadows(const DrawParams &p, Framebuffer &framebuffer, uint32_t transformsIndex, hlslpp::float2 screenScale, hlslpp::float2 screenOffset, const rs64lights::Sun &sun, const rs64lights::FogParams &fog) {
         rs64lights::Mat4 inv;
         if (!sun.valid || !framebuffer.rs64ShadowsSet || !rs64ViewFromScreen(p, transformsIndex, screenScale, screenOffset, inv)) {
             return false;
@@ -2832,11 +2936,19 @@ namespace RT64 {
         const float maxRadius = cfg.softBlurPx * p.resolutionScale.y;
         cb.softRays = cfg.softShadows ? static_cast<uint32_t>(cfg.softRays) : 1u;
         const float res = p.resolutionScale.y;
-        cb.aoParams = { float(cfg.aoRays), cfg.aoRange, cfg.aoStrength, cfg.aoBlurPx * res };
-        cb.giParams = { float(cfg.giRays), cfg.giRange, cfg.giStrength, cfg.giBlurPx * res };
-        cb.reflParams = { std::tan(cfg.reflRoughnessDeg * 3.14159265f / 180.0f), cfg.reflRange, cfg.reflStrength, cfg.giEmissive };
+        // Ranges are fractions of each pixel's view distance; the hangar is a fixed-size room the camera zooms through (about 5000 to 1200 units), so
+        // there they are absolute (negative = world units), anchored at the settled view so zooming in doesn't shorten the rays and brighten the ship.
+        constexpr float kHangarViewDist = 1200.0f;
+        const float rangeScale = sun.fromModel ? -kHangarViewDist : 1.0f;
+        cb.aoParams = { float(cfg.aoRays), cfg.aoRange * rangeScale, cfg.aoStrength, cfg.aoBlurPx * res };
+        cb.giParams = { float(cfg.giRays), cfg.giRange * rangeScale, cfg.giStrength, cfg.giBlurPx * res };
+        cb.reflParams = { std::tan(cfg.reflRoughnessDeg * 3.14159265f / 180.0f), cfg.reflRange * rangeScale, cfg.reflStrength, cfg.giEmissive };
         cb.sunColor = { sun.color[0], sun.color[1], sun.color[2], 0.0f };
         cb.featureMask = (cfg.shadows ? 1u : 0u) | ((soft && cfg.ao) ? 2u : 0u) | ((soft && cfg.gi) ? 4u : 0u) | ((soft && cfg.reflections && sun.fromModel) ? 8u : 0u);
+        cb.waterPrim = rs64Shadow.terrainWaterPrim;
+        cb.fogParams = { fog.mul, fog.offset, fog.valid ? 1.0f : 0.0f, 0.0f };
+        cb.fogColor = { fog.color[0], fog.color[1], fog.color[2], 0.0f };
+        cb.featureMask |= (soft && (cb.waterPrim > 0)) ? 16u : 0u;
         cb.terrainParams = { cfg.terrainNormalWindow, 0.0f, 0.0f, 0.0f };
         rs64lights::Mat4 sfv;
         if (rs64lights::inverse(inv, sfv)) {
@@ -2859,6 +2971,7 @@ namespace RT64 {
             const float blurMax = std::max({ maxRadius, cfg.ao ? cb.aoParams.w : 0.0f, cfg.gi ? cb.giParams.w : 0.0f });
             bcb.params = { cfg.shadows ? cfg.shadowStrength : 0.0f, 0.02f, (cfg.shadowsDebug >= 5) ? 1.0f : 0.0f, blurMax };
             bcb.aoParams = { cfg.aoStrength, (cfg.shadowsDebug >= 5) ? float(cfg.shadowsDebug) : 0.0f, 0.0f, 0.0f };
+            fillRS64Temporal(p, framebuffer, transformsIndex, inv, bcb);
             bcb.texelDir = { 1.0f, 0.0f };
             memcpy(framebuffer.rs64BlurHBuffer->map(), &bcb, sizeof(bcb));
             framebuffer.rs64BlurHBuffer->unmap();
@@ -2869,14 +2982,112 @@ namespace RT64 {
             RS64ShadowBlurDescriptorSet &vs = *framebuffer.rs64BlurVSet;
             hs.setBuffer(hs.gBlur, framebuffer.rs64BlurHBuffer.get(), sizeof(interop::RS64ShadowBlurCB));
             hs.setTexture(hs.gDepth, p.fbStorage->depthTarget->texture.get(), RenderTextureLayout::DEPTH_READ, p.fbStorage->depthTarget->textureView.get());
-            hs.setTexture(hs.gMask, framebuffer.rs64SoftMask.get(), RenderTextureLayout::SHADER_READ);
-            hs.setTexture(hs.gIndirect, framebuffer.rs64SoftIndirect.get(), RenderTextureLayout::SHADER_READ);
+            const uint32_t w = framebuffer.rs64HistWrite;
+            hs.setTexture(hs.gMask, framebuffer.rs64TemporalOn ? framebuffer.rs64HistMask[w].get() : framebuffer.rs64SoftMask.get(), RenderTextureLayout::SHADER_READ);
+            hs.setTexture(hs.gIndirect, framebuffer.rs64TemporalOn ? framebuffer.rs64HistIndirect[w].get() : framebuffer.rs64SoftIndirect.get(), RenderTextureLayout::SHADER_READ);
+            if (framebuffer.rs64TemporalOn) {
+                RS64ShadowTemporalDescriptorSet &ts = *framebuffer.rs64TemporalSet;
+                ts.setBuffer(ts.gBlur, framebuffer.rs64BlurHBuffer.get(), sizeof(interop::RS64ShadowBlurCB));
+                ts.setTexture(ts.gDepth, p.fbStorage->depthTarget->texture.get(), RenderTextureLayout::DEPTH_READ, p.fbStorage->depthTarget->textureView.get());
+                ts.setTexture(ts.gMask, framebuffer.rs64SoftMask.get(), RenderTextureLayout::SHADER_READ);
+                ts.setTexture(ts.gIndirect, framebuffer.rs64SoftIndirect.get(), RenderTextureLayout::SHADER_READ);
+                ts.setTexture(ts.gHistMask, framebuffer.rs64HistMask[w ^ 1].get(), RenderTextureLayout::SHADER_READ);
+                ts.setTexture(ts.gHistIndirect, framebuffer.rs64HistIndirect[w ^ 1].get(), RenderTextureLayout::SHADER_READ);
+            }
             vs.setTexture(vs.gIndirect, framebuffer.rs64SoftIndirectPing.get(), RenderTextureLayout::SHADER_READ);
             vs.setBuffer(vs.gBlur, framebuffer.rs64BlurVBuffer.get(), sizeof(interop::RS64ShadowBlurCB));
             vs.setTexture(vs.gDepth, p.fbStorage->depthTarget->texture.get(), RenderTextureLayout::DEPTH_READ, p.fbStorage->depthTarget->textureView.get());
             vs.setTexture(vs.gMask, framebuffer.rs64SoftPing.get(), RenderTextureLayout::SHADER_READ);
         }
         return true;
+    }
+
+    // Temporal AO / indirect for this slot: the camera motion since its previous frame, voted over the main view's objects by matrix id
+    // (rs64lights::consensusCameraDelta), and the history set the pass writes this frame. No motion found = no history this frame.
+    void FramebufferRenderer::fillRS64Temporal(const DrawParams &p, Framebuffer &framebuffer, uint32_t transformsIndex, const rs64lights::Mat4 &viewFromScreen, interop::RS64ShadowBlurCB &bcb) {
+        const rs64lights::Config &cfg = rs64lights::config();
+        framebuffer.rs64TemporalOn = (cfg.temporalAlpha > 0.0f) && (cfg.temporalAlpha < 1.0f);
+        if (!framebuffer.rs64TemporalOn) {
+            framebuffer.rs64HistValid = false;
+            return;
+        }
+
+        const DrawData &drawData = p.curWorkload->drawData;
+        const FramebufferPair &fbPair = p.curWorkload->fbPairs[p.fbPairIndex];
+        const bool lerp = drawData.lerpWorldTransforms.size() == drawData.worldTransforms.size();
+        const auto &world = lerp ? drawData.lerpWorldTransforms : drawData.worldTransforms;
+        thread_local std::unordered_map<uint32_t, rs64lights::Mat4> objects;
+        thread_local std::unordered_set<uint32_t> ambiguous;
+        thread_local std::vector<std::pair<uint32_t, uint32_t>> calls;
+        objects.clear();
+        ambiguous.clear();
+        calls.clear();
+        for (uint32_t pr = 0; pr < fbPair.projectionCount; pr++) {
+            const Projection &proj = fbPair.projections[pr];
+            if ((proj.type != Projection::Type::Perspective) || proj.scissorRect.isNull() || !rs64SameView(drawData, proj.transformsIndex, transformsIndex)) {
+                continue;
+            }
+            for (uint32_t d = 0; d < proj.gameCallCount; d++) {
+                const auto &desc = proj.gameCalls[d].callDesc;
+                const uint32_t ti = desc.minWorldMatrix;
+                if ((ti != desc.maxWorldMatrix) || (ti >= world.size()) || (ti >= drawData.worldTransformGroups.size()) || (desc.triangleCount == 0)) {
+                    continue;
+                }
+                const uint32_t id = drawData.transformGroups[drawData.worldTransformGroups[ti]].matrixId;
+                if ((id == G_EX_ID_AUTO) || (id == G_EX_ID_IGNORE)) {
+                    continue;
+                }
+                const rs64lights::Mat4 m = rs64ToMat4(world[ti]);
+                const auto ins = objects.emplace(id, m);
+                if (!ins.second && !rs64lights::sameMatrix(ins.first->second, m, 1e-3f)) {
+                    ambiguous.insert(id);
+                }
+                calls.emplace_back(id, desc.triangleCount);
+            }
+        }
+
+        thread_local std::vector<rs64lights::Mat4> deltas;
+        thread_local std::vector<uint32_t> weights;
+        deltas.clear();
+        weights.clear();
+        for (const auto &c : calls) {
+            const auto prev = framebuffer.rs64PrevObjects.find(c.first);
+            rs64lights::Mat4 curInv;
+            if ((prev == framebuffer.rs64PrevObjects.end()) || ambiguous.count(c.first) || !rs64lights::inverse(objects[c.first], curInv)) {
+                continue;
+            }
+            deltas.push_back(rs64lights::mul(curInv, prev->second));
+            weights.push_back(c.second);
+        }
+
+        rs64lights::Mat4 delta;
+        const bool moved = framebuffer.rs64HistValid && rs64lights::consensusCameraDelta(deltas.data(), weights.data(), deltas.size(), 0.002f, 2.0f, delta);
+        if (moved) {
+            const rs64lights::Mat4 prevScreen = rs64lights::mul(delta, framebuffer.rs64PrevScreenFromView);
+            memcpy(&bcb.prevScreenFromView, &prevScreen, sizeof(prevScreen));
+            memcpy(&bcb.prevViewFromView, &delta, sizeof(delta));
+            bcb.prevViewport = { framebuffer.rs64PrevViewport[0], framebuffer.rs64PrevViewport[1], framebuffer.rs64PrevViewport[2], framebuffer.rs64PrevViewport[3] };
+        }
+        bcb.temporal = { moved ? 1.0f : 0.0f, 0.03f, cfg.temporalAlpha, 0.0f };
+        if (cfg.log) {
+            static uint32_t s_n = 0;
+            if ((++s_n % 120) == 1) {
+                std::fprintf(stderr, "[rt-temporal] objects=%zu matched=%zu history=%d\n", objects.size(), deltas.size(), moved ? 1 : 0);
+            }
+        }
+
+        // This frame becomes the next frame's history.
+        framebuffer.rs64HistWrite ^= 1;
+        for (uint32_t id : ambiguous) {
+            objects.erase(id);
+        }
+        framebuffer.rs64PrevObjects.swap(objects);
+        rs64lights::inverse(viewFromScreen, framebuffer.rs64PrevScreenFromView);
+        framebuffer.rs64PrevViewport[0] = framebuffer.viewport.x;
+        framebuffer.rs64PrevViewport[1] = framebuffer.viewport.y;
+        framebuffer.rs64PrevViewport[2] = framebuffer.viewport.width;
+        framebuffer.rs64PrevViewport[3] = framebuffer.viewport.height;
+        framebuffer.rs64HistValid = true;
     }
 
     // Hit colours in BLAS triangle order for the opaque casters (ranges, mirroring gatherCasterIndices' skips), the emissive draws (their own BLAS), the frame's
@@ -2890,7 +3101,8 @@ namespace RT64 {
         auto drawColor = [&](const rs64lights::IndexRange &r, uint32_t callIndex, float out[3]) {
             float texRgb[3] = {};
             const float *tex = nullptr;
-            if ((callIndex < callTex.size()) && ((float)callTex[callIndex].w > 0.0f)) {
+            const uint32_t flags = (callIndex < callTex.size()) ? uint32_t((float)callTex[callIndex].w) : 2u;
+            if ((flags & 1u) != 0) {
                 texRgb[0] = (float)callTex[callIndex].x;
                 texRgb[1] = (float)callTex[callIndex].y;
                 texRgb[2] = (float)callTex[callIndex].z;
@@ -2916,7 +3128,7 @@ namespace RT64 {
                 }
             }
             float prim[3] = { 1.0f, 1.0f, 1.0f };
-            if (callIndex < drawData.rdpParams.size()) {
+            if (((flags & 2u) != 0) && (callIndex < drawData.rdpParams.size())) {
                 prim[0] = (float)drawData.rdpParams[callIndex].primColor.x;
                 prim[1] = (float)drawData.rdpParams[callIndex].primColor.y;
                 prim[2] = (float)drawData.rdpParams[callIndex].primColor.z;
@@ -2993,7 +3205,7 @@ namespace RT64 {
                 std::fprintf(stderr, "[rt-hit] casters=%zu emissive=%zu cutouts=%zu avg=%08X terrain=%08X:", s.hitTable.size(), s.emissiveTable.size(), s.cutoutTable.size(), s.averageColor, s.terrainColor);
                 for (size_t i = 0; (i < s.hitTable.size()) && (i < 48); ++i) {
                     const uint32_t call = (i < s.rangeCalls.size()) ? s.rangeCalls[i] : 0;
-                    const bool tex = (call < callTex.size()) && ((float)callTex[call].w > 0.0f);
+                    const bool tex = (call < callTex.size()) && ((uint32_t((float)callTex[call].w) & 1u) != 0);
                     std::fprintf(stderr, " %u:%08X%s(c%u)", s.hitTable[i].firstTriangle, s.hitTable[i].rgba, tex ? "t" : "", call);
                 }
                 std::fprintf(stderr, " | emissive:");
@@ -3033,6 +3245,14 @@ namespace RT64 {
         const RenderTexture *pingTargets[] = { framebuffer.rs64SoftPing.get(), framebuffer.rs64SoftIndirectPing.get() };
         framebuffer.rs64SoftMaskFb = worker->device->createFramebuffer(RenderFramebufferDesc(maskTargets, 2));
         framebuffer.rs64SoftPingFb = worker->device->createFramebuffer(RenderFramebufferDesc(pingTargets, 2));
+        for (uint32_t k = 0; k < 2; k++) {
+            framebuffer.rs64HistFb[k].reset();
+            framebuffer.rs64HistMask[k] = worker->device->createTexture(RenderTextureDesc::ColorTarget(width, height, RenderFormat::R16G16B16A16_FLOAT));
+            framebuffer.rs64HistIndirect[k] = worker->device->createTexture(RenderTextureDesc::ColorTarget(width, height, RenderFormat::R16G16B16A16_FLOAT));
+            const RenderTexture *histTargets[] = { framebuffer.rs64HistMask[k].get(), framebuffer.rs64HistIndirect[k].get() };
+            framebuffer.rs64HistFb[k] = worker->device->createFramebuffer(RenderFramebufferDesc(histTargets, 2));
+        }
+        framebuffer.rs64HistValid = false;
         framebuffer.rs64SoftW = width;
         framebuffer.rs64SoftH = height;
     }
@@ -3070,6 +3290,30 @@ namespace RT64 {
             bindRS64Traced(worker, *framebuffer.rs64ShadowsSet, framebuffer.rs64ShadowsBuffer.get(), offsetof(interop::RS64ShadowsCB, cutoutDrawCount), false);
             worker->commandList->setVertexBuffers(0, nullptr, 0, nullptr);
             worker->commandList->drawInstanced(3, 1, 0, 0);
+
+            // Accumulate AO and indirect light into this frame's history set, which the H blur then reads.
+            if (framebuffer.rs64TemporalOn) {
+                const uint32_t w = framebuffer.rs64HistWrite;
+                RenderTexture *histMask = framebuffer.rs64HistMask[w].get();
+                RenderTexture *histInd = framebuffer.rs64HistIndirect[w].get();
+                const RenderTextureBarrier toHist[] = {
+                    RenderTextureBarrier(mask, RenderTextureLayout::SHADER_READ), RenderTextureBarrier(ind, RenderTextureLayout::SHADER_READ),
+                    RenderTextureBarrier(framebuffer.rs64HistMask[w ^ 1].get(), RenderTextureLayout::SHADER_READ), RenderTextureBarrier(framebuffer.rs64HistIndirect[w ^ 1].get(), RenderTextureLayout::SHADER_READ),
+                    RenderTextureBarrier(histMask, RenderTextureLayout::COLOR_WRITE), RenderTextureBarrier(histInd, RenderTextureLayout::COLOR_WRITE)
+                };
+                worker->commandList->barriers(RenderBarrierStage::GRAPHICS, toHist, uint32_t(std::size(toHist)));
+                worker->commandList->setFramebuffer(framebuffer.rs64HistFb[w].get());
+                worker->commandList->clearColor(0, RenderColor(0.0f, 0.0f, 0.0f, 0.0f));
+                worker->commandList->clearColor(1, RenderColor(0.0f, 0.0f, 0.0f, 0.0f));
+                worker->commandList->setViewports(v);
+                worker->commandList->setScissors(sc);
+                worker->commandList->setPipeline(shaderLibrary->rs64ShadowTemporal.pipeline.get());
+                worker->commandList->setGraphicsPipelineLayout(shaderLibrary->rs64ShadowTemporal.pipelineLayout.get());
+                worker->commandList->setGraphicsDescriptorSet(framebuffer.rs64TemporalSet->get(), 0);
+                worker->commandList->drawInstanced(3, 1, 0, 0);
+                mask = histMask;
+                ind = histInd;
+            }
 
             const RenderTextureBarrier toPing[] = {
                 RenderTextureBarrier(mask, RenderTextureLayout::SHADER_READ), RenderTextureBarrier(ind, RenderTextureLayout::SHADER_READ),
@@ -3114,6 +3358,8 @@ namespace RT64 {
         RS64ShadowScene &s = rs64Shadow;
         if (!rs64CutoutPlaceholder) {
             rs64CutoutPlaceholder = worker->device->createBuffer(RenderBufferDesc::UploadBuffer(64, RenderBufferFlag::STORAGE));
+            memset(rs64CutoutPlaceholder->map(), 0, 64);
+            rs64CutoutPlaceholder->unmap();
         }
         const bool have = (s.cutoutDrawCount > 0) && (s.texCoords != nullptr);
         const uint32_t count = have ? s.cutoutDrawCount : 0;
@@ -3147,6 +3393,14 @@ namespace RT64 {
         else {
             set.setBuffer(set.gTerrainIndices, rs64CutoutPlaceholder.get(), 64);
             set.setBuffer(set.gTerrainNormals, rs64CutoutPlaceholder.get(), 64);
+        }
+
+        // The placeholder's zero header means no table: terrain hits keep the level's average colour.
+        if (s.terrainBlas && s.terrainColorGpu) {
+            set.setBuffer(set.gTerrainColors, s.terrainColorGpu.get(), s.terrainColorBytes);
+        }
+        else {
+            set.setBuffer(set.gTerrainColors, rs64CutoutPlaceholder.get(), 64);
         }
         uint8_t *bytes = static_cast<uint8_t *>(paramsBuffer->map());
         if (countAsFloat) {
@@ -3212,6 +3466,427 @@ namespace RT64 {
         worker->commandList->drawInstanced(3, 1, 0, 0);
     }
 
+    // A terrain tile as the game loads it: the bank entry's CI4 texels at TMEM 0 and its 16 RGBA5551 colours as palette 15 (each 4 times, as a
+    // TLUT load stores them), with the game's load tile, so RT64 hashes and decodes it like the game's own upload (texture packs match).
+    static const LoadTile RS64TerrainLoadTile = { G_IM_FMT_CI, G_IM_SIZ_4b, 4, 0, 15, 0, 0, 6, 6, 0, 0, 0, 0, 252, 252 };
+
+    static uint64_t rs64TerrainTMEM(const uint8_t *entry, std::array<uint8_t, 4096> &tmem) {
+        tmem.fill(0);
+        memcpy(tmem.data(), entry, 2048);
+        for (uint32_t i = 0; i < 16; ++i) {
+            for (uint32_t k = 0; k < 4; ++k) {
+                memcpy(&tmem[0xF80 + i * 8 + k * 2], entry + 2048 + i * 2, 2);
+            }
+        }
+
+        return TMEMHasher::hash(tmem.data(), RS64TerrainLoadTile, 64, 64, G_TT_RGBA16, TMEMHasher::CurrentHashVersion);
+    }
+
+    // Texture packs for the terrain pass: a layer the loaded pack replaces goes to the texture cache under RT64's own hash (the cache
+    // finds and streams the replacement), then each frame takes the replacement's texture index (the pass samples it in RS64TerrainPS).
+    void FramebufferRenderer::rs64TerrainTextures(TextureCache *textureCache, uint64_t submissionFrame) {
+        RS64TerrainGPU &g = rs64TerrainGpu;
+        g.layerReplaced.assign(g.layerHash.size(), UINT32_MAX);
+        if (textureSlots || !textureCacheReplacementMapEnabled || g.layerHash.empty()) {
+            return;
+        }
+
+        const uint32_t generation = textureCache->replacementGeneration.load();
+        if (generation != g.replacementGeneration) {
+            g.replacementGeneration = generation;
+            g.layersQueued = 0;
+        }
+
+        uint32_t index = 0;
+        interop::float2 scale;
+        interop::float3 dimensions;
+        bool replaced = false, mipmaps = false, shifted = false;
+        for (size_t l = g.layersQueued; l < g.layerHash.size(); ++l) {
+            if (textureCache->hasReplacement(g.layerHash[l]) && !textureCache->useTexture(g.layerHash[l], submissionFrame, index)) {
+                textureCache->queueGPUUploadTMEM(g.layerHash[l], submissionFrame, g.layerTMEM[l].data(), int(g.layerTMEM[l].size()), 64, 64, G_TT_RGBA16, RS64TerrainLoadTile, true);
+            }
+        }
+
+        g.layersQueued = g.layerHash.size();
+
+        for (size_t l = 0; l < g.layerHash.size(); ++l) {
+            if (textureCache->useTexture(g.layerHash[l], submissionFrame, index, scale, dimensions, replaced, mipmaps, shifted) && replaced) {
+                g.layerReplaced[l] = index;
+            }
+        }
+    }
+
+    // Uploads the map for the terrain pass when its version changes: the (4W+1)x(4H+1) height and colour lattice, each cell's texture layer and
+    // the tile textures (ROM level/tex entries the level's lv_X_TEX table names; one white layer when the level has no table).
+    void FramebufferRenderer::recordRS64TerrainSetup(RenderWorker *worker) {
+        const rs64lights::TerrainMap &m = *rs64TerrainMap;
+        if ((rs64TerrainGpu.version == m.version) || (m.width == 0) || (m.height == 0) || (m.colors.size() < size_t(m.width) * m.height * 75) || (m.texIds.size() < size_t(m.width) * m.height)) {
+            return;
+        }
+
+        const uint32_t latticeW = m.width * 4 + 1, latticeH = m.height * 4 + 1;
+        thread_local std::vector<int32_t> heights;
+        thread_local std::vector<uint32_t> colors, cellLayers, texels;
+        heights.assign(size_t(latticeW) * latticeH, 0);
+        colors.assign(size_t(latticeW) * latticeH, 0xFFFFFFFFu);
+        for (uint32_t row = 0; row < m.height; ++row) {
+            for (uint32_t col = 0; col < m.width; ++col) {
+                const size_t c = size_t(row) * m.width + col;
+                for (uint32_t k = 0; k < 25; ++k) {
+                    const size_t l = size_t(row * 4 + k / 5) * latticeW + col * 4 + k % 5;
+                    const uint8_t *rgb = &m.colors[(c * 25 + k) * 3];
+                    heights[l] = int32_t(m.heights[c * 25 + k]) * 16;
+                    colors[l] = uint32_t(rgb[0]) | (uint32_t(rgb[1]) << 8) | (uint32_t(rgb[2]) << 16) | 0xFF000000u;
+                }
+            }
+        }
+
+        const uint32_t chunksX = (m.width + RS64TerrainChunkCells - 1) / RS64TerrainChunkCells, chunksZ = (m.height + RS64TerrainChunkCells - 1) / RS64TerrainChunkCells;
+        rs64TerrainGpu.chunkMinH.assign(size_t(chunksX) * chunksZ, INT32_MAX);
+        rs64TerrainGpu.chunkMaxH.assign(size_t(chunksX) * chunksZ, INT32_MIN);
+        for (uint32_t row = 0; row < latticeH; ++row) {
+            for (uint32_t col = 0; col < latticeW; ++col) {
+                const size_t k = size_t(std::min(row / (4 * RS64TerrainChunkCells), chunksZ - 1)) * chunksX + std::min(col / (4 * RS64TerrainChunkCells), chunksX - 1);
+                const int32_t h = heights[size_t(row) * latticeW + col];
+                rs64TerrainGpu.chunkMinH[k] = std::min(rs64TerrainGpu.chunkMinH[k], h);
+                rs64TerrainGpu.chunkMaxH[k] = std::max(rs64TerrainGpu.chunkMaxH[k], h);
+            }
+        }
+
+        // Low 16 bits: texture layer; bits 16-17: water kind (0 ground, 1 water, 2 shore).
+        cellLayers.assign(size_t(m.width) * m.height, 0);
+        for (size_t c = 0; (c < cellLayers.size()) && (c < m.waterKind.size()); ++c) {
+            cellLayers[c] = uint32_t(m.waterKind[c]) << 16;
+        }
+
+        // A runtime edit of the map this setup built last (its baseVersion) keeps the texture layers: only a texture new to the map decodes.
+        const bool update = (m.baseVersion != 0) && (m.baseVersion == rs64TerrainGpu.version);
+        if (!update) {
+            texels.clear();
+            rs64TerrainGpu.anims.clear();
+            rs64TerrainGpu.layerOf.clear();
+            rs64TerrainGpu.layerTMEM.clear();
+            rs64TerrainGpu.layerHash.clear();
+            rs64TerrainGpu.layerReplaced.clear();
+            rs64TerrainGpu.layersQueued = 0;
+        }
+
+        const uint8_t *bank = nullptr, *ids = nullptr;
+        uint32_t bankSize = 0, idsSize = 0;
+        if (rs64_terrain_textures(m.level, &bank, &bankSize, &ids, &idsSize)) {
+            // Keyed by bank, or 0x10000 | id for an animated id so its frames never move a still texture that shares the first bank.
+            std::unordered_map<uint32_t, uint32_t> &layerOf = rs64TerrainGpu.layerOf;
+            auto layer = [&](uint32_t key, uint32_t b) {
+                auto it = layerOf.find(key);
+                if (it == layerOf.end()) {
+                    it = layerOf.emplace(key, uint32_t(texels.size() / 4096)).first;
+                    texels.resize(texels.size() + 4096);
+                    rs64lights::decodeTerrainTexture(bank + size_t(b) * rs64lights::TerrainTexBytes, &texels[texels.size() - 4096]);
+                    rs64TerrainGpu.layerHash.push_back(rs64TerrainTMEM(bank + size_t(b) * rs64lights::TerrainTexBytes, rs64TerrainGpu.layerTMEM.emplace_back()));
+                }
+
+                return it->second;
+            };
+
+            const uint32_t usedIds = m.texIds.empty() ? 0 : (*std::max_element(m.texIds.begin(), m.texIds.end()) + 1);
+            std::unordered_map<uint32_t, const rs64lights::TerrainTexAnim *> animOf;
+            const std::vector<rs64lights::TerrainTexAnim> anims = rs64lights::terrainTextureAnims(ids, idsSize, bankSize / rs64lights::TerrainTexBytes, usedIds);
+            for (const rs64lights::TerrainTexAnim &a : anims) {
+                animOf[a.id] = &a;
+            }
+
+            for (size_t c = 0; c < cellLayers.size(); ++c) {
+                const uint32_t t = m.texIds[c];
+                if ((t * 4 + 2) > idsSize) {
+                    continue;
+                }
+
+                const uint32_t b = (uint32_t(ids[t * 4]) << 8) | ids[t * 4 + 1];
+                if ((b + 1) * rs64lights::TerrainTexBytes > bankSize) {
+                    continue;
+                }
+
+                const auto anim = animOf.find(t);
+                if (anim == animOf.end()) {
+                    cellLayers[c] |= layer(b, b);
+                    continue;
+                }
+
+                const bool fresh = !layerOf.count(0x10000u | t);
+                const uint32_t l = layer(0x10000u | t, b);
+                cellLayers[c] |= l;
+                if (fresh) {
+                    RS64TerrainGPU::Anim &ga = rs64TerrainGpu.anims.emplace_back();
+                    ga.layer = l;
+                    ga.fps = anim->second->fps;
+                    for (uint32_t fb : anim->second->banks) {
+                        ga.frames.push_back(layer(fb, fb));
+                    }
+                }
+            }
+        }
+
+        if (texels.empty()) {
+            texels.assign(4096, 0xFFFFFFFFu);
+        }
+
+        RenderDevice *device = worker->device;
+        RS64TerrainGPU &g = rs64TerrainGpu;
+        g.heightsBytes = heights.size() * sizeof(int32_t);
+        g.colorsBytes = colors.size() * sizeof(uint32_t);
+        g.cellLayersBytes = cellLayers.size() * sizeof(uint32_t);
+        g.texelsBytes = texels.size() * sizeof(uint32_t);
+        g.layers = uint32_t(texels.size() / 4096);
+        const uint64_t offsets[3] = { 0, g.heightsBytes, g.heightsBytes + g.cellLayersBytes };
+        g.staging = device->createBuffer(RenderBufferDesc::UploadBuffer(offsets[2] + g.texelsBytes));
+        uint8_t *dst = reinterpret_cast<uint8_t *>(g.staging->map());
+        memcpy(dst + offsets[0], heights.data(), g.heightsBytes);
+        memcpy(dst + offsets[1], cellLayers.data(), g.cellLayersBytes);
+        memcpy(dst + offsets[2], texels.data(), g.texelsBytes);
+        g.staging->unmap();
+        g.heights = device->createBuffer(RenderBufferDesc::DefaultBuffer(g.heightsBytes, RenderBufferFlag::STORAGE));
+        g.cellLayers = device->createBuffer(RenderBufferDesc::DefaultBuffer(g.cellLayersBytes, RenderBufferFlag::STORAGE));
+        g.texels = device->createBuffer(RenderBufferDesc::DefaultBuffer(g.texelsBytes, RenderBufferFlag::STORAGE));
+
+        // Colours stay CPU-writable: each frame takes the game's own colours of the cells it drew (recordRS64TerrainFrame).
+        g.colors = device->createBuffer(RenderBufferDesc::UploadBuffer(g.colorsBytes, RenderBufferFlag::STORAGE));
+        memcpy(g.colors->map(), colors.data(), g.colorsBytes);
+        g.colors->unmap();
+        RenderBuffer *bufs[3] = { g.heights.get(), g.cellLayers.get(), g.texels.get() };
+        const uint64_t sizes[3] = { g.heightsBytes, g.cellLayersBytes, g.texelsBytes };
+        RenderBufferBarrier copyIn[3], copyOut[3];
+        for (int i = 0; i < 3; ++i) {
+            copyIn[i] = RenderBufferBarrier(bufs[i], RenderBufferAccess::WRITE);
+            copyOut[i] = RenderBufferBarrier(bufs[i], RenderBufferAccess::READ);
+        }
+
+        worker->commandList->barriers(RenderBarrierStage::COPY, copyIn, 3);
+        for (int i = 0; i < 3; ++i) {
+            worker->commandList->copyBufferRegion(RenderBufferReference(bufs[i]), RenderBufferReference(g.staging.get(), offsets[i]), sizes[i]);
+        }
+
+        worker->commandList->barriers(RenderBarrierStage::GRAPHICS, copyOut, 3);
+        if (g.set == nullptr) {
+            g.set = std::make_unique<RS64TerrainDescriptorSet>(shaderLibrary->samplerLibrary, device);
+        }
+
+        g.set->setBuffer(g.set->gHeights, g.heights.get(), g.heightsBytes, RenderBufferStructuredView(sizeof(int32_t)));
+        g.set->setBuffer(g.set->gColors, g.colors.get(), g.colorsBytes, RenderBufferStructuredView(sizeof(uint32_t)));
+        g.set->setBuffer(g.set->gCellLayers, g.cellLayers.get(), g.cellLayersBytes, RenderBufferStructuredView(sizeof(uint32_t)));
+        g.set->setBuffer(g.set->gTexels, g.texels.get(), g.texelsBytes, RenderBufferStructuredView(sizeof(uint32_t)));
+        g.version = m.version;
+        const size_t waterCells = std::count(m.waterKind.begin(), m.waterKind.end(), uint8_t(1)), shoreCells = std::count(m.waterKind.begin(), m.waterKind.end(), uint8_t(2));
+        g.waterCells = uint32_t(waterCells + shoreCells);
+        std::fprintf(stderr, "[static-terrain] gpu map %ux%u level %u version %llu: %u texture layers (%zu animated), %zu water and %zu shore cells\n", m.width, m.height,
+            m.level, (unsigned long long)m.version, g.layers, g.anims.size(), waterCells, shoreCells);
+    }
+
+    // Per frame: the map's lighting inputs and this frame's water surface (wave tiles, water level), as float4s for RS64TerrainVS gFrame.
+    void FramebufferRenderer::recordRS64TerrainFrame(RenderWorker *worker) {
+        RS64TerrainGPU &g = rs64TerrainGpu;
+        if ((g.set == nullptr) || !rs64TerrainMap) {
+            return;
+        }
+
+        // ROGUESQ_F5_STATIC_TERRAIN_SUB (1-8, default 4) quads per lattice step at full detail; ROGUESQ_F5_STATIC_TERRAIN_SMOOTH=0 keeps the bilinear
+        // (creased) surface; ROGUESQ_F5_STATIC_TERRAIN_DEBUG=1 draws vertex colours only.
+        static const uint32_t s_sub = [] {
+            const char *v = std::getenv("ROGUESQ_F5_STATIC_TERRAIN_SUB");
+            return uint32_t(std::clamp((v && *v) ? std::atoi(v) : 4, 1, 8));
+        }();
+        static const uint32_t s_smooth = [] {
+            const char *v = std::getenv("ROGUESQ_F5_STATIC_TERRAIN_SMOOTH");
+            return uint32_t(!(v && (v[0] == '0')));
+        }();
+        static const uint32_t s_debug = [] {
+            const char *v = std::getenv("ROGUESQ_F5_STATIC_TERRAIN_DEBUG");
+            return uint32_t((v && *v) ? std::atoi(v) : 0);
+        }();
+        rs64TerrainCB.sub = s_sub;
+        rs64TerrainCB.smooth = s_smooth;
+        rs64TerrainCB.debug = s_debug;
+        rs64TerrainCB.chunkCells = RS64TerrainChunkCells;
+        rs64TerrainCB.mapWidth = rs64TerrainMap->width;
+        rs64TerrainCB.mapHeight = rs64TerrainMap->height;
+        rs64TerrainCB.chunksX = (rs64TerrainMap->width + RS64TerrainChunkCells - 1) / RS64TerrainChunkCells;
+        rs64TerrainCB.chunkCount = rs64TerrainCB.chunksX * ((rs64TerrainMap->height + RS64TerrainChunkCells - 1) / RS64TerrainChunkCells);
+
+        // Header, then each texture layer's current layer (4 per float4).
+        // After the layer remap: each layer's texture pack replacement (texture cache index, -1 none); gFrame[2].w is where that block starts, 0 = none.
+        const uint32_t layerFloat4s = (g.layers + 3) / 4;
+        const bool anyReplaced = std::any_of(g.layerReplaced.begin(), g.layerReplaced.end(), [](uint32_t i) { return i != UINT32_MAX; });
+        g.anyReplaced = anyReplaced;
+        const uint32_t FrameFloat4s = 3 + layerFloat4s * (anyReplaced ? 2 : 1);
+        if ((g.frame == nullptr) || (g.frameFloat4s < FrameFloat4s)) {
+            g.frame = worker->device->createBuffer(RenderBufferDesc::UploadBuffer(FrameFloat4s * 16, RenderBufferFlag::STORAGE));
+            g.frameFloat4s = FrameFloat4s;
+        }
+
+        const rs64lights::TerrainShade &s = rs64TerrainMap->shade;
+        float *f = reinterpret_cast<float *>(g.frame->map());
+        const float header[12] = { s.ambient[0], s.ambient[1], s.ambient[2], s.cellScale, s.sunRgb[0], s.sunRgb[1], s.sunRgb[2], float(rs64TerrainFrame.waterLevel),
+            s.sunDir[0], s.sunDir[1], s.sunDir[2], anyReplaced ? float(3 + layerFloat4s) : 0.0f };
+        memcpy(f, header, sizeof(header));
+        float *remap = f + 12;
+        for (uint32_t l = 0; l < g.layers; ++l) {
+            remap[l] = float(l);
+        }
+
+        for (const RS64TerrainGPU::Anim &a : g.anims) {
+            remap[a.layer] = float(a.frames[(rs64TerrainFrame.task * a.fps / 30) % a.frames.size()]);
+        }
+
+        if (anyReplaced) {
+            float *replaced = f + (3 + layerFloat4s) * 4;
+            for (uint32_t l = 0; l < layerFloat4s * 4; ++l) {
+                replaced[l] = ((l < g.layerReplaced.size()) && (g.layerReplaced[l] != UINT32_MAX)) ? float(g.layerReplaced[l]) : -1.0f;
+            }
+        }
+
+        g.frame->unmap();
+        g.set->setBuffer(g.set->gFrame, g.frame.get(), FrameFloat4s * 16, RenderBufferStructuredView(16));
+
+        // The game's colours of the cells it drew this frame replace the ported ones (both are the same where no extra light reaches the cell).
+        if ((g.colors != nullptr) && (g.version == rs64TerrainMap->version) && !rs64TerrainFrame.harvest.empty()) {
+            const uint32_t latticeW = rs64TerrainMap->width * 4 + 1;
+            uint32_t *lattice = reinterpret_cast<uint32_t *>(g.colors->map());
+            for (const rs64lights::TerrainCellColors &hc : rs64TerrainFrame.harvest) {
+                const uint32_t col = hc.cell % rs64TerrainMap->width, row = hc.cell / rs64TerrainMap->width;
+                for (uint32_t k = 0; k < 25; ++k) {
+                    const uint8_t *rgb = &hc.rgb[k * 3];
+                    lattice[size_t(row * 4 + k / 5) * latticeW + col * 4 + k % 5] = uint32_t(rgb[0]) | (uint32_t(rgb[1]) << 8) | (uint32_t(rgb[2]) << 16) | 0xFF000000u;
+                }
+            }
+
+            g.colors->unmap();
+        }
+
+        // Chunk culling and LOD: a chunk is dropped when its box lies past one clip plane (with a wide side guard for the widescreen expansion);
+        // otherwise its LOD grows by one per doubling of view depth past ROGUESQ_F5_STATIC_TERRAIN_LOD_NEAR cells (0 = full detail everywhere).
+        static const float s_lodNear = [] {
+            const char *v = std::getenv("ROGUESQ_F5_STATIC_TERRAIN_LOD_NEAR");
+            return (v && *v) ? float(std::atof(v)) : 8.0f;
+        }();
+        const rs64lights::TerrainMap &m = *rs64TerrainMap;
+        const uint32_t chunksX = (m.width + RS64TerrainChunkCells - 1) / RS64TerrainChunkCells, chunksZ = (m.height + RS64TerrainChunkCells - 1) / RS64TerrainChunkCells;
+        const uint32_t chunkCount = chunksX * chunksZ;
+        if (g.chunkMinH.size() != chunkCount) {
+            return;
+        }
+
+        const uint32_t sub = rs64TerrainCB.sub;
+        uint32_t maxLod = 0;
+        while (((1u << (maxLod + 1)) <= 4 * sub) && (maxLod + 1 < RS64TerrainGPU::MaxLods)) {
+            ++maxLod;
+        }
+
+        thread_local std::vector<uint32_t> lods, lists[RS64TerrainGPU::MaxLods];
+        lods.assign(chunkCount, 0xFFu);
+        for (auto &l : lists) {
+            l.clear();
+        }
+
+        const float hs = rs64TerrainCB.heightScale;
+        constexpr float Guard = 3.0f;
+        for (uint32_t cz = 0; cz < chunksZ; ++cz) {
+            for (uint32_t cx = 0; cx < chunksX; ++cx) {
+                const uint32_t k = cz * chunksX + cx;
+                const float x0 = (float(cx * RS64TerrainChunkCells) - rs64TerrainCB.originX) * 512.0f + rs64TerrainCB.offsetX;
+                const float z0 = (float(cz * RS64TerrainChunkCells) - rs64TerrainCB.originZ) * 512.0f + rs64TerrainCB.offsetZ;
+                const float span = float(RS64TerrainChunkCells) * 512.0f;
+                const float y0 = std::min(float(g.chunkMinH[k]), float(rs64TerrainFrame.waterLevel) * 16.0f) * hs, y1 = std::max(float(g.chunkMaxH[k]), float(rs64TerrainFrame.waterLevel) * 16.0f) * hs;
+                int outside[6] = {};
+                for (int c = 0; c < 8; ++c) {
+                    const hlslpp::float4 p = hlslpp::mul(hlslpp::float4(x0 + ((c & 1) ? span : 0.0f), (c & 2) ? y1 : y0, z0 + ((c & 4) ? span : 0.0f), 1.0f), rs64TerrainMvp);
+                    const float px = p.x, py = p.y, pz = p.z, pw = p.w;
+                    outside[0] += (pw <= 0.0f);
+                    outside[1] += (px > Guard * pw);
+                    outside[2] += (px < -Guard * pw);
+                    outside[3] += (py > Guard * pw);
+                    outside[4] += (py < -Guard * pw);
+                    outside[5] += (pz > pw);
+                }
+
+                if (std::any_of(std::begin(outside), std::end(outside), [](int n) { return n == 8; })) {
+                    continue;
+                }
+
+                const hlslpp::float4 c = hlslpp::mul(hlslpp::float4(x0 + span * 0.5f, (y0 + y1) * 0.5f, z0 + span * 0.5f, 1.0f), rs64TerrainMvp);
+                const float depthCells = std::max(float(c.w), 0.0f) / 512.0f;
+                uint32_t lod = 0;
+                if ((s_lodNear > 0.0f) && (depthCells >= s_lodNear)) {
+                    lod = std::min(maxLod, 1u + uint32_t(std::floor(std::log2(depthCells / s_lodNear))));
+                }
+
+                lods[k] = lod;
+                lists[lod].push_back(k);
+            }
+        }
+
+        thread_local std::vector<uint32_t> packed;
+        packed.assign(lods.begin(), lods.end());
+        for (uint32_t l = 0; l < RS64TerrainGPU::MaxLods; ++l) {
+            g.lodBase[l] = uint32_t(packed.size());
+            g.lodCount[l] = uint32_t(lists[l].size());
+            packed.insert(packed.end(), lists[l].begin(), lists[l].end());
+        }
+
+        if ((g.chunks == nullptr) || (g.chunksCapacity < packed.size())) {
+            g.chunksCapacity = uint32_t(packed.size());
+            g.chunks = worker->device->createBuffer(RenderBufferDesc::UploadBuffer(g.chunksCapacity * sizeof(uint32_t), RenderBufferFlag::STORAGE));
+        }
+
+        memcpy(g.chunks->map(), packed.data(), packed.size() * sizeof(uint32_t));
+        g.chunks->unmap();
+        g.set->setBuffer(g.set->gChunks, g.chunks.get(), g.chunksCapacity * sizeof(uint32_t), RenderBufferStructuredView(sizeof(uint32_t)));
+    }
+
+    // The visible chunks, one instanced draw per LOD (chunkCells * 4 * sub >> lod quads per chunk edge), at the anchor call's place in the scene
+    // with its scissor and screen mapping.
+    void FramebufferRenderer::recordRS64Terrain(RenderWorker *worker, const Framebuffer &framebuffer, const InstanceDrawCall &anchor) {
+        const RS64TerrainGPU &g = rs64TerrainGpu;
+        if (!rs64TerrainMap || (g.version != rs64TerrainMap->version) || (g.set == nullptr) || (g.chunks == nullptr) || anchor.triangles.scissor.isEmpty()) {
+            return;
+        }
+
+        interop::RS64TerrainCB cb = rs64TerrainCB;
+        cb.screenScale = anchor.triangles.screenScale;
+        cb.screenOffset = anchor.triangles.screenOffset;
+        // A texture pack replaced some layers: the variant that also samples the texture cache (set 1).
+        const bool packs = g.anyReplaced && (shaderLibrary->rs64TerrainPacks.pipeline != nullptr) && (descTextureSet != nullptr);
+        const ShaderRecord &record = packs ? shaderLibrary->rs64TerrainPacks : shaderLibrary->rs64Terrain;
+        worker->commandList->setPipeline(record.pipeline.get());
+        worker->commandList->setGraphicsPipelineLayout(record.pipelineLayout.get());
+        worker->commandList->setGraphicsDescriptorSet(g.set->get(), 0);
+        if (packs) {
+            worker->commandList->setGraphicsDescriptorSet(descTextureSet->get(), 1);
+        }
+
+        worker->commandList->setViewports(framebuffer.viewport);
+        worker->commandList->setScissors(anchor.triangles.scissor);
+        worker->commandList->setVertexBuffers(0, nullptr, 0, nullptr);
+        worker->commandList->setIndexBuffer(nullptr);
+        for (uint32_t l = 0; l < RS64TerrainGPU::MaxLods; ++l) {
+            const uint32_t quads = (RS64TerrainChunkCells * 4 * cb.sub) >> l;
+            if ((g.lodCount[l] == 0) || (quads == 0)) {
+                continue;
+            }
+
+            cb.lod = l;
+            cb.chunkListBase = g.lodBase[l];
+            worker->commandList->setGraphicsPushConstants(0, &cb);
+            worker->commandList->drawInstanced(quads * quads * 6, g.lodCount[l], 0, 0);
+        }
+
+        if (g.waterCells > 0) {
+            cb.water = 1;
+            cb.waterMargin = uint32_t(rs64lights::TerrainWaterMargin);
+            worker->commandList->setPipeline((packs ? shaderLibrary->rs64TerrainWaterPacks : shaderLibrary->rs64TerrainWater).pipeline.get());
+            worker->commandList->setGraphicsPushConstants(0, &cb);
+            worker->commandList->drawInstanced((cb.mapWidth + 2 * cb.waterMargin) * (cb.mapHeight + 2 * cb.waterMargin) * 6, 1, 0, 0);
+        }
+    }
+
     void FramebufferRenderer::recordRS64TerrainBLAS(RenderWorker *worker) {
         RS64ShadowScene &s = rs64Shadow;
         RenderDevice *device = worker->device;
@@ -3219,6 +3894,51 @@ namespace RT64 {
         thread_local std::vector<uint32_t> idx;
         rs64lights::buildTerrainMesh(*s.terrainMap, rs64lights::config().shadowTerrainSub, pos, idx);
         s.terrainBuiltVersion = s.terrainMap->version;
+
+        // Each cell's texture average, from the level's ROM texture bank (one decode per bank entry).
+        const rs64lights::TerrainMap &tm = *s.terrainMap;
+        thread_local std::vector<uint32_t> texAvg, hitColors;
+        texAvg.assign(size_t(tm.width) * tm.height, 0x808080u);
+        const uint8_t *bank = nullptr, *ids = nullptr;
+        uint32_t bankSize = 0, idsSize = 0;
+        if (rs64_terrain_textures(tm.level, &bank, &bankSize, &ids, &idsSize)) {
+            std::unordered_map<uint32_t, uint32_t> avgOf;
+            uint32_t texels[4096];
+            for (size_t c = 0; (c < texAvg.size()) && (c < tm.texIds.size()); ++c) {
+                const uint32_t t = tm.texIds[c];
+                if ((t * 4 + 2) > idsSize) {
+                    continue;
+                }
+
+                const uint32_t b = (uint32_t(ids[t * 4]) << 8) | ids[t * 4 + 1];
+                if ((b + 1) * rs64lights::TerrainTexBytes > bankSize) {
+                    continue;
+                }
+
+                auto it = avgOf.find(b);
+                if (it == avgOf.end()) {
+                    rs64lights::decodeTerrainTexture(bank + size_t(b) * rs64lights::TerrainTexBytes, texels);
+                    uint32_t sum[3] = {};
+                    for (uint32_t texel : texels) {
+                        for (int ch = 0; ch < 3; ++ch) {
+                            sum[ch] += (texel >> (8 * ch)) & 0xFF;
+                        }
+                    }
+
+                    it = avgOf.emplace(b, (sum[0] / 4096) | ((sum[1] / 4096) << 8) | ((sum[2] / 4096) << 16)).first;
+                }
+
+                texAvg[c] = it->second;
+            }
+        }
+
+        rs64lights::terrainHitColors(tm, rs64lights::config().shadowTerrainSub, texAvg, hitColors);
+        s.terrainWaterPrim = hitColors[1];
+        s.terrainColorBytes = hitColors.size() * sizeof(uint32_t);
+        s.terrainColorBuffer = device->createBuffer(RenderBufferDesc::UploadBuffer(s.terrainColorBytes));
+        memcpy(s.terrainColorBuffer->map(), hitColors.data(), s.terrainColorBytes);
+        s.terrainColorBuffer->unmap();
+        s.terrainColorGpu = device->createBuffer(RenderBufferDesc::DefaultBuffer(s.terrainColorBytes, RenderBufferFlag::STORAGE));
         s.terrainBlas.reset();
         s.terrainNormalGpu.reset();
         if (idx.empty()) {
@@ -3252,11 +3972,14 @@ namespace RT64 {
         s.terrainNormalBuffer->unmap();
         s.terrainIndexGpu = device->createBuffer(RenderBufferDesc::DefaultBuffer(idxBytes, RenderBufferFlag::STORAGE));
         s.terrainNormalGpu = device->createBuffer(RenderBufferDesc::DefaultBuffer(s.terrainNormalBytes, RenderBufferFlag::STORAGE));
-        const RenderBufferBarrier copyIn[] = { RenderBufferBarrier(s.terrainIndexGpu.get(), RenderBufferAccess::WRITE), RenderBufferBarrier(s.terrainNormalGpu.get(), RenderBufferAccess::WRITE) };
+        const RenderBufferBarrier copyIn[] = { RenderBufferBarrier(s.terrainIndexGpu.get(), RenderBufferAccess::WRITE), RenderBufferBarrier(s.terrainNormalGpu.get(), RenderBufferAccess::WRITE),
+            RenderBufferBarrier(s.terrainColorGpu.get(), RenderBufferAccess::WRITE) };
         worker->commandList->barriers(RenderBarrierStage::COPY, copyIn, uint32_t(std::size(copyIn)));
         worker->commandList->copyBufferRegion(RenderBufferReference(s.terrainIndexGpu.get()), RenderBufferReference(s.terrainIndexBuffer.get()), idxBytes);
         worker->commandList->copyBufferRegion(RenderBufferReference(s.terrainNormalGpu.get()), RenderBufferReference(s.terrainNormalBuffer.get()), s.terrainNormalBytes);
-        const RenderBufferBarrier copyOut[] = { RenderBufferBarrier(s.terrainIndexGpu.get(), RenderBufferAccess::READ), RenderBufferBarrier(s.terrainNormalGpu.get(), RenderBufferAccess::READ) };
+        worker->commandList->copyBufferRegion(RenderBufferReference(s.terrainColorGpu.get()), RenderBufferReference(s.terrainColorBuffer.get()), s.terrainColorBytes);
+        const RenderBufferBarrier copyOut[] = { RenderBufferBarrier(s.terrainIndexGpu.get(), RenderBufferAccess::READ), RenderBufferBarrier(s.terrainNormalGpu.get(), RenderBufferAccess::READ),
+            RenderBufferBarrier(s.terrainColorGpu.get(), RenderBufferAccess::READ) };
         worker->commandList->barriers(RenderBarrierStage::GRAPHICS, copyOut, uint32_t(std::size(copyOut)));
         if (rs64lights::config().log) {
             std::fprintf(stderr, "[rt-terrain] blas: map=%ux%u version=%llu tris=%zu bytes=%llu\n", s.terrainMap->width, s.terrainMap->height, (unsigned long long)s.terrainMap->version, idx.size() / 3, (unsigned long long)info.accelerationStructureSize);

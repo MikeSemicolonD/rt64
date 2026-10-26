@@ -506,6 +506,41 @@ namespace RT64 {
         }
     };
 
+    // The RS64 whole-map terrain pass: the frame's transform, viewport and fog buffers plus the static map lattice and tile textures.
+    struct RS64TerrainDescriptorSet : RenderDescriptorSetBase {
+        uint32_t gWorldTransforms;
+        uint32_t gViewProjTransforms;
+        uint32_t gViewports;
+        uint32_t gFog;
+        uint32_t gHeights;
+        uint32_t gColors;
+        uint32_t gCellLayers;
+        uint32_t gTexels;
+        uint32_t gFrame;
+        uint32_t gChunks;
+        uint32_t gSampler;
+
+        RS64TerrainDescriptorSet(const SamplerLibrary &samplerLibrary, RenderDevice *device = nullptr) {
+            builder.begin();
+            gWorldTransforms = builder.addStructuredBuffer(1);
+            gViewProjTransforms = builder.addStructuredBuffer(2);
+            gViewports = builder.addStructuredBuffer(3);
+            gFog = builder.addStructuredBuffer(4);
+            gHeights = builder.addStructuredBuffer(5);
+            gColors = builder.addStructuredBuffer(6);
+            gCellLayers = builder.addStructuredBuffer(7);
+            gTexels = builder.addStructuredBuffer(8);
+            gFrame = builder.addStructuredBuffer(9);
+            gChunks = builder.addStructuredBuffer(10);
+            gSampler = builder.addImmutableSampler(11, samplerLibrary.linear.clampClamp.get());
+            builder.end();
+
+            if (device != nullptr) {
+                create(device);
+            }
+        }
+    };
+
     // Set 3 of the traced RS64 passes (sets 0-2 are the raster common and bindless texture sets).
     struct RS64TracedDescriptorSet : RenderDescriptorSetBase {
         uint32_t gParams;
@@ -518,6 +553,7 @@ namespace RT64 {
         uint32_t gTerrainNormals;
         uint32_t gHitColors;
         uint32_t gEmissiveColors;
+        uint32_t gTerrainColors;
 
         RS64TracedDescriptorSet(RenderDevice *device = nullptr) {
             builder.begin();
@@ -531,6 +567,7 @@ namespace RT64 {
             gTerrainNormals = builder.addByteAddressBuffer(8);
             gHitColors = builder.addStructuredBuffer(9);
             gEmissiveColors = builder.addStructuredBuffer(10);
+            gTerrainColors = builder.addByteAddressBuffer(11);
             builder.end();
 
             if (device != nullptr) {
@@ -551,6 +588,30 @@ namespace RT64 {
             gDepth = builder.addTexture(1);
             gMask = builder.addTexture(2);
             gIndirect = builder.addTexture(3);
+            builder.end();
+
+            if (device != nullptr) {
+                create(device);
+            }
+        }
+    };
+
+    struct RS64ShadowTemporalDescriptorSet : RenderDescriptorSetBase {
+        uint32_t gBlur;
+        uint32_t gDepth;
+        uint32_t gMask;
+        uint32_t gIndirect;
+        uint32_t gHistMask;
+        uint32_t gHistIndirect;
+
+        RS64ShadowTemporalDescriptorSet(RenderDevice *device = nullptr) {
+            builder.begin();
+            gBlur = builder.addConstantBuffer(0);
+            gDepth = builder.addTexture(1);
+            gMask = builder.addTexture(2);
+            gIndirect = builder.addTexture(3);
+            gHistMask = builder.addTexture(4);
+            gHistIndirect = builder.addTexture(5);
             builder.end();
 
             if (device != nullptr) {

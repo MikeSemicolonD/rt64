@@ -7,7 +7,37 @@
 #include "RS64TerrainNormal.hlsli"
 
 ConstantBuffer<RS64ShadowsCB> gShadows : register(b1, space3);
+
+// Water reflection: tangent of its blur cone and its strength (the indirect target multiplies the water's colour).
+static const float kWaterReflCone = 0.02f;
+static const float kWaterReflStrength = 1.5f;
+// Mirrors kWaterLift in RS64Terrain.hlsli: the drawn water sits this far (map units) over the water level and fades out as a shore rises to it.
+static const float kWaterLift = 16.0f;
 Texture2D<float> gDepth : register(t2, space3);
+
+// The drawn water's opacity at water point p (camera space), as waterShoreAlpha in RS64Terrain.hlsli: the ground's depth under the drawn surface,
+// found by a ray down past the water quads.
+float rs64WaterShoreAlpha(float3 p) {
+    RayDesc ray;
+    ray.Origin = p;
+    ray.Direction = normalize((dot(gRs64TerrainUp, p) < 0.0f) ? -gRs64TerrainUp : gRs64TerrainUp);
+    ray.TMin = 0.0f;
+    ray.TMax = gShadows.tMax;
+    RayQuery<RAY_FLAG_SKIP_PROCEDURAL_PRIMITIVES | RAY_FLAG_FORCE_NON_OPAQUE> q;
+    q.TraceRayInline(gScene, RAY_FLAG_NONE, 0x02, ray);
+    while (q.Proceed()) {
+        if (q.CandidatePrimitiveIndex() < gShadows.waterPrim) {
+            q.CommitNonOpaqueTriangleHit();
+        }
+    }
+
+    if (q.CommittedStatus() != COMMITTED_TRIANGLE_HIT) {
+        return 1.0f;
+    }
+
+    const float depth = (q.CommittedObjectRayOrigin() + q.CommittedObjectRayDirection() * q.CommittedRayT()).y - asfloat(gTerrainColors.Load(12));
+    return smoothstep(0.0f, kWaterLift, depth);
+}
 
 // Mirrors rs64lights::frustumExitT: where the ray leaves this frame's view (|x|, |y| <= w, w > 0).
 float rs64FrustumExitT(float3 o, float3 d) {
@@ -76,12 +106,18 @@ bool rs64HistoryBlocked(RayDesc ray, inout float hitT) {
     return false;
 }
 
+// A trace range: a fraction of the receiver's view distance, or world units when negative (the hangar, see fillRS64Shadows).
+float rs64Range(float param, float dist) {
+    return (param < 0.0f) ? -param : (param * dist);
+}
+
 struct RS64Receiver {
     float3 p;
     float3 n;
     float dist;
     bool sky;
     bool terrain;
+    bool water;
 };
 
 // View position from depth, facet normal from its derivatives (ddx/ddy stay in uniform control flow), smooth heightfield normal on static terrain.
@@ -99,11 +135,15 @@ RS64Receiver rs64Receiver(float2 px) {
     r.sky = (depth >= 0.9980f);
     r.dist = length(r.p);
     r.terrain = false;
+    r.water = false;
     if (!r.sky) {
         float3 nT;
         r.terrain = (gShadows.softParams.w != 0.0f) && rs64TerrainNormal(r.p, r.dist, gShadows.terrainParams.x, nT);
         if (r.terrain) {
-            r.n = (dot(nT, r.p) > 0.0f) ? -nT : nT;
+            // Water: the lookup found the water surface, or shallow seabed lying under the drawn water (the pixel can only show water there).
+            r.water = (gShadows.waterPrim > 0) && ((gRs64TerrainPrim >= gShadows.waterPrim) || rs64UnderWater(gRs64TerrainY));
+            const float3 nS = r.water ? gRs64TerrainUp : nT;
+            r.n = (dot(nS, r.p) > 0.0f) ? -nS : nS;
         }
     }
     return r;
@@ -149,7 +189,7 @@ RS64TraceOut PSMain(in float4 pos : SV_Position, in float2 uv : TEXCOORD0) {
     const bool sunRays = ((features & 1u) != 0u) && !deck && (ndl > 0.0f);
     const uint sunCount = sunRays ? max(gShadows.softRays, 1u) : 0u;
     const uint aoCount = ((features & 2u) != 0u) ? max(uint(gShadows.aoParams.x), 1u) : 0u;
-    const float aoRange = max(gShadows.aoParams.y * dist, gShadows.tMin * 2.0f);
+    const float aoRange = max(rs64Range(gShadows.aoParams.y, dist), gShadows.tMin * 2.0f);
     const float3 seed = (abs(L.x) < 0.9f) ? float3(1.0f, 0.0f, 0.0f) : float3(0.0f, 1.0f, 0.0f);
     const float3 st = normalize(cross(L, seed));
     const float3 sb = cross(L, st);
@@ -204,7 +244,8 @@ RS64TraceOut PSMain(in float4 pos : SV_Position, in float2 uv : TEXCOORD0) {
     }
     float shadow = 0.0f;
     float radius = 0.0f;
-    const bool terminator = rc.terrain && (gShadows.softParams.w > 1.5f) && ((features & 1u) != 0u) && !deck;
+    // Water keeps cast shadows but not the terminator: a flat sheet under a low sun would darken all over.
+    const bool terminator = rc.terrain && !rc.water && (gShadows.softParams.w > 1.5f) && ((features & 1u) != 0u) && !deck;
     if (sunCount > 0) {
         const float meanHitT = (blocked > 0) ? (hitSum / float(blocked)) : 0.0f;
         radius = (meanHitT > 0.0f) ? clamp(meanHitT * gShadows.softParams.x * gShadows.softParams.y / dist, 0.0f, gShadows.softParams.z) : 0.0f;
@@ -224,21 +265,25 @@ RS64TraceOut PSMain(in float4 pos : SV_Position, in float2 uv : TEXCOORD0) {
         }
     }
 
-    // Closest-hit rays, one loop: GI hemisphere rays, then the hangar deck's rough reflection ray. Hit colours come from the per-draw table.
+    // Closest-hit rays, one loop: GI hemisphere rays, then the hangar deck's rough or the water's near-mirror reflection ray. Hit colours come from
+    // the per-draw table.
     const uint giCount = ((features & 4u) != 0u) ? max(uint(gShadows.giParams.x), 1u) : 0u;
-    const uint reflCount = (((features & 8u) != 0u) && deck) ? 1u : 0u;
+    const bool waterRefl = ((features & 16u) != 0u) && rc.water;
+    const uint reflCount = ((((features & 8u) != 0u) && deck) || waterRefl) ? 1u : 0u;
     const float3 v = p / dist;
     float3 gi = float3(0.0f, 0.0f, 0.0f);
     float3 refl = float3(0.0f, 0.0f, 0.0f);
+    float3 waterR = float3(0.0f, 0.0f, 0.0f);
+    float waterF = 0.0f;
     [loop]
     for (uint g = 0; g < giCount + reflCount; g++) {
         const bool isRefl = (g >= giCount);
         RayDesc r;
         r.Origin = origin;
-        r.Direction = isRefl ? rs64RoughReflect(v, n, gShadows.reflParams.x, rot) : rs64CosineDir(n, g, giCount, frac(rot + 0.5f));
+        r.Direction = isRefl ? rs64RoughReflect(v, n, waterRefl ? kWaterReflCone : gShadows.reflParams.x, rot) : rs64CosineDir(n, g, giCount, frac(rot + 0.5f));
         const float rise = max(dot(r.Direction, n), 0.05f);
         r.TMin = max(gShadows.tMin, deckSkip / rise);
-        r.TMax = isRefl ? gShadows.tMax : max(gShadows.giParams.y * dist, r.TMin * 2.0f);
+        r.TMax = isRefl ? gShadows.tMax : max(rs64Range(gShadows.giParams.y, dist), r.TMin * 2.0f);
         float t;
         uint id;
         uint prim;
@@ -250,9 +295,23 @@ RS64TraceOut PSMain(in float4 pos : SV_Position, in float2 uv : TEXCOORD0) {
             // The deck's own floor draws (landing circle, plates) are not reflected.
             continue;
         }
-        if (isRefl) {
+        if (isRefl && waterRefl) {
+            // Water: a near mirror, weighted by its own Fresnel (F0 0.02) at every distance; mixed in below. A miss (sky) leaves the water as drawn.
+            // The hit is fogged as the view fogs it there (RSPProcessCS vertex fog), so the fog hides in the reflection what it hides on screen.
+            waterR = hc.rgb;
+            if (gShadows.fogParams.z > 0.0f) {
+                const float4 hitClip = mul(gShadows.screenFromView, float4(r.Origin + r.Direction * t, 1.0f));
+                const float fogA = (hitClip.w > 0.0f) ? saturate(((max(hitClip.z, 0.0f) / hitClip.w) * gShadows.fogParams.x + gShadows.fogParams.y) / 255.0f) : 1.0f;
+                waterR = lerp(waterR, gShadows.fogColor.rgb, fogA);
+            }
+            waterF = saturate(rs64Schlick(saturate(dot(-v, n)), 0.02f) * kWaterReflStrength) * rs64WaterShoreAlpha(p);
+            if (gShadows.debugMode == 9) {
+                refl += hc.rgb;
+            }
+        }
+        else if (isRefl) {
             // Rough matte deck: ordinary hits fade out by their height above the deck, emissive ones (lights, glow cards) give the broad sheen.
-            const float range = max(gShadows.reflParams.y * dist, gShadows.tMin * 2.0f);
+            const float range = max(rs64Range(gShadows.reflParams.y, dist), gShadows.tMin * 2.0f);
             const float fade = (hc.a > 0.5f) ? 1.0f : pow(saturate(1.0f - (t * rise - deckSkip) / range), 2.0f);
             // Debug 9: the raw hit colour; 10: the hit instance (red drawn, green terrain, blue cutout, white emissive, grey history).
             const float3 idColor = (id == 0) ? float3(1, 0, 0) : (id == 1) ? float3(0, 1, 0) : (id == 2) ? float3(0, 0, 1) : (id == 7) ? float3(1, 1, 1) : float3(0.5f, 0.5f, 0.5f);
@@ -278,12 +337,32 @@ RS64TraceOut PSMain(in float4 pos : SV_Position, in float2 uv : TEXCOORD0) {
     if (giCount > 0) {
         gi *= gShadows.giParams.z / float(giCount);
     }
+
+    // The compose is dst * src + dst * srcA on a unorm target (both clamped to [0, 1]). For a mix dst * (1 - F) + R * F on water, srcA takes the
+    // (1 - F) (alpha carries -F) and src carries R * F over this cell's estimated colour (texture x vertex colours), so dst * src gives R * F back up
+    // to dst. The blur stays linear in both, so mix edges cannot overshoot.
+    float waterMixF = 0.0f;
+    if ((waterF > 0.0f) && (gShadows.debugMode != 9)) {
+        float3 waterColor;
+        if (rs64TerrainCellColor(gRs64TerrainPrim, waterColor)) {
+            // One brightness ratio for all channels: a per-channel one against blue water clipped red alone (rainbow edges); the reflection takes the water's hue.
+            const float3 luma = float3(0.3f, 0.59f, 0.11f);
+            refl += saturate(waterF * dot(waterR, luma) / max(dot(waterColor, luma), 0.02f)).xxx;
+            waterMixF = max(waterF, 1.0e-4f);
+        }
+        else {
+            refl += waterR * waterF;
+        }
+    }
+
     const float3 indirect = gi + refl;
-    if (any(indirect > 0.0f)) {
+    if (any(gi > 0.0f) || (any(refl != 0.0f) && !rc.water)) {
         radius = max(radius, gShadows.giParams.w);
     }
     o.mask = float4(shadow, radius, o.mask.b, ao);
-    o.indirect = float4(indirect, dot(refl, float3(0.3f, 0.59f, 0.11f)));
+
+    // Negative alpha marks a water mix and carries its -F; otherwise it is the reflection luminance (debug 8).
+    o.indirect = float4(indirect, (waterMixF > 0.0f) ? -waterMixF : dot(refl, float3(0.3f, 0.59f, 0.11f)));
     return o;
 }
 

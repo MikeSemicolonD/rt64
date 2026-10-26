@@ -23,6 +23,9 @@ namespace RT64 {
 
         Type type;
 
+        // The RS64 whole-map terrain pass draws here (the GBI's zero-area anchor call); never merged with neighbouring draws.
+        bool rs64TerrainAnchor = false;
+
         union {
             struct {
                 uint32_t hitGroupIndex;

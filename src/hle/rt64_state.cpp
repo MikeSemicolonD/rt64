@@ -551,10 +551,17 @@ namespace RT64 {
             float cov = 0.0f;
             const bool sampled = drawCall.colorCombiner.usesTexture(drawCall.otherMode, 0, drawCall.otherMode.cycleType() == G_CYC_1CYCLE);
             const bool ok = sampled && rs64lights::tmemAverage(reinterpret_cast<const uint8_t *>(rdp->TMEM), t0.fmt, t0.siz, t0.tmem, t0.line, uint32_t(((t0.lrs - t0.uls) >> 2) + 1), uint32_t(((t0.lrt - t0.ult) >> 2) + 1), t0.palette, tex, cov);
+            // w: bit 0 the texture average is valid, bit 1 the colour combiner reads prim (a prim it ignores must not tint the hit colour).
+            bool prim = false;
+            for (uint32_t i = 0; i < 4; i++) {
+                prim = prim || (drawCall.colorCombiner.decodeColorInput(i, false) == interop::ColorCombiner::C_PRIMITIVE);
+                prim = prim || ((drawCall.otherMode.cycleType() == G_CYC_2CYCLE) && (drawCall.colorCombiner.decodeColorInput(i, true) == interop::ColorCombiner::C_PRIMITIVE));
+            }
             if (workload.rs64CallTex.size() <= size_t(drawCall.callIndex)) {
                 workload.rs64CallTex.resize(size_t(drawCall.callIndex) + 1, hlslpp::float4(0.0f, 0.0f, 0.0f, 0.0f));
             }
-            workload.rs64CallTex[drawCall.callIndex] = ok ? hlslpp::float4(tex[0], tex[1], tex[2], 1.0f) : hlslpp::float4(0.0f, 0.0f, 0.0f, 0.0f);
+            const float flags = (ok ? 1.0f : 0.0f) + (prim ? 2.0f : 0.0f);
+            workload.rs64CallTex[drawCall.callIndex] = ok ? hlslpp::float4(tex[0], tex[1], tex[2], flags) : hlslpp::float4(0.0f, 0.0f, 0.0f, flags);
         }
 
         // Add the draw call to the FB pair.

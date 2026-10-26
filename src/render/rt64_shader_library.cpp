@@ -11,13 +11,17 @@
 #include "shaders/FbChangesClearCS.hlsl.spirv.h"
 #include "shaders/FbChangesDrawColorPS.hlsl.spirv.h"
 #include "shaders/RS64LightsPS.hlsl.spirv.h"
+#include "shaders/RS64TerrainVS.hlsl.spirv.h"
+#include "shaders/RS64TerrainPS.hlsl.spirv.h"
 #ifndef __APPLE__
+#   include "shaders/RS64TerrainPSPacks.hlsl.spirv.h"
 #   include "shaders/RS64ShadowsPS.hlsl.spirv.h"
 #   include "shaders/RS64LightsShadowedPS.hlsl.spirv.h"
 #   include "shaders/RS64FogShaftsPS.hlsl.spirv.h"
 #   include "shaders/RS64ShadowsSoftPS.hlsl.spirv.h"
 #   include "shaders/RS64ShadowBlurPS.hlsl.spirv.h"
 #   include "shaders/RS64ShadowBlurVPS.hlsl.spirv.h"
+#   include "shaders/RS64ShadowTemporalPS.hlsl.spirv.h"
 #endif
 #include "shaders/FbChangesDrawDepthPS.hlsl.spirv.h"
 #include "shaders/FbReadAnyChangesCS.hlsl.spirv.h"
@@ -67,12 +71,16 @@
 #   include "shaders/FbChangesClearCS.hlsl.dxil.h"
 #   include "shaders/FbChangesDrawColorPS.hlsl.dxil.h"
 #   include "shaders/RS64LightsPS.hlsl.dxil.h"
+#   include "shaders/RS64TerrainVS.hlsl.dxil.h"
+#   include "shaders/RS64TerrainPS.hlsl.dxil.h"
+#   include "shaders/RS64TerrainPSPacks.hlsl.dxil.h"
 #   include "shaders/RS64ShadowsPS.hlsl.dxil.h"
 #   include "shaders/RS64LightsShadowedPS.hlsl.dxil.h"
 #   include "shaders/RS64FogShaftsPS.hlsl.dxil.h"
 #   include "shaders/RS64ShadowsSoftPS.hlsl.dxil.h"
 #   include "shaders/RS64ShadowBlurPS.hlsl.dxil.h"
 #   include "shaders/RS64ShadowBlurVPS.hlsl.dxil.h"
+#   include "shaders/RS64ShadowTemporalPS.hlsl.dxil.h"
 #   include "shaders/FbChangesDrawDepthPS.hlsl.dxil.h"
 #   include "shaders/FbReadAnyChangesCS.hlsl.dxil.h"
 #   include "shaders/FbReadAnyFullCS.hlsl.dxil.h"
@@ -120,6 +128,8 @@
 #   include "shaders/FbChangesClearCS.hlsl.metal.h"
 #   include "shaders/FbChangesDrawColorPS.hlsl.metal.h"
 #   include "shaders/RS64LightsPS.hlsl.metal.h"
+#   include "shaders/RS64TerrainVS.hlsl.metal.h"
+#   include "shaders/RS64TerrainPS.hlsl.metal.h"
 #   include "shaders/FbChangesDrawDepthPS.hlsl.metal.h"
 #   include "shaders/FbReadAnyChangesCS.hlsl.metal.h"
 #   include "shaders/FbReadAnyFullCS.hlsl.metal.h"
@@ -167,6 +177,7 @@
 
 #include "shared/rt64_fb_common.h"
 #include "shared/rt64_fb_reinterpret.h"
+#include "shared/rt64_rs64_terrain_cb.h"
 #include "shared/rt64_texture_copy.h"
 #include "shared/rt64_video_interface.h"
 
@@ -817,6 +828,60 @@ namespace RT64 {
             fbChangesDrawDepth.pipeline = device->createGraphicsPipeline(pipelineDesc);
         }
 
+        // RS64 whole-map terrain: the vertex shader builds the map lattice; depth tested and written like the game's terrain records.
+        {
+            RS64TerrainDescriptorSet descriptorSet(samplerLibrary);
+            layoutBuilder.begin();
+            layoutBuilder.addPushConstant(0, 0, sizeof(interop::RS64TerrainCB), RenderShaderStageFlag::VERTEX | RenderShaderStageFlag::PIXEL);
+            layoutBuilder.addDescriptorSet(descriptorSet);
+            layoutBuilder.end();
+            rs64Terrain.pipelineLayout = layoutBuilder.create(device);
+
+            std::unique_ptr<RenderShader> terrainVS = device->createShader(CREATE_SHADER_INPUTS(RS64TerrainVSBlobDXIL, RS64TerrainVSBlobSPIRV, RS64TerrainVSBlobMSL, "VSMain", shaderFormat));
+            std::unique_ptr<RenderShader> terrainPS = device->createShader(CREATE_SHADER_INPUTS(RS64TerrainPSBlobDXIL, RS64TerrainPSBlobSPIRV, RS64TerrainPSBlobMSL, "PSMain", shaderFormat));
+            RenderGraphicsPipelineDesc pipelineDesc;
+            pipelineDesc.renderTargetFormat[0] = RenderTarget::colorBufferFormat(usesHDR);
+            pipelineDesc.renderTargetBlend[0] = RenderBlendDesc::Copy();
+            pipelineDesc.renderTargetCount = 1;
+            pipelineDesc.vertexShader = terrainVS.get();
+            pipelineDesc.pixelShader = terrainPS.get();
+            pipelineDesc.multisampling = multisampling;
+            pipelineDesc.depthTargetFormat = RenderFormat::D32_FLOAT;
+            pipelineDesc.depthEnabled = true;
+            pipelineDesc.depthFunction = RenderComparisonFunction::LESS;
+            pipelineDesc.depthWriteEnabled = true;
+            pipelineDesc.cullMode = RenderCullMode::NONE;
+            pipelineDesc.pipelineLayout = rs64Terrain.pipelineLayout.get();
+            rs64Terrain.pipeline = device->createGraphicsPipeline(pipelineDesc);
+
+            // The water draw blends over the ground, fading in from the shoreline.
+            pipelineDesc.renderTargetBlend[0] = RenderBlendDesc::AlphaBlend();
+            rs64TerrainWater.pipeline = device->createGraphicsPipeline(pipelineDesc);
+
+#   ifndef __APPLE__
+
+            // With the bindless texture cache (not texture slots), variants that also sample texture pack replacements from it (set 1).
+            if (!textureSlots) {
+                FramebufferRendererDescriptorTextureSet textureSet;
+                layoutBuilder.begin();
+                layoutBuilder.addPushConstant(0, 0, sizeof(interop::RS64TerrainCB), RenderShaderStageFlag::VERTEX | RenderShaderStageFlag::PIXEL);
+                layoutBuilder.addDescriptorSet(descriptorSet);
+                layoutBuilder.addDescriptorSet(textureSet);
+                layoutBuilder.end();
+                rs64TerrainPacks.pipelineLayout = layoutBuilder.create(device);
+
+                std::unique_ptr<RenderShader> packsPS = device->createShader(CREATE_SHADER_INPUTS(RS64TerrainPSPacksBlobDXIL, RS64TerrainPSPacksBlobSPIRV, RS64TerrainPSPacksBlobSPIRV, "PSMain", shaderFormat));
+                pipelineDesc.pixelShader = packsPS.get();
+                pipelineDesc.pipelineLayout = rs64TerrainPacks.pipelineLayout.get();
+                pipelineDesc.renderTargetBlend[0] = RenderBlendDesc::Copy();
+                rs64TerrainPacks.pipeline = device->createGraphicsPipeline(pipelineDesc);
+                pipelineDesc.renderTargetBlend[0] = RenderBlendDesc::AlphaBlend();
+                rs64TerrainWaterPacks.pipeline = device->createGraphicsPipeline(pipelineDesc);
+            }
+
+#   endif
+        }
+
         // RS64 dynamic point lights: full-screen pass reading depth, drawn while the depth target is bound read-only.
         {
             RS64LightsDescriptorSet descriptorSet;
@@ -941,6 +1006,16 @@ namespace RT64 {
             maskDesc.pixelShader = blurHShader.get();
             maskDesc.pipelineLayout = rs64ShadowBlurH.pipelineLayout.get();
             rs64ShadowBlurH.pipeline = device->createGraphicsPipeline(maskDesc);
+            // Temporal accumulation of AO and indirect light, between the trace and the H blur (same two targets).
+            RS64ShadowTemporalDescriptorSet temporalSet;
+            layoutBuilder.begin();
+            layoutBuilder.addDescriptorSet(temporalSet);
+            layoutBuilder.end();
+            rs64ShadowTemporal.pipelineLayout = layoutBuilder.create(device);
+            std::unique_ptr<RenderShader> temporalShader = device->createShader(CREATE_SHADER_INPUTS(RS64ShadowTemporalPSBlobDXIL, RS64ShadowTemporalPSBlobSPIRV, RS64ShadowTemporalPSBlobSPIRV, "PSMain", shaderFormat));
+            maskDesc.pixelShader = temporalShader.get();
+            maskDesc.pipelineLayout = rs64ShadowTemporal.pipelineLayout.get();
+            rs64ShadowTemporal.pipeline = device->createGraphicsPipeline(maskDesc);
             // Compose: result = dst * src + dst * srcA = dst * dark * (1 + indirect), see rs64lights::composeFactor.
             RenderBlendDesc compose = RenderBlendDesc::Copy();
             compose.blendEnabled = true;

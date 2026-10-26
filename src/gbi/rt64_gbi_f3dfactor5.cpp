@@ -64,6 +64,7 @@ extern "C" { volatile unsigned g_f5_task_faces = 0; }
 // disagrees with byte1 bit0, 2 = B4 filler guard fired, 3 = attribution de-flicker skip.
 extern "C" { volatile unsigned g_f5_heur[4] = {}; }
 extern "C" { volatile int g_explosion_hold = 0; }
+extern "C" int rs64_static_terrain_mode(void);
 
 namespace RT64 {
     namespace GBI_F3DFACTOR5 {
@@ -143,6 +144,11 @@ namespace RT64 {
         static hlslpp::float4x4 s_world_from_view;
         static uint64_t s_world_task = ~0ull;
         static int32_t s_mv_off_x = 0, s_mv_off_z = 0;
+        static float s_root_x = 0.0f, s_root_z = 0.0f;
+        static bool s_root_valid = false;
+        // This frame's terrain root transform still has the previous grid although its node moved (f5_regrid_after_load).
+        static bool s_root_lag = false;
+        static uint64_t s_root_lag_task = ~0ull;
         static bool f5_regrid_comp_enabled() {
             static const bool s = env_on("ROGUESQ_F5_REGRID_COMP", true);
             return s;
@@ -190,6 +196,7 @@ namespace RT64 {
         // After a modelview load: learn k (local units per root unit) from the first re-center jump, then apply -L to the root transform.
         static void f5_regrid_after_load(State* state) {
             s_mv_off_x = s_mv_off_z = 0;
+            s_root_valid = false;
             if (s_regrid_cur == 0) return;
             auto it = s_regrid.find(s_regrid_cur);
             s_regrid_cur = 0;
@@ -198,6 +205,19 @@ namespace RT64 {
             auto& m = state->rsp->modelMatrixStack[state->rsp->modelMatrixStackSize - 1];
             const float t[3] = { (float)m[3][0], (float)m[3][1], (float)m[3][2] };
             const bool cont = e.haveT && (e.lastTask + 1 == state->displayListCounter);
+            // On a re-center frame the game's root transform sometimes still has the previous grid (it jumps a frame later): its jump falls short of k.
+            if (e.moved && cont && (e.k > 0.0f)) {
+                float jw = 0.0f, ww = 0.0f;
+                for (int c = 0; c < 3; ++c) {
+                    const float w = e.dx * (float)m[0][c] + e.dz * (float)m[2][c];
+                    jw += (t[c] - e.prevT[c] - e.prevD[c]) * w;
+                    ww += w * w;
+                }
+
+                s_root_lag = (ww > 1e-6f) && ((jw / ww) < (0.5f * e.k));
+                s_root_lag_task = state->displayListCounter;
+            }
+
             if (e.pendingK && e.moved && cont) {
                 float w[3], j[3], jw = 0, ww = 0;
                 for (int c = 0; c < 3; ++c) {
@@ -219,11 +239,15 @@ namespace RT64 {
             for (int c = 0; c < 3; ++c) e.prevT[c] = t[c];
             e.haveT = true;
             e.lastTask = state->displayListCounter;
-            if (f5_regrid_comp_enabled() && ((e.lx != 0) || (e.lz != 0))) {
-                const hlslpp::float4x4 shift(1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, (float)-e.lx, 0, (float)-e.lz, 1);
+            // Until a lagging root transform takes the new grid, keep the previous compensation, so the compensated transform stays continuous.
+            const bool lagNow = s_root_lag && (s_root_lag_task == state->displayListCounter) && (e.k > 0.0f);
+            const int32_t lx = lagNow ? (e.lx - (int32_t)std::lround(e.dx * e.k)) : e.lx;
+            const int32_t lz = lagNow ? (e.lz - (int32_t)std::lround(e.dz * e.k)) : e.lz;
+            if (f5_regrid_comp_enabled() && ((lx != 0) || (lz != 0))) {
+                const hlslpp::float4x4 shift(1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, (float)-lx, 0, (float)-lz, 1);
                 m = hlslpp::mul(shift, m);
-                s_mv_off_x = e.lx;
-                s_mv_off_z = e.lz;
+                s_mv_off_x = lx;
+                s_mv_off_z = lz;
             }
             if (rs64lights::config().shadows && rs64lights::config().log) {
                 static uint32_t s_sunLog = 0;
@@ -233,6 +257,9 @@ namespace RT64 {
                         sun.dir[0], sun.dir[1], sun.dir[2], (float)m[0][0], (float)m[0][1], (float)m[0][2], (float)m[1][0], (float)m[1][1], (float)m[1][2], (float)m[2][0], (float)m[2][1], (float)m[2][2]);
                 }
             }
+            s_root_x = e.x;
+            s_root_z = e.z;
+            s_root_valid = true;
             if ((e.k > 0.0f) || (e.gen != 0)) {
                 s_world_from_view = hlslpp::inverse(m);
                 s_world_task = state->displayListCounter;
@@ -958,7 +985,6 @@ namespace RT64 {
             std::vector<rs64lights::Candidate> laser;
             std::vector<uint8_t> noCast;
             // Engine-glow table key for a chunk draw of this mesh (exact glow-card part) and for an inline draw identified by it (its part's glow card); nullptr = none.
-            std::vector<const char*> exhaust;
             std::vector<const char*> exhaustPart;
             // Flying craft (rs64lights::movingCraft): kept out of shadow history.
             std::vector<uint8_t> craft;
@@ -986,13 +1012,16 @@ namespace RT64 {
         static bool f5_vaddr_ok(uint32_t a, uint32_t n) {
             return (a >= 0x80000000u) && ((a & 0x00FFFFFFu) + n <= 0x800000u);
         }
+        // Also host RAM above the game's 8 MB (relocated co-op blocks, host tables), as far as the 24-bit reads reach.
+        static bool f5_host_vaddr_ok(uint32_t a, uint32_t n) {
+            return (a >= 0x80000000u) && ((a & 0x00FFFFFFu) + n <= 0x1000000u);
+        }
         static void f5_mesh_registry_rebuild(const uint8_t* ram, F5MeshRegistry& p) {
             p.chunkMesh.clear();
             p.md1Mesh.clear();
             p.names.clear();
             p.laser.clear();
             p.noCast.clear();
-            p.exhaust.clear();
             p.exhaustPart.clear();
             p.craft.clear();
             for (uint32_t b = 0; b < 25; ++b) {
@@ -1026,9 +1055,8 @@ namespace RT64 {
                                     lc = rs64lights::Candidate{};
                                 }
                                 p.laser.push_back(lc);
-                                p.noCast.push_back(lc.emissive ? 1 : (rs64lights::cutoutDenied(key) ? 2 : 0));
+                                p.noCast.push_back((lc.emissive || rs64lights::emissiveSurface(key)) ? 1 : (rs64lights::cutoutDenied(key) ? 2 : 0));
                                 const char* part = rs64lights::exhaustKeyForPart(key);
-                                p.exhaust.push_back(((part != nullptr) && (std::strcmp(part, key) == 0)) ? part : nullptr);
                                 p.exhaustPart.push_back(part);
                                 p.craft.push_back(rs64lights::movingCraft(key) ? 1 : 0);
                                 p.md1Mesh.emplace(md, meshIdx);
@@ -1100,7 +1128,9 @@ namespace RT64 {
                     for (int k = 0; k < 9; ++k) {
                         R[k] = rdf(0x80138D4Cu + 4 * k);
                     }
-                    sun.valid = rs64lights::sunCameraDir(L, R, sun.dir);
+                    sun.valid = rs64lights::sunCameraDir(L, R, sun.dir, std::tan(rs64lights::config().sunMinElevationDeg * 3.14159265f / 180.0f));
+                    sun.levelWorld = true;
+                    memcpy(sun.world, L, sizeof(L));
                     sun.color[0] = rdf(rec + 0x24);
                     sun.color[1] = rdf(rec + 0x28);
                     sun.color[2] = rdf(rec + 0x2C);
@@ -1137,7 +1167,31 @@ namespace RT64 {
                     rs64lights::Candidate ring[6];
                     const uint32_t n = rs64lights::menuRingLights(kCenter, kAxisX, kAxisD, kUp, 2900.0f, 150.0f, 6, 2500.0f, rs64lights::config().menuRingGain, ring, 6);
                     lights.insert(lights.end(), ring, ring + n);
+                    rs64lights::MenuImageGlow& glow = rs64lights::menuImageGlow();
+                    rs64lights::Candidate image;
+                    if (rs64lights::menuImageLight(glow, rs64lights::menuHoloPos(), rs64lights::config().menuHoloRadius, rs64lights::config().menuImageGain, rs64lights::config().menuHoloFalloff, image)) {
+                        lights.push_back(image);
+                    }
+                    glow = rs64lights::MenuImageGlow{};
+                    glow.active = true;
                 }
+                else {
+                    rs64lights::menuImageGlow().active = false;
+                }
+            }
+            else {
+                rs64lights::menuImageGlow().active = false;
+            }
+            // The pause menu builds its own scene (root and light list) over the held mission view: keep the level's last sun (camera space; the camera holds still).
+            static rs64lights::Sun s_mission_sun;
+            static uint32_t s_mission_level = UINT32_MAX;
+            const uint32_t level = rd_be_u32(ram, 0x80130B70u);
+            if (sun.valid && sun.levelWorld) {
+                s_mission_sun = sun;
+                s_mission_level = level;
+            }
+            else if (!sun.valid && (missionRoot != 0) && (menu == rs64lights::MenuSceneNone) && (level == s_mission_level)) {
+                sun = s_mission_sun;
             }
             state->ext.workloadQueue->workloads[state->ext.workloadQueue->writeCursor].rs64Sun = sun;
         }
@@ -1146,13 +1200,85 @@ namespace RT64 {
         static uint64_t s_terrain_hash = 0;
         static uint64_t s_terrain_version = 0;
         static uint32_t s_terrain_tab = 0;
-        static void f5_capture_terrain(State* state) {
+        // Host's terrain renderer choice (rs64_static_terrain_mode): 1 = the whole HMP map draws in one GPU pass at the first terrain record (records
+        // dropped), 0 = the game's own terrain, 2 = each record draws its own cell from the map (the validation scaffold).
+        static int f5_static_terrain_mode() {
+            return rs64_static_terrain_mode();
+        }
+        static bool f5_static_terrain_enabled() {
+            return f5_static_terrain_mode() != 0;
+        }
+        static float rd_be_f32(const uint8_t* ram, uint32_t vaddr) {
+            const uint32_t u = rd_be_u32(ram, vaddr);
+            float f;
+            std::memcpy(&f, &u, sizeof f);
+            return f;
+        }
+        // The cell's lights for the terrain lighting: index map at descriptor +8, link table at 0x80136FCC (type-2 links, at most 9), as mapCellGeometryToGridSpace 0x8004AA94.
+        static size_t f5_terrain_cell_lights(const uint8_t* ram, uint32_t W, uint32_t col, uint32_t row, rs64lights::TerrainLight out[9]) {
+            const uint32_t D = 0x80136DC0u;
+            const uint32_t lightIdx = rd_be_u32(ram, D + 8), links = rd_be_u32(ram, 0x80136FCCu);
+            if (!f5_vaddr_ok(lightIdx, (row * W + col + 1) * 2) || !f5_vaddr_ok(links, 12)) {
+                return 0;
+            }
+            uint32_t v = rd_be_u16(ram, lightIdx + (row * W + col) * 2);
+            if (v == 0xFFFFu) {
+                return 0;
+            }
+            v = rd_be_u16(ram, links + (v & 0x7FFFu) * 12 + 2);
+            size_t n = 0;
+            for (int hops = 0; (v != 0xFFFFu) && (n < 9) && (hops < 4096); ++hops) {
+                const uint32_t e = links + v * 12;
+                if (!f5_vaddr_ok(e, 12)) {
+                    break;
+                }
+                const uint32_t L = rd_be_u32(ram, e + 8);
+                if ((rd_be_u16(ram, e + 4) == 2) && f5_vaddr_ok(L, 0x20)) {
+                    rs64lights::TerrainLight& t = out[n++];
+                    for (int i = 0; i < 3; ++i) {
+                        t.rgb[i] = rd_be_f32(ram, L + i * 4);
+                        t.pos[i] = rd_be_f32(ram, L + 0x10 + i * 4);
+                    }
+                    t.radius = rd_be_f32(ram, L + 0x1C);
+                    t.box = ram[((L + 0xE) & 0x00FFFFFFu) ^ 3] != 0;
+                }
+                v = rd_be_u16(ram, e + 2);
+            }
+            return n;
+        }
+        // The ported colours of cells [x0, x1] x [z0, z1] (all by default); the rest keep theirs.
+        static void f5_terrain_colors(const uint8_t* ram, rs64lights::TerrainMap& m, uint32_t x0 = 0, uint32_t z0 = 0, uint32_t x1 = UINT32_MAX, uint32_t z1 = UINT32_MAX) {
+            const uint32_t D = 0x80136DC0u;
+            const uint32_t sun = rd_be_u32(ram, D + 0x48);
+            rs64lights::TerrainShade s;
+            s.cellScale = rd_be_f32(ram, D + 0x10);
+            for (int i = 0; i < 3; ++i) {
+                s.ambient[i] = rd_be_f32(ram, D + 0x3C + i * 4);
+                if (f5_vaddr_ok(sun, 0x1C)) {
+                    s.sunRgb[i] = rd_be_f32(ram, sun + i * 4);
+                    s.sunDir[i] = rd_be_f32(ram, sun + 0x10 + i * 4);
+                }
+            }
+            m.shade = s;
+            if (m.colors.size() != size_t(m.width) * m.height * 75) {
+                m.colors.assign(size_t(m.width) * m.height * 75, 0);
+            }
+            for (uint32_t row = z0; row <= std::min(z1, m.height - 1); ++row) {
+                for (uint32_t col = x0; col <= std::min(x1, m.width - 1); ++col) {
+                    rs64lights::TerrainLight lights[9];
+                    const size_t n = f5_terrain_cell_lights(ram, m.width, col, row, lights);
+                    rs64lights::terrainCellColors(m, col, row, s, lights, n, &m.colors[(size_t(row) * m.width + col) * 75]);
+                }
+            }
+        }
+        // Re-snapshots the HMP map when it changed; false while no valid map is loaded.
+        static bool f5_refresh_terrain_map(State* state) {
             const uint8_t* ram = state->RDRAM;
             const uint32_t D = 0x80136DC0u;
             const uint32_t idxArr = rd_be_u32(ram, D), tab = rd_be_u32(ram, D + 4);
             const uint32_t W = rd_be_u16(ram, D + 0x38), H = rd_be_u16(ram, D + 0x3A);
-            if ((W == 0) || (H == 0) || (W > 256) || (H > 256) || !f5_vaddr_ok(idxArr, W * H * 2) || !f5_vaddr_ok(tab, 0x1E)) {
-                return;
+            if ((W == 0) || (H == 0) || (W > 256) || (H > 256) || !f5_vaddr_ok(idxArr, W * H * 2) || !f5_host_vaddr_ok(tab, 0x1E)) {
+                return false;
             }
             thread_local std::vector<uint16_t> tiles;
             tiles.resize(size_t(W) * H);
@@ -1161,21 +1287,29 @@ namespace RT64 {
             }
             const uint32_t maxTile = *std::max_element(tiles.begin(), tiles.end());
             const uint32_t tableBytes = (maxTile + 1u) * 0x1Eu;
-            if (!f5_vaddr_ok(tab, tableBytes)) {
-                return;
+            if (!f5_host_vaddr_ok(tab, tableBytes)) {
+                return false;
             }
-            const uint64_t h = rs64lights::terrainMapKey(tiles.data(), tiles.size(), ram + (tab & 0x00FFFFFFu), tableBytes, tab, W, H);
+            const int32_t waterLevel = (int32_t)rd_be_u32(ram, 0x801375C0u);
+            const uint64_t h = rs64lights::terrainMapKey(tiles.data(), tiles.size(), ram + (tab & 0x00FFFFFFu), tableBytes, tab, W, H) ^ (uint64_t(uint32_t(waterLevel)) * 0x9E3779B97F4A7C15ull);
             if (!s_terrain_map || (h != s_terrain_hash)) {
                 auto m = std::make_shared<rs64lights::TerrainMap>();
                 m->width = W;
                 m->height = H;
                 m->heights.assign(size_t(W) * H * 25, 0);
                 m->present.assign(size_t(W) * H, 0);
+                m->texIds.assign(size_t(W) * H, 0);
+                m->waterKind.assign(size_t(W) * H, 0);
+                m->level = rd_be_u32(ram, 0x80130B70u);
+                m->waterLevel = waterLevel;
                 for (uint32_t c = 0; c < W * H; ++c) {
                     const uint32_t a = tab + uint32_t(tiles[c]) * 0x1Eu + 5u;
-                    if (!f5_vaddr_ok(a, 25)) {
+                    if (!f5_host_vaddr_ok(a, 25)) {
                         continue;
                     }
+                    m->texIds[c] = (uint16_t)rd_be_u16(ram, a - 5u);
+                    const uint8_t flags = ram[((a - 3u) & 0x00FFFFFFu) ^ 3];
+                    m->waterKind[c] = (flags & 0x08) ? 1 : ((flags & 0x10) ? 2 : 0);
                     for (uint32_t k = 0; k < 25; ++k) {
                         m->heights[size_t(c) * 25 + k] = (int8_t)ram[((a + k) & 0x00FFFFFFu) ^ 3];
                     }
@@ -1183,15 +1317,66 @@ namespace RT64 {
                 }
                 rs64lights::buildTileCells(tiles.data(), tiles.size(), m->tileCell);
                 m->heightScale = rs64lights::envFloat("ROGUESQ_F5_TERRAIN_HSCALE", 1.0f);
+
+                // A runtime edit (or the tile table moving) keeps the level: only the changed cells and their border get new colours, and the
+                // renderers update from baseVersion. Nothing changed (the table only moved): the map stays as it is.
+                const std::shared_ptr<const rs64lights::TerrainMap> prev = s_terrain_map;
+                const bool same = prev && (prev->width == W) && (prev->height == H) && (prev->level == m->level) && (prev->waterLevel == m->waterLevel)
+                    && (prev->heightScale == m->heightScale) && (prev->colors.empty() != f5_static_terrain_enabled());
+                uint32_t x0 = UINT32_MAX, z0 = UINT32_MAX, x1 = 0, z1 = 0;
+                if (same) {
+                    for (uint32_t c = 0; c < W * H; ++c) {
+                        const bool changed = (memcmp(&m->heights[size_t(c) * 25], &prev->heights[size_t(c) * 25], 25) != 0) || (m->texIds[c] != prev->texIds[c])
+                            || (m->waterKind[c] != prev->waterKind[c]) || (m->present[c] != prev->present[c]);
+                        if (changed) {
+                            x0 = std::min(x0, c % W);
+                            z0 = std::min(z0, c / W);
+                            x1 = std::max(x1, c % W);
+                            z1 = std::max(z1, c / W);
+                        }
+                    }
+
+                    if (x0 == UINT32_MAX) {
+                        s_terrain_hash = h;
+                        s_terrain_tab = tab;
+                        return true;
+                    }
+
+                    x0 = (x0 > 0) ? (x0 - 1) : 0;
+                    z0 = (z0 > 0) ? (z0 - 1) : 0;
+                    x1 = std::min(x1 + 1, W - 1);
+                    z1 = std::min(z1 + 1, H - 1);
+                    m->baseVersion = prev->version;
+                    m->dirtyX0 = x0;
+                    m->dirtyZ0 = z0;
+                    m->dirtyX1 = x1;
+                    m->dirtyZ1 = z1;
+                }
+
+                if (f5_static_terrain_enabled()) {
+                    if (same) {
+                        m->colors = prev->colors;
+                        f5_terrain_colors(ram, *m, x0, z0, x1, z1);
+                    }
+                    else {
+                        f5_terrain_colors(ram, *m);
+                    }
+                }
+
                 m->version = ++s_terrain_version;
                 s_terrain_map = m;
                 s_terrain_hash = h;
                 s_terrain_tab = tab;
-                if (rs64lights::config().log) {
+                if (rs64lights::config().log || f5_static_terrain_enabled()) {
                     std::fprintf(stderr, "[rt-terrain] map %ux%u tab=%08X version=%llu\n", W, H, tab, (unsigned long long)m->version);
                 }
             }
-            state->ext.workloadQueue->workloads[state->ext.workloadQueue->writeCursor].rs64Terrain.map = s_terrain_map;
+            return true;
+        }
+        static void f5_capture_terrain(State* state) {
+            if (f5_refresh_terrain_map(state)) {
+                state->ext.workloadQueue->workloads[state->ext.workloadQueue->writeCursor].rs64Terrain.map = s_terrain_map;
+            }
         }
         // Every terrain record notes its transform; heightfield records also note their record-space corner and HMP tile.
         static void f5_note_terrain_tile(State* state, const DisplayList* rec, bool flat) {
@@ -1223,6 +1408,8 @@ namespace RT64 {
         static uint8_t s_pending_nocast = 0;
         // Engine-glow table key whose lights are emitted at the next vertex load (that part's transform); nullptr = none.
         static const char* s_pending_exhaust = nullptr;
+        // The task that armed it: an armed part with no vertex load in that task must not fire in the next one, under its first transform.
+        static uint64_t s_pending_exhaust_task = ~0ull;
         static bool s_pending_craft = false;
         static void f5_push_light(State* state, const rs64lights::Candidate& c) {
             auto& lights = state->ext.workloadQueue->workloads[state->ext.workloadQueue->writeCursor].rs64Lights;
@@ -1307,7 +1494,7 @@ namespace RT64 {
                         for (const auto& kv : p.inlineByMesh) v.emplace_back(kv.second, kv.first);
                         std::sort(v.rbegin(), v.rend());
                         std::fprintf(stderr, "[mesh-id] inline faces by node mesh:");
-                        for (size_t k = 0; k < v.size() && k < 10; ++k) std::fprintf(stderr, " %s=%llu", (v[k].second == 0xFFFFFFFFu) ? "no-node" : (v[k].second == 0xFFFFFFFEu) ? "node-unresolved" : reg.names[v[k].second].c_str(), (unsigned long long)v[k].first);
+                        for (size_t k = 0; k < v.size() && k < 10; ++k) std::fprintf(stderr, " %s=%llu", (v[k].second == 0xFFFFFFFFu) ? "no-node" : (v[k].second == 0xFFFFFFFEu) ? "node-unresolved" : (v[k].second < reg.names.size()) ? reg.names[v[k].second].c_str() : "stale", (unsigned long long)v[k].first);
                         std::fprintf(stderr, "\n");
                         p.inlineByMesh.clear();
                         std::vector<std::pair<uint64_t, uint64_t>> u;
@@ -1330,7 +1517,7 @@ namespace RT64 {
                         for (const auto& kv : p.cutoutByMesh) v.emplace_back(kv.second, kv.first);
                         std::sort(v.rbegin(), v.rend());
                         std::fprintf(stderr, "[mesh-id] cutout faces by mesh:");
-                        for (size_t k = 0; k < v.size() && k < 12; ++k) std::fprintf(stderr, " %s=%llu", (v[k].second >= 0xFFFFFFF0u) ? kSrc[v[k].second - 0xFFFFFFF0u] : reg.names[v[k].second].c_str(), (unsigned long long)v[k].first);
+                        for (size_t k = 0; k < v.size() && k < 12; ++k) std::fprintf(stderr, " %s=%llu", (v[k].second >= 0xFFFFFFF0u) ? kSrc[v[k].second - 0xFFFFFFF0u] : (v[k].second < reg.names.size()) ? reg.names[v[k].second].c_str() : "stale", (unsigned long long)v[k].first);
                         std::fprintf(stderr, "\n[mesh-id] cutout othermode-L:");
                         std::vector<std::pair<uint64_t, uint32_t>> mds;
                         for (const auto& kv : p.cutoutModes) mds.emplace_back(kv.second, kv.first);
@@ -1494,7 +1681,8 @@ namespace RT64 {
             f5_next_chunk(state, dl);
         }
 
-        // A call or branch into a registered mesh chunk arms its light, no-cast mark and exhaust lights for the next vertex load.
+        // A call or branch into a registered mesh chunk arms its light and no-cast mark for the next vertex load. Exhaust lights arm only at the part's own
+        // modelview load (op_01): a chunk address can belong to another model in the hangar, which put engine lights on the wrong transform.
         static void f5_arm_mesh_emitters(State* state, uint32_t target) {
             if (!rs64lights::emitterLookupEnabled(rs64lights::config())) {
                 return;
@@ -1515,9 +1703,6 @@ namespace RT64 {
                 }
             }
             s_pending_nocast = reg.noCast[it->second];
-            if (reg.exhaust[it->second] != nullptr) {
-                s_pending_exhaust = reg.exhaust[it->second];
-            }
             s_pending_craft = (reg.craft[it->second] != 0);
         }
 
@@ -1645,6 +1830,53 @@ namespace RT64 {
                                                        : h[0] + (h[2] - h[0]) * v + (h[3] - h[2]) * u);
                 }
                 f5_terrain_crack_check(state, x, z, sz / 4.0f, y5, 2);
+            }
+        }
+
+        // ROGUESQ_F5_TERRAIN_SUB / _SUB_FAR (1-4) subdivide a 5x5 tile; far tiles (game shift >= 1) default to the near value, as a lower one leaves T-junction hairline cracks at the LOD boundary.
+        static int f5_terrain_sub(bool farTile) {
+            static const int s_near = [] {
+                const char* v = std::getenv("ROGUESQ_F5_TERRAIN_SUB");
+                return std::clamp((v && *v) ? std::atoi(v) : 2, 1, 4);
+            }();
+            static const int s_far = [] {
+                const char* v = std::getenv("ROGUESQ_F5_TERRAIN_SUB_FAR");
+                return std::clamp((v && *v) ? std::atoi(v) : s_near, 1, 4);
+            }();
+            return farTile ? s_far : s_near;
+        }
+
+        // Bilinear upsample of a 5x5 tile (heights H above y, RGBA C, step5 world units and uvcell S10.5 per 5x5 cell) to
+        // (4*sub+1)^2 vertices in 2-row strips for f5_emit_terrain_strips; raw 5x5 quads look faceted.
+        static void f5_terrain_lattice(int32_t x, int32_t y, int32_t z, float step5, float uvcell, const float H[25], const float C[25][4], float hcoeff, int sub, std::vector<RSP::Vertex>& geom) {
+            const int N = 4 * sub;   // cells per axis; N+1 verts per axis; 2*(N+1) <= 34 slots for S<=4
+            auto emit_vertex = [&](RSP::Vertex& v, float fx, float fy) {
+                int x0 = (int)fx, y0 = (int)fy; if (x0 > 3) x0 = 3; if (y0 > 3) y0 = 3;
+                const float tx = fx - x0, ty = fy - y0;
+                const float h = (H[y0*5+x0]*(1-tx) + H[y0*5+x0+1]*tx) * (1-ty)
+                              + (H[(y0+1)*5+x0]*(1-tx) + H[(y0+1)*5+x0+1]*tx) * ty;
+                v.x = (int16_t)(x + (int32_t)(fx * step5));
+                { const int32_t yy = y + (int32_t)(h * hcoeff); v.y = (int16_t)(yy > 32767 ? 32767 : (yy < -32768 ? -32768 : yy)); }   // saturate, see f5_tile_quad
+                v.z = (int16_t)(z + (int32_t)(fy * step5));
+                v.flag = 0; v.s = (int16_t)(uvcell * fx); v.t = (int16_t)(uvcell * (4.0f - fy));
+                {
+                    uint8_t out[4];
+                    for (int k = 0; k < 4; ++k) {
+                        const float top = C[y0*5+x0][k] * (1 - tx) + C[y0*5+x0+1][k] * tx;
+                        const float bot = C[(y0+1)*5+x0][k] * (1 - tx) + C[(y0+1)*5+x0+1][k] * tx;
+                        const float val = top * (1 - ty) + bot * ty + 0.5f;
+                        out[k] = (uint8_t)(val > 255.0f ? 255.0f : (val < 0.0f ? 0.0f : val));
+                    }
+                    v.color.r = out[0]; v.color.g = out[1]; v.color.b = out[2]; v.color.a = out[3];
+                }
+            };
+            geom.resize((size_t)N * 2 * (N + 1));
+            for (int rr = 0; rr < N; ++rr) {   // one 2-row strip at a time
+                RSP::Vertex* strip = geom.data() + (size_t)rr * 2 * (N + 1);
+                for (int cc = 0; cc <= N; ++cc) {
+                    emit_vertex(strip[cc],           (float)cc / sub, (float)rr / sub);
+                    emit_vertex(strip[(N + 1) + cc], (float)cc / sub, (float)(rr + 1) / sub);
+                }
             }
         }
 
@@ -1817,54 +2049,15 @@ namespace RT64 {
                   int hmin = 127, hmax = -128; for (int k = 0; k < 25; ++k) { if (H[k] < hmin) hmin = H[k]; if (H[k] > hmax) hmax = H[k]; }
                   std::fprintf(stderr, "[f5-tile] task=%llu x=%d y=%d z=%d size=%d N=%d shift=%d w5=%04X w6=%04X hptr=%06X h=[%d,%d] blank=%d" "\n",
                       (unsigned long long)state->displayListCounter, x, y, z, sz, gridN, shift, w5, w6, hptr, hmin, hmax, (int)blank); std::fflush(stderr); } }
-            // Subdivision: the ucode (overlay 0x14) subdivides the 5x5 into a finer interpolated mesh for
-            // smooth slopes; raw 5x5 quads look faceted. Bilinear-interpolate to (4*S+1)^2 verts. S from env
-            // (per-tile LOD lives in w1 low bytes; uniform S avoids inter-tile cracks). Grid tiles span (M-1)*size
-            // (step5 per 5x5 cell); UV spans the tile over the 4 cells; colors are read at the hardware stride
-            // (real values at even samples, odd are checkerboard filler) so sample the nearest even cell.
-            // Far tiles (game `shift` >= 1) use ROGUESQ_F5_TERRAIN_SUB_FAR, default equal to near: a lower value leaves T-junctions at the LOD boundary, which rasterize as hairline cracks.
-            static int s_sub_near = -1, s_sub_far = -1;
-            if (s_sub_near < 0) {
-                const char* v = std::getenv("ROGUESQ_F5_TERRAIN_SUB"); s_sub_near = (v && *v) ? std::atoi(v) : 2;
-                if (s_sub_near < 1) s_sub_near = 1; if (s_sub_near > 4) s_sub_near = 4;
-                const char* vf = std::getenv("ROGUESQ_F5_TERRAIN_SUB_FAR"); s_sub_far = (vf && *vf) ? std::atoi(vf) : s_sub_near;
-                if (s_sub_far < 1) s_sub_far = 1; if (s_sub_far > 4) s_sub_far = 4;
-            }
             {
                 float y5[25];
                 for (int k = 0; k < 25; ++k) y5[k] = (float)y + H[k] * hcoeff;
                 f5_terrain_crack_check(state, x, z, step5, y5, shift);
             }
-            const int s_sub = (shift == 0) ? s_sub_near : s_sub_far;
-            const int N = 4 * s_sub;   // cells per axis; N+1 verts per axis; 2*(N+1) <= 34 slots for S<=4
-            auto emit_vertex = [&](RSP::Vertex& v, float fx, float fy) {
-                int x0 = (int)fx, y0 = (int)fy; if (x0 > 3) x0 = 3; if (y0 > 3) y0 = 3;
-                const float tx = fx - x0, ty = fy - y0;
-                const float h = (H[y0*5+x0]*(1-tx) + H[y0*5+x0+1]*tx) * (1-ty)
-                              + (H[(y0+1)*5+x0]*(1-tx) + H[(y0+1)*5+x0+1]*tx) * ty;
-                v.x = (int16_t)(x + (int32_t)(fx * step5));
-                { const int32_t yy = y + (int32_t)(h * hcoeff); v.y = (int16_t)(yy > 32767 ? 32767 : (yy < -32768 ? -32768 : yy)); }   // saturate, see f5_tile_quad
-                v.z = (int16_t)(z + (int32_t)(fy * step5));
-                v.flag = 0; v.s = (int16_t)(uvcell * fx); v.t = (int16_t)(uvcell * (4.0f - fy));
-                {
-                    uint8_t out[4];
-                    for (int k = 0; k < 4; ++k) {
-                        const float top = C[y0*5+x0][k] * (1 - tx) + C[y0*5+x0+1][k] * tx;
-                        const float bot = C[(y0+1)*5+x0][k] * (1 - tx) + C[(y0+1)*5+x0+1][k] * tx;
-                        const float val = top * (1 - ty) + bot * ty + 0.5f;
-                        out[k] = (uint8_t)(val > 255.0f ? 255.0f : (val < 0.0f ? 0.0f : val));
-                    }
-                    v.color.r = out[0]; v.color.g = out[1]; v.color.b = out[2]; v.color.a = out[3];
-                }
-            };
-            std::vector<RSP::Vertex> geom((size_t)N * 2 * (N + 1));
-            for (int rr = 0; rr < N; ++rr) {   // one 2-row strip at a time
-                RSP::Vertex* strip = geom.data() + (size_t)rr * 2 * (N + 1);
-                for (int cc = 0; cc <= N; ++cc) {
-                    emit_vertex(strip[cc],           (float)cc / s_sub, (float)rr / s_sub);
-                    emit_vertex(strip[(N + 1) + cc], (float)cc / s_sub, (float)(rr + 1) / s_sub);
-                }
-            }
+            const int s_sub = f5_terrain_sub(shift != 0);
+            const int N = 4 * s_sub;
+            std::vector<RSP::Vertex> geom;
+            f5_terrain_lattice(x, y, z, step5, uvcell, H, C, hcoeff, s_sub, geom);
             // ROGUESQ_LOG_RT_LIGHTS with shadows: an unmorphed near tile must match the static caster mesh vertex for vertex.
             if (rs64lights::config().shadows && rs64lights::config().log && (shift == 0) && (gridN == 5) && (wInterior == 0) && ((wXmin | wXmax | wZmin | wZmax) == 0) && (nbXmin == shift) && (nbXmax == shift) && (nbZmin == shift) && (nbZmax == shift)) {
                 static uint32_t s_chk = 0;
@@ -1892,6 +2085,343 @@ namespace RT64 {
             f5_emit_terrain_strips(state, geom.data(), N);
         }
 
+        // The cell's 25 vertex colours: the ported static ones plus the record's difference from them, read where the ucode reads the record's
+        // colours as-is and interpolated in between. The record differs where the game lit the cell with runtime lights (the lit pool,
+        // unpackGridVertexBytes 0x8004B644); returns whether it did. ROGUESQ_F5_STATIC_TERRAIN_CHECK=1 logs sample totals every 300 tasks.
+        static bool f5_static_record_colors(State* state, const DisplayList* rec, const uint8_t* colors, bool flat, float C[25][4]) {
+            static const bool s_log = env_on("ROGUESQ_F5_STATIC_TERRAIN_CHECK", false);
+            static uint64_t s_task = ~0ull;
+            static uint32_t s_tasks = 0, s_same = 0, s_diff = 0;
+            if (s_log && (state->displayListCounter != s_task)) {
+                s_task = state->displayListCounter;
+                if ((++s_tasks % 300) == 0) {
+                    std::fprintf(stderr, "[static-terrain] check: samples same=%u diff=%u\n", s_same, s_diff);
+                }
+            }
+            for (int k = 0; k < 25; ++k) {
+                for (int ch = 0; ch < 3; ++ch) {
+                    C[k][ch] = colors[k * 3 + ch];
+                }
+                C[k][3] = 255.0f;
+            }
+            float D[25][3] = {};
+            int st = 4;
+            bool lit = false;
+            auto note = [&](int k, uint32_t rgba) {
+                for (int ch = 0; ch < 3; ++ch) {
+                    D[k][ch] = (float)((rgba >> (24 - 8 * ch)) & 0xFF) - C[k][ch];
+                    lit = lit || (D[k][ch] != 0.0f);
+                }
+                ((D[k][0] == 0.0f) && (D[k][1] == 0.0f) && (D[k][2] == 0.0f) ? s_same : s_diff) += 1;
+            };
+            if (flat) {
+                note(0, rec[1].w1);
+                note(4, rec[2].w0);
+                note(20, rec[2].w1);
+                note(24, rec[3].w0);
+            }
+            else {
+                const uint8_t* ram = state->RDRAM;
+                const uint32_t cptr = rec[1].w1;
+                const int shift = (int)(rec[0].w0 & 0xFF) & 7;
+                const int L = (int)((rec[0].w0 >> 12) & 0xF);
+                const int Mc = (4 >> L) + 1;
+                const int d = L - shift;
+                const int cstep = (d >= 0) ? (0x100 >> d) : (0x100 << -d);
+                if ((shift > 2) || (L > 2) || !f5_host_vaddr_ok(cptr, Mc * Mc * 4)) {
+                    return false;
+                }
+                // f5_tile_grid's colour fetch: lattice point (i, j) sits at 5x5 sample (i, j) << shift and reads the record as-is where (i, j) & cmask == 0.
+                st = 1 << std::max(L, shift);
+                for (int py = 0; py <= 4; py += st) {
+                    for (int px = 0; px <= 4; px += st) {
+                        const int i = px >> shift, j = py >> shift;
+                        const uint32_t g = cptr + (uint32_t)((((j * cstep) >> 8) * Mc + ((i * cstep) >> 8)) * 4);
+                        note(py * 5 + px, rd_be_u32(ram, g));
+                    }
+                }
+            }
+            if (!lit) {
+                return false;
+            }
+            for (int k = 0; k < 25; ++k) {
+                const int px = k % 5, py = k / 5;
+                const int x0 = std::min((px / st) * st, 4 - st), y0 = std::min((py / st) * st, 4 - st);
+                const float tx = float(px - x0) / st, ty = float(py - y0) / st;
+                for (int ch = 0; ch < 3; ++ch) {
+                    const float top = D[y0 * 5 + x0][ch] * (1 - tx) + D[y0 * 5 + x0 + st][ch] * tx;
+                    const float bot = D[(y0 + st) * 5 + x0][ch] * (1 - tx) + D[(y0 + st) * 5 + x0 + st][ch] * tx;
+                    C[k][ch] = std::clamp(C[k][ch] + top * (1 - ty) + bot * ty, 0.0f, 255.0f);
+                }
+            }
+            return true;
+        }
+
+        // Records sit at (cell - origin) * 512; the terrain root node's whole-number translation (+0x40/+0x48) is origin * 2. Without it, a heightfield
+        // record whose tile only one cell uses gives the origin; else the cell under the camera (+0x10) with 0.25 hysteresis, since the game's lags.
+        static void f5_terrain_origin(State* state, const DisplayList* rec, bool flat, const rs64lights::TerrainMap& m, uint32_t camPtr, int32_t& ox, int32_t& oz) {
+            static int32_t s_ox = 0, s_oz = 0;
+            static bool s_haveOrigin = false;
+            static uint64_t s_originTask = ~0ull;
+            const uint8_t* ram = state->RDRAM;
+            if (state->displayListCounter != s_originTask) {
+                s_originTask = state->displayListCounter;
+                auto pick = [](float c, int32_t prev, bool have) {
+                    const int32_t lo = (int32_t)std::floor(c - 0.25f), hi = (int32_t)std::floor(c + 0.25f);
+                    return (have && (prev >= lo) && (prev <= hi)) ? prev : (int32_t)std::floor(c);
+                };
+                // On a frame whose root transform still has the previous grid (s_root_lag), the origin is the previous frame's node position.
+                static float s_prevRootX = 0.0f, s_prevRootZ = 0.0f;
+                static bool s_havePrevRoot = false;
+                if (s_root_valid) {
+                    const bool lag = s_havePrevRoot && s_root_lag && (s_root_lag_task == state->displayListCounter);
+                    s_ox = (int32_t)std::floor((lag ? s_prevRootX : s_root_x) * 0.5f);
+                    s_oz = (int32_t)std::floor((lag ? s_prevRootZ : s_root_z) * 0.5f);
+                    s_prevRootX = s_root_x;
+                    s_prevRootZ = s_root_z;
+                    s_havePrevRoot = true;
+                }
+                else {
+                    s_havePrevRoot = false;
+                    s_ox = pick(rd_be_f32(ram, camPtr + 0x10) * 0.5f, s_ox, s_haveOrigin);
+                    s_oz = pick(rd_be_f32(ram, camPtr + 0x18) * 0.5f, s_oz, s_haveOrigin);
+                }
+                s_haveOrigin = true;
+            }
+            const int32_t rx = (int16_t)(rec[4].w0 >> 16), rz = (int16_t)(rec[4].w1 >> 16);
+            // A record of a unique tile gives the grid the root transform is in (records lag the node with it).
+            if (!flat && (rx % rs64lights::TerrainTileSpan == 0) && (rz % rs64lights::TerrainTileSpan == 0)) {
+                const int64_t rel = (int64_t)rec[1].w0 - 5 - (int64_t)s_terrain_tab;
+                const int64_t t = rel / 0x1E;
+                if ((rel >= 0) && (rel % 0x1E == 0) && (t < (int64_t)m.tileCell.size()) && (m.tileCell[t] >= 0)) {
+                    const int32_t ex = m.tileCell[t] % (int32_t)m.width - rx / rs64lights::TerrainTileSpan;
+                    const int32_t ez = m.tileCell[t] / (int32_t)m.width - rz / rs64lights::TerrainTileSpan;
+                    static const bool s_check = env_on("ROGUESQ_F5_STATIC_TERRAIN_CHECK", false);
+                    static uint64_t s_mismatchTask = ~0ull;
+                    if (s_check && ((ex != s_ox) || (ez != s_oz)) && (s_mismatchTask != state->displayListCounter)) {
+                        s_mismatchTask = state->displayListCounter;
+                        std::fprintf(stderr, "[static-terrain] origin fix %d,%d -> %d,%d cam %.3f,%.3f root %.1f,%.1f task %llu\n", s_ox, s_oz, ex, ez,
+                            rd_be_f32(ram, camPtr + 0x10) * 0.5f, rd_be_f32(ram, camPtr + 0x18) * 0.5f, s_root_x, s_root_z, (unsigned long long)state->displayListCounter);
+                    }
+                    s_ox = ex;
+                    s_oz = ez;
+                }
+            }
+            ox = s_ox;
+            oz = s_oz;
+        }
+
+        // A terrain record's map cell (records sit at (cell - origin) * 512), checked by its heights: a water or shore cell, whose heights
+        // animate, or a wrong origin fails the check.
+        enum F5RecordCell { F5RecordOk, F5RecordShape, F5RecordOutside, F5RecordMissing, F5RecordHeights };
+        static F5RecordCell f5_terrain_record_cell(const uint8_t* ram, const DisplayList* rec, bool flat, const rs64lights::TerrainMap& m, int32_t ox, int32_t oz, size_t& cell) {
+            const int32_t rx = (int16_t)(rec[4].w0 >> 16), rz = (int16_t)(rec[4].w1 >> 16), sz = (int16_t)rec[4].w1;
+            const int gridN = (int)((rec[0].w0 >> 16) & 0xFF);
+            const int shift = (int)(rec[0].w0 & 0xFF) & 7;
+            const int M = flat ? 2 : ((gridN - 1) >> shift) + 1;
+            if ((!flat && (gridN != 5)) || ((M - 1) * sz != rs64lights::TerrainTileSpan) || (rx % rs64lights::TerrainTileSpan) || (rz % rs64lights::TerrainTileSpan)) {
+                return F5RecordShape;
+            }
+            const int32_t col = ox + rx / rs64lights::TerrainTileSpan, row = oz + rz / rs64lights::TerrainTileSpan;
+            if ((col < 0) || (row < 0) || (col >= (int32_t)m.width) || (row >= (int32_t)m.height)) {
+                return F5RecordOutside;
+            }
+            cell = size_t(row) * m.width + size_t(col);
+            if (!m.present[cell]) {
+                return F5RecordMissing;
+            }
+            const int8_t* h = &m.heights[cell * 25];
+            if (flat) {
+                const int32_t y = (int32_t)(int16_t)rec[4].w0 << 4;
+                const int32_t fh[4] = { (int16_t)(rec[0].w1 >> 16), (int16_t)rec[0].w1, (int16_t)(rec[1].w0 >> 16), (int16_t)rec[1].w0 };
+                static const int kCorner[4] = { 0, 4, 20, 24 };
+                for (int k = 0; k < 4; ++k) {
+                    if (y + fh[k] != ((int32_t)h[kCorner[k]] << 4)) {
+                        return F5RecordHeights;
+                    }
+                }
+                return F5RecordOk;
+            }
+            const uint32_t hptr = rec[1].w0;
+            if (!f5_vaddr_ok(hptr, 25)) {
+                return F5RecordHeights;
+            }
+            for (int k = 0; k < 25; ++k) {
+                if ((int8_t)ram[((hptr + k) & 0x00FFFFFFu) ^ 3] != h[k]) {
+                    return F5RecordHeights;
+                }
+            }
+            return F5RecordOk;
+        }
+
+        // Draws a terrain record's map cell from the HMP map (full 5x5 detail, ported game lighting) in place of the record. False leaves the
+        // record to the usual path: no map, a cell outside it, or a water/shore cell whose heights are not the static tile's.
+        static uint64_t s_static_task = ~0ull;
+        static bool s_static_map = false;
+        static bool f5_static_terrain_tile(State* state, DisplayList* rec, bool flat) {
+            if ((f5_static_terrain_mode() != 2) || !f5_native_active()) {
+                return false;
+            }
+            if (state->displayListCounter != s_static_task) {
+                s_static_task = state->displayListCounter;
+                s_static_map = f5_refresh_terrain_map(state);
+            }
+            // ROGUESQ_F5_STATIC_TERRAIN_CHECK also counts replaced records and why the rest fell back, every 300 tasks.
+            enum { Replaced, NoMap, NoCamera, Shape, Outside, Missing, Heights, Lit, Reasons };
+            static const bool s_count = env_on("ROGUESQ_F5_STATIC_TERRAIN_CHECK", false);
+            static uint32_t s_counts[Reasons] = {};
+            static uint64_t s_countTask = ~0ull;
+            static uint32_t s_countTasks = 0;
+            if (s_count && (state->displayListCounter != s_countTask)) {
+                s_countTask = state->displayListCounter;
+                if ((++s_countTasks % 300) == 0) {
+                    std::fprintf(stderr, "[static-terrain] records: replaced=%u nomap=%u nocam=%u shape=%u outside=%u missing=%u heights=%u lit=%u\n",
+                        s_counts[Replaced], s_counts[NoMap], s_counts[NoCamera], s_counts[Shape], s_counts[Outside], s_counts[Missing], s_counts[Heights], s_counts[Lit]);
+                }
+            }
+            auto result = [](int reason) {
+                ++s_counts[reason];
+                return reason == Replaced;
+            };
+            if (!s_static_map || !s_terrain_map || s_terrain_map->colors.empty()) {
+                return result(NoMap);
+            }
+            const rs64lights::TerrainMap& m = *s_terrain_map;
+            const uint8_t* ram = state->RDRAM;
+            const uint32_t camPtr = rd_be_u32(ram, 0x80138D1Cu);
+            if (!f5_host_vaddr_ok(camPtr, 0x13C)) {
+                return result(NoCamera);
+            }
+            const int32_t rx = (int16_t)(rec[4].w0 >> 16), rz = (int16_t)(rec[4].w1 >> 16);
+            int32_t ox, oz;
+            f5_terrain_origin(state, rec, flat, m, camPtr, ox, oz);
+            size_t cell = 0;
+            switch (f5_terrain_record_cell(ram, rec, flat, m, ox, oz, cell)) {
+            case F5RecordShape:
+                return result(Shape);
+            case F5RecordOutside:
+                return result(Outside);
+            case F5RecordMissing:
+                return result(Missing);
+            case F5RecordHeights:
+                return result(Heights);
+            default:
+                break;
+            }
+            const int8_t* h = &m.heights[cell * 25];
+            const int shift = (int)(rec[0].w0 & 0xFF) & 7;
+            const int M = flat ? 2 : (((int)((rec[0].w0 >> 16) & 0xFF) - 1) >> shift) + 1;
+            float C[25][4];
+            const bool lit = f5_static_record_colors(state, rec, &m.colors[cell * 75], flat, C);
+            float H[25];
+            for (int k = 0; k < 25; ++k) {
+                H[k] = (float)((int32_t)h[k] << 4);
+            }
+            const int32_t s = (int16_t)(rec[3].w1 & 0xFFFF);
+            const float uvcell = (float)f5_terrain_uv_span(state, s * (M - 1)) / 4.0f;
+            const int sub = f5_terrain_sub(flat || (shift != 0));
+            std::vector<RSP::Vertex> geom;
+            f5_ensure_viewport(state);
+            f5_terrain_lattice(rx + s_mv_off_x, 0, rz + s_mv_off_z, rs64lights::TerrainTileSpan / 4.0f, uvcell, H, C, m.heightScale, sub, geom);
+            f5_emit_terrain_strips(state, geom.data(), 4 * sub);
+            if (lit) {
+                ++s_counts[Lit];
+            }
+            return result(Replaced);
+        }
+
+        // ROGUESQ_F5_STATIC_TERRAIN=1: terrain records are dropped. The first one of a workload emits a zero-area anchor triangle with its texture and
+        // render state, its own game call, for which RT64 builds the pipeline, scissor, screen mapping and transforms; FramebufferRenderer draws the
+        // whole map there. Later records only refine the origin. False leaves the record to the usual path (no map yet, or the anchor was dropped).
+        static bool f5_terrain_pass_record(State* state, DisplayList* rec, bool flat) {
+            if ((f5_static_terrain_mode() != 1) || !f5_native_active()) {
+                return false;
+            }
+            if (state->displayListCounter != s_static_task) {
+                s_static_task = state->displayListCounter;
+                s_static_map = f5_refresh_terrain_map(state);
+            }
+            const uint32_t camPtr = rd_be_u32(state->RDRAM, 0x80138D1Cu);
+            if (!s_static_map || !s_terrain_map || s_terrain_map->colors.empty() || !f5_host_vaddr_ok(camPtr, 0x13C)) {
+                return false;
+            }
+            Workload& wl = state->ext.workloadQueue->workloads[state->ext.workloadQueue->writeCursor];
+            rs64lights::TerrainPassFrame& pass = wl.rs64TerrainPass;
+            int32_t ox, oz;
+            f5_terrain_origin(state, rec, flat, *s_terrain_map, camPtr, ox, oz);
+            // The game lights its records with every level and runtime light (lava glow, explosions); hand those colours to the pass for this cell.
+            size_t cell = 0;
+            if (f5_terrain_record_cell(state->RDRAM, rec, flat, *s_terrain_map, ox, oz, cell) == F5RecordOk) {
+                float C[25][4];
+                f5_static_record_colors(state, rec, &s_terrain_map->colors[cell * 75], flat, C);
+                rs64lights::TerrainCellColors& hc = pass.harvest.emplace_back();
+                hc.cell = uint32_t(cell);
+                for (int k = 0; k < 25; ++k) {
+                    for (int ch = 0; ch < 3; ++ch) {
+                        hc.rgb[k * 3 + ch] = uint8_t(C[k][ch] + 0.5f);
+                    }
+                }
+            }
+            if (pass.anchorCall == UINT32_MAX) {
+                state->flush();
+                const uint32_t calls = wl.gameCallCount;
+                const int32_t x = (int16_t)(rec[4].w0 >> 16) + s_mv_off_x, z = (int16_t)(rec[4].w1 >> 16) + s_mv_off_z;
+                const int32_t y = std::clamp((int32_t)(int16_t)rec[4].w0 << 4, -32768, 32767);
+                f5_ensure_viewport(state);
+                RSP::Vertex* tmp = reinterpret_cast<RSP::Vertex*>(state->fromRDRAM(F5_VTX_SCRATCH + F5_FACE_SLOT * sizeof(RSP::Vertex)));
+                for (int k = 0; k < 3; ++k) {
+                    tmp[k] = {};
+                    tmp[k].x = (int16_t)x;
+                    tmp[k].y = (int16_t)y;
+                    tmp[k].z = (int16_t)z;
+                    tmp[k].color.r = tmp[k].color.g = tmp[k].color.b = tmp[k].color.a = 0xFF;
+                }
+                state->rsp->setVertex(0x80000000u | (F5_VTX_SCRATCH + F5_FACE_SLOT * sizeof(RSP::Vertex)), 3, F5_FACE_SLOT);
+                state->rsp->drawIndexedTri(F5_FACE_SLOT, F5_FACE_SLOT + 1, F5_FACE_SLOT + 2);
+                state->flush();
+                if (wl.gameCallCount != calls + 1) {
+                    return false;
+                }
+                pass.anchorCall = wl.gameCallCount - 1;
+                pass.map = s_terrain_map;
+                // The anchor's transform carries this load's regrid offset; other models' loads between later records reset s_mv_off.
+                pass.offsetX = s_mv_off_x;
+                pass.offsetZ = s_mv_off_z;
+                // The map covers what the records did: present and write back the whole scissor.
+                FramebufferPair& fbPair = wl.fbPairs[wl.currentFramebufferPairIndex()];
+                const FixedRect& sc = state->rdp->scissorRectStack[state->rdp->scissorStackSize - 1];
+                if (!sc.isNull()) {
+                    fbPair.scissorRect.merge(sc);
+                    fbPair.drawColorRect.merge(sc);
+                    fbPair.drawDepthRect.merge(sc);
+                }
+            }
+            // The water level [0x801375C0]: water (flag 0x08) and shore (0x10) cells are drawn flat at it, without the game's wave tiles.
+            pass.waterLevel = (int32_t)rd_be_u32(state->RDRAM, 0x801375C0u);
+            pass.task = state->displayListCounter;
+            pass.originX = ox;
+            pass.originZ = oz;
+            wl.rs64Terrain.exact = true;
+            wl.rs64Terrain.exactX = ox * rs64lights::TerrainTileSpan - pass.offsetX;
+            wl.rs64Terrain.exactZ = oz * rs64lights::TerrainTileSpan - pass.offsetZ;
+            // ROGUESQ_F5_STATIC_TERRAIN_CHECK: across a grid re-center, origin * 512 - offset stays put when the regrid compensation keeps the map still.
+            static const bool s_check = env_on("ROGUESQ_F5_STATIC_TERRAIN_CHECK", false);
+            static uint64_t s_offTask = ~0ull;
+            if (s_check && ((s_mv_off_x != pass.offsetX) || (s_mv_off_z != pass.offsetZ)) && (s_offTask != state->displayListCounter)) {
+                s_offTask = state->displayListCounter;
+                std::fprintf(stderr, "[static-terrain] record offset %d,%d differs from the anchor's %d,%d task %llu\n", s_mv_off_x, s_mv_off_z, pass.offsetX, pass.offsetZ,
+                    (unsigned long long)state->displayListCounter);
+            }
+            static int32_t s_lastOx = INT32_MIN, s_lastOz = INT32_MIN;
+            if (s_check && ((ox != s_lastOx) || (oz != s_lastOz))) {
+                std::fprintf(stderr, "[static-terrain] origin %d,%d offset %d,%d map shift %d,%d root %.1f,%.1f task %llu\n", ox, oz, pass.offsetX, pass.offsetZ,
+                    ox * rs64lights::TerrainTileSpan - pass.offsetX, oz * rs64lights::TerrainTileSpan - pass.offsetZ, s_root_x, s_root_z, (unsigned long long)state->displayListCounter);
+                s_lastOx = ox;
+                s_lastOz = oz;
+            }
+            return true;
+        }
+
         void op_05_record(State* state, DisplayList** dl) {
             const uint32_t w0 = (*dl)->w0;
             // ROGUESQ_LOG_GFX_TASK: report op-05 headers whose byte1 (samples per row) is not 5, the only
@@ -1901,9 +2431,12 @@ namespace RT64 {
                   std::fprintf(stderr, "[f5-op05] unusual header %08X %08X next %08X %08X\n", w0, (*dl)->w1, (*dl)[1].w0, (*dl)[1].w1); std::fflush(stderr); } }
             if (((w0 >> 16) & 0xFFu) != 0x05u) return;      // plain 8-byte command
             ++s_task_tiles;
+            
             const bool flatTile = ((w0 >> 8) & 0x2u) != 0;
-            if (flatTile) f5_tile_quad(state, *dl);   // 05 05 02 = flat tile
-            else          f5_tile_grid(state, *dl);   // 05 05 00 = heightfield grid
+            if (!f5_terrain_pass_record(state, *dl, flatTile) && !f5_static_terrain_tile(state, *dl, flatTile)) {
+                if (flatTile) f5_tile_quad(state, *dl);   // 05 05 02 = flat tile
+                else          f5_tile_grid(state, *dl);   // 05 05 00 = heightfield grid
+            }
             if (rs64lights::sceneCaptureEnabled(rs64lights::config()) && rs64lights::config().shadowTerrain) {
                 f5_note_terrain_tile(state, *dl, flatTile);
             }
@@ -2029,14 +2562,15 @@ namespace RT64 {
                     const auto mi = reg.md1Mesh.find(md);
                     if ((mi != reg.md1Mesh.end()) && (reg.exhaustPart[mi->second] != nullptr)) {
                         s_pending_exhaust = reg.exhaustPart[mi->second];
+                        s_pending_exhaust_task = state->displayListCounter;
                     }
                     if (mi != reg.md1Mesh.end()) {
                         s_pending_craft = (reg.craft[mi->second] != 0);
+                        s_pending_nocast = reg.noCast[mi->second];
                     }
                     if ((mi != reg.md1Mesh.end()) && (reg.laser[mi->second].kind == rs64lights::KindLaser)) {
                         s_pending_laser = reg.laser[mi->second];
                         s_pending_laser_valid = true;
-                        s_pending_nocast = reg.noCast[mi->second];
                         if (rs64lights::config().log) {
                             static uint32_t s_n = 0;
                             if ((++s_n % 120) == 1) {
@@ -2260,7 +2794,7 @@ namespace RT64 {
                     c.transformIndex = state->rsp->curTransformIndex;
                     f5_push_light(state, c);
                 }
-                if ((s_pending_exhaust != nullptr) && rs64lights::config().enabled && (rs64lights::config().exhaustGain > 0.0f)) {
+                if ((s_pending_exhaust != nullptr) && (s_pending_exhaust_task == state->displayListCounter) && rs64lights::config().enabled && (rs64lights::config().exhaustGain > 0.0f)) {
                     // A large part (the Falcon hull) can arrive in several vertex batches under one transform: emit its lights once.
                     static const char* s_lastKey = nullptr;
                     static uint32_t s_lastTransform = UINT32_MAX;
@@ -2664,6 +3198,17 @@ namespace RT64 {
         // re-emitted into temp slots with their UVs scaled by the current 03 82 texcoord scale.
         static void f5_emit_face(State* state, const uint32_t* idx, int n, const uint32_t* st, uint32_t colorWord) {
             if (!f5_native_active()) return;
+
+            // The game's drop shadows (a craft silhouette on an intensity texture, combiner FC1217FF FFFFFE38, black translucent prim colour) give way to
+            // the ray-traced sun shadows when those are on.
+            const hlslpp::float4& prim = state->rdp->primColorStack[state->rdp->primColorStackSize - 1];
+            const interop::ColorCombiner& cc = state->rdp->colorCombinerStack[state->rdp->colorCombinerStackSize - 1];
+            const bool dropShadow = ((cc.L & 0x00FFFFFFu) == 0x001217FFu) && (cc.H == 0xFFFFFE38u) && (state->rdp->texture.fmt == G_IM_FMT_I) && ((float)prim.x == 0.0f) &&
+                ((float)prim.y == 0.0f) && ((float)prim.z == 0.0f) && ((float)prim.w > 0.0f);
+            if (rs64lights::config().shadows && dropShadow) {
+                return;
+            }
+
             RSP::Vertex* tmp = reinterpret_cast<RSP::Vertex*>(state->fromRDRAM(F5_VTX_SCRATCH + F5_FACE_SLOT * sizeof(RSP::Vertex)));
             const uint32_t cbuf = s_last_op02_colorbuf;
             const bool haveColors = cbuf >= 0x80000000u && ((cbuf & 0x00FFFFFFu) + 0x100u) <= RDRAMSize;

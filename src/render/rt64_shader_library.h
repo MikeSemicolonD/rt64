@@ -23,6 +23,8 @@ namespace RT64 {
         SamplerLibrary samplerLibrary;
         bool usesHDR = false;
         bool usesHardwareResolve = false;
+        // Set before setupMultisamplingShaders: draws bind 8 texture slots instead of the bindless texture cache.
+        bool textureSlots = false;
 
         // All shaders.
         ShaderRecord bicubicScaling;
@@ -32,6 +34,10 @@ namespace RT64 {
         ShaderRecord fbChangesClear;
         ShaderRecord fbChangesDrawColor;
         ShaderRecord rs64Lights;
+        ShaderRecord rs64Terrain;
+        ShaderRecord rs64TerrainWater;
+        ShaderRecord rs64TerrainPacks;
+        ShaderRecord rs64TerrainWaterPacks;
         ShaderRecord rs64LightsDebug;
         ShaderRecord rs64Shadows;
         ShaderRecord rs64ShadowsDebug;
@@ -39,6 +45,7 @@ namespace RT64 {
         ShaderRecord rs64ShadowBlurH;
         ShaderRecord rs64ShadowBlurV;
         ShaderRecord rs64ShadowBlurVDebug;
+        ShaderRecord rs64ShadowTemporal;
         ShaderRecord rs64LightsShadowed;
         ShaderRecord rs64LightsShadowedDebug;
         ShaderRecord rs64FogShafts;

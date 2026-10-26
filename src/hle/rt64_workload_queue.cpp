@@ -664,6 +664,8 @@ namespace RT64 {
                 gameCallCursor += fbPair.gameCallCount;
             }
 
+            framebufferRenderer->rs64TerrainTextures(ext.textureCache, workload.submissionFrame);
+
             // Create all GPU tile mappings and upload them.
             if (!workload.drawData.gpuTiles.empty()) {
                 std::pair<size_t, size_t> gpuTileRange;

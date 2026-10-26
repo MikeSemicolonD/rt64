@@ -26,9 +26,14 @@
 
 namespace RT64 {
     // D3D11, and GPUs whose per-stage texture limit can't hold the bindless texture array (Raspberry Pi), bind each draw's tiles to 8 fixed
-    // slots and have no ubershader. ROGUESQ_TEXTURE_SLOTS=1 forces it for testing.
-    inline bool UsesTextureSlots(bool d3d11, const RenderDeviceCapabilities &capabilities) {
+    // slots and have no ubershader. ROGUESQ_TEXTURE_SLOTS=1 forces it for testing, except on D3D12: its raster shaders link bindless DXIL libraries
+    // (slot variants are SPIR-V only), so slot layouts would fail every pipeline, and every D3D12 GPU binds the full array anyway.
+    inline bool UsesTextureSlots(bool d3d11, bool d3d12, const RenderDeviceCapabilities &capabilities) {
         static const bool forced = []() { const char *e = std::getenv("ROGUESQ_TEXTURE_SLOTS"); return (e != nullptr) && (e[0] == '1'); }();
+        if (d3d12) {
+            return false;
+        }
+
         return d3d11 || forced || (capabilities.maxTexturesPerStage < 8192);
     }
 

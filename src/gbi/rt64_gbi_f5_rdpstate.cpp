@@ -19,6 +19,7 @@
 
 #include "hle/rt64_state.h"
 #include "hle/rt64_rdp.h"
+#include "hle/rt64_rs64_lights.h"
 
 #include "rt64_gbi_f3d.h"
 #include "rt64_gbi_rdp.h"
@@ -572,6 +573,25 @@ namespace RT64 {
             if (texrect_copy_undefined_tile(state, dl)) {
                 (*dl)++;  // skip the 8-byte texcoord follow-up to keep dispatch aligned
                 return;
+            }
+            // Level-select preview image: RGBA16 strips faded in by prim alpha; their colour lights the briefing room (rs64lights::menuImageLight).
+            {
+                rs64lights::MenuImageGlow &glow = rs64lights::menuImageGlow();
+                const auto &T = state->rdp->tiles[(*dl)[0].p1(24, 3)];
+                const LoadTexture &tex = state->rdp->texture;
+                const auto &comb = state->rdp->colorCombinerStack[state->rdp->colorCombinerStackSize - 1];
+                if (glow.active && (T.fmt == G_IM_FMT_RGBA) && (T.siz == G_IM_SIZ_16b) && (tex.siz == G_IM_SIZ_16b) && (tex.width > 0) && (comb.L == 0xFC11A7FFu) && (comb.H == 0xFFFFFE38u)) {
+                    const int32_t w = std::min<int32_t>(((*dl)[0].p0(12, 12) - (*dl)[0].p1(12, 12)) >> 2, tex.width);
+                    const int32_t h = ((*dl)[0].p0(0, 12) - (*dl)[0].p1(0, 12)) >> 2;
+                    const float fade = (float)state->rdp->primColorStack[state->rdp->primColorStackSize - 1].w;
+                    const uint32_t base = tex.address & 0x00FFFFFFu;
+                    for (int32_t y = 0; y < std::min(h, 64); y += 2) {
+                        for (int32_t x = 0; x < w; x += 2) {
+                            const uint32_t a = base + (uint32_t(y) * tex.width + uint32_t(x)) * 2;
+                            rs64lights::menuImageSample(glow, uint16_t((state->RDRAM[a ^ 3] << 8) | state->RDRAM[(a + 1) ^ 3]), fade);
+                        }
+                    }
+                }
             }
             // Track per-active-CIMG-address texrect counts to see which fbs
             // actually receive draws. ROGUESQ_LOG_CIMG=1 enables.

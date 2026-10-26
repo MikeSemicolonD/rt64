@@ -181,6 +181,7 @@ namespace RT64 {
 
         // RT64's fixed pipelines, as created at startup on D3D11 (no HDR, no MSAA).
         ShaderLibrary shaderLibrary(false, true);
+        shaderLibrary.textureSlots = true;
         shaderLibrary.setupCommonShaders(renderInterface.get(), device.get());
         shaderLibrary.setupMultisamplingShaders(renderInterface.get(), device.get(), RenderMultisampling());
         RasterShaderUber rasterShaderUber(device.get(), RenderShaderFormat::SPIRV, RenderMultisampling(), &shaderLibrary, 1, true);
