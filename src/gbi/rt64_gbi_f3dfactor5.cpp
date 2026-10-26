@@ -2903,7 +2903,7 @@ namespace RT64 {
                 // Menu backdrop JPEG tiles (64x32 RGBA16 at k*0x1000+0xA10) are drawn as triangles only by the screen-change wipe strip; the game leaves them unclamped and unmasked, so filtering past the last texel reads the next TMEM row. Clamp them.
                 const uint8_t rtile = state->rsp->textureState.tile & 7;
                 const LoadTile savedTile = state->rdp->tiles[rtile];
-                const uint32_t texAddr = state->rdp->texture.address & 0x00FFFFFFu;
+                const uint32_t texAddr = f5_unmoved_address(state->rdp->texture.address & 0x00FFFFFFu);
                 const bool backdropTile = (st != nullptr) && ((texAddr & 0xFFFu) == 0xA10u) && (texAddr >= 0x620000u) && (texAddr < 0x720000u) &&
                     (savedTile.siz == G_IM_SIZ_16b) && ((((savedTile.lrs - savedTile.uls) >> 2) + 1) == 64) && ((((savedTile.lrt - savedTile.ult) >> 2) + 1) == 32);
                 if (backdropTile) {

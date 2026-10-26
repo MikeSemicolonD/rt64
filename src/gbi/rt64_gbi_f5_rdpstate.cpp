@@ -25,8 +25,47 @@
 
 #include "common/rt64_diag_bounds.h"
 
+#include <atomic>
+
 extern "C" void rt64_f5_desync_dump(const char *why, uint32_t badW1);
 extern "C" volatile unsigned g_f5_heur[4];
+
+// Language mods move the game's texture pools to host RAM above 8 MB (24-bit address of each pool's old and new start, size); address-keyed checks map them back.
+struct F5PoolMove {
+    std::atomic<uint32_t> orig{ 0 }, moved{ 0 }, size{ 0 };
+};
+
+static F5PoolMove g_pool_moves[8];
+
+extern "C" void rs64_f5_set_texture_pool_move(uint32_t orig, uint32_t moved, uint32_t size)
+{
+    orig &= 0x00FFFFFFu;
+    moved &= 0x00FFFFFFu;
+
+    for (F5PoolMove &m : g_pool_moves) {
+        if (m.size == 0 || m.orig == orig || m.moved == moved) {
+            m.orig = orig;
+            m.moved = moved & 0x00FFFFFFu;
+            m.size = size;
+            return;
+        }
+    }
+}
+
+namespace RT64 {
+    namespace GBI_F3DFACTOR5 {
+        uint32_t f5_unmoved_address(uint32_t masked)
+        {
+            for (const F5PoolMove &m : g_pool_moves) {
+                const uint32_t moved = m.moved, size = m.size;
+
+                if (size && masked >= moved && masked < moved + size) return masked - moved + m.orig;
+            }
+
+            return masked;
+        }
+    }
+}
 
 #include <cstdio>
 #include <cstdlib>
@@ -800,7 +839,7 @@ namespace RT64 {
             {
                 static int s_fxl = -1;
                 if (s_fxl == -1) { const char* v = std::getenv("ROGUESQ_FX_PROBE"); s_fxl = (v && *v && v[0] != '0') ? 0 : -2; }
-                const uint32_t srcFx = state->rdp->texture.address & 0x00FFFFFFu;
+                const uint32_t srcFx = f5_unmoved_address(state->rdp->texture.address & 0x00FFFFFFu);
                 const bool rgbaImg = (state->rdp->texture.siz == 3 && state->rdp->texture.fmt == 0);
                 if (s_fxl >= 0 && s_fxl < 24 && (rgbaImg || (srcFx >= 0x550000u && srcFx < 0x560000u))) {
                     ++s_fxl;
@@ -820,7 +859,7 @@ namespace RT64 {
             {
                 static int s_dt = -1;
                 if (s_dt == -1) { const char* v = std::getenv("ROGUESQ_DUMP_TEX"); s_dt = (v && *v && v[0] != '0') ? 0 : -2; }
-                const uint32_t srcChk = state->rdp->texture.address & 0x00FFFFFFu;
+                const uint32_t srcChk = f5_unmoved_address(state->rdp->texture.address & 0x00FFFFFFu);
                 const bool isFlipbook = (srcChk >= 0x4C0000u && srcChk < 0x520000u);
                 if (s_dt >= 0 && s_dt < 16 && s_ci4_tlut_recent > 0 && isFlipbook) {
                     ++s_dt;
@@ -886,7 +925,7 @@ namespace RT64 {
             {
                 static int s_tm = -1;
                 if (s_tm == -1) { const char* v = std::getenv("ROGUESQ_DUMP_TEX"); s_tm = (v && *v && v[0] != '0') ? 0 : -2; }
-                const uint32_t srcChk = state->rdp->texture.address & 0x00FFFFFFu;
+                const uint32_t srcChk = f5_unmoved_address(state->rdp->texture.address & 0x00FFFFFFu);
                 if (s_tm >= 0 && s_tm < 8 && s_ci4_tlut_recent > 0 &&
                     srcChk >= 0x4C0000u && srcChk < 0x520000u) {
                     ++s_tm;
@@ -926,7 +965,7 @@ namespace RT64 {
             }
             // After RDP::maskAddress folds KSEG bits, address < 0x1000 is
             // almost certainly bogus (low RDRAM is libultra/PIF area).
-            const uint32_t masked = w1 & 0x00FFFFFFu;
+            const uint32_t masked = f5_unmoved_address(w1 & 0x00FFFFFFu);
             if (masked < 0x1000u) {
                 if (gbi_log_enabled()) {
                     static uint32_t s_rej_lo = 0;

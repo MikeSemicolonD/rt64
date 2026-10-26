@@ -127,6 +127,8 @@ namespace RT64 {
         void loadTile_guarded(State *state, DisplayList **dl);
         void loadBlock_guarded(State *state, DisplayList **dl);
         void setTextureImage_filtered(State *state, DisplayList **dl);
+        // A 24-bit texture address in the texture pool as the game laid it out (language mods move the pool; rs64_f5_set_texture_pool_move).
+        uint32_t f5_unmoved_address(uint32_t masked);
         void setColorImage_filtered(State *state, DisplayList **dl);
         // CI4-track state shared across the rdpstate handlers (loadTLUT/loadBlock write,
         // setTile/setTextureImage read) — extern during the incremental split.
