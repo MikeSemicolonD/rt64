@@ -91,12 +91,21 @@ if (ANDROID)
 endif()
 
 if (APPLE)
-    if (CMAKE_HOST_APPLE)
+    # Off-Mac, point these at another Metal compiler (e.g. Apple's Metal Developer Tools for Windows) to build real metallibs.
+    set(RT64_METAL "" CACHE STRING "Metal compiler command; empty = xcrun -sdk macosx metal")
+    set(RT64_METALLIB "" CACHE STRING "metallib linker command; empty = xcrun -sdk macosx metallib")
+    if (CMAKE_HOST_APPLE OR RT64_METAL)
         set(RT64_METAL_COMPILE_DEFAULT ON)
     else()
         set(RT64_METAL_COMPILE_DEFAULT OFF)
     endif()
-    option(RT64_METAL_COMPILE "Compile Metal shaders to metallibs (needs xcrun metal)" ${RT64_METAL_COMPILE_DEFAULT})
+    if (NOT RT64_METAL)
+        set(RT64_METAL xcrun -sdk macosx metal)
+    endif()
+    if (NOT RT64_METALLIB)
+        set(RT64_METALLIB xcrun -sdk macosx metallib)
+    endif()
+    option(RT64_METAL_COMPILE "Compile Metal shaders to metallibs (needs xcrun metal or RT64_METAL)" ${RT64_METAL_COMPILE_DEFAULT})
     if (NOT RT64_METAL_COMPILE)
         message(WARNING "RT64: Metal shaders embedded as MSL source, not metallibs; this build cannot render.")
     endif()
@@ -200,7 +209,7 @@ function(build_shader_msl_impl TARGETOBJ FILENAME TARGET_NAME OUTNAME)
     add_custom_command(OUTPUT ${OUTNAME}.metal
             COMMAND spirv_cross_msl ${OUTNAME}.spv ${OUTNAME}.metal
             DEPENDS ${OUTNAME}.spv spirv_cross_msl)
-    # No Metal compiler off macOS: embed the MSL source in place of the metallib. The build links but cannot render.
+    # No Metal compiler: embed the MSL source in place of the metallib. The build links but cannot render.
     if (NOT RT64_METAL_COMPILE)
         add_custom_command(OUTPUT ${OUTNAME}.metal.c
                 COMMAND file_to_c ${OUTNAME}.metal ${TARGET_NAME}BlobMSL ${OUTNAME}.metal.c ${OUTNAME}.metal.h
@@ -210,10 +219,10 @@ function(build_shader_msl_impl TARGETOBJ FILENAME TARGET_NAME OUTNAME)
         return()
     endif()
     add_custom_command(OUTPUT ${OUTNAME}.ir
-            COMMAND xcrun -sdk macosx metal -o ${OUTNAME}.ir -c ${OUTNAME}.metal $<$<CONFIG:Debug>:-frecord-sources>
+            COMMAND ${RT64_METAL} -o ${OUTNAME}.ir -c ${OUTNAME}.metal $<$<CONFIG:Debug>:-frecord-sources>
             DEPENDS ${OUTNAME}.metal)
     add_custom_command(OUTPUT ${OUTNAME}.metallib
-            COMMAND xcrun -sdk macosx metallib ${OUTNAME}.ir -o ${OUTNAME}.metallib
+            COMMAND ${RT64_METALLIB} ${OUTNAME}.ir -o ${OUTNAME}.metallib
             DEPENDS ${OUTNAME}.ir)
     add_custom_command(OUTPUT ${OUTNAME}.metal.c
             COMMAND file_to_c ${OUTNAME}.metallib ${TARGET_NAME}BlobMSL ${OUTNAME}.metal.c ${OUTNAME}.metal.h
