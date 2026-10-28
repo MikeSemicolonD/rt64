@@ -36,6 +36,7 @@ namespace RT64 {
         void highlightDrawCall(Workload &workload, CallIndices call);
         bool checkPopup(Workload &workload);
         void inspect(RenderWorker *directWorker, const VI &vi, Workload &workload, FramebufferManager &fbManager, TextureCache &textureCache, DrawCallKey &outDrawCallKey, bool &outCreateDrawCallKey, RenderWindow window);
+        std::vector<CallIndices> pickCalls(const Workload &workload, hlslpp::float2 cursorPos);
         void rightClick(const Workload &workload, hlslpp::float2 cursorPos);
         void enableFreeCamera(const Workload &workload, uint32_t fbPairIndex, uint32_t projIndex);
     };

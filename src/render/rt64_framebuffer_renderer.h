@@ -372,7 +372,7 @@ namespace RT64 {
         static float aspectRatioScaleFor(const FixedRect &scissorRect, float pixelAspect, float aspectRatioSource, float aspectRatioTarget);
         static FixedRect targetWriteRect(const FixedRect &rect, const FixedRect &scissorRect, hlslpp::float2 resolutionScale, int32_t fbWidth, float aspectRatioScale);
         bool fillRS64Lights(const DrawParams &p, Framebuffer &framebuffer, uint32_t transformsIndex, hlslpp::float2 screenScale, hlslpp::float2 screenOffset);
-        bool rs64ViewFromScreen(const DrawParams &p, uint32_t transformsIndex, hlslpp::float2 screenScale, hlslpp::float2 screenOffset, rs64lights::Mat4 &out);
+        bool rs64ViewFromScreen(const DrawParams &p, uint32_t transformsIndex, hlslpp::float2 screenScale, hlslpp::float2 screenOffset, rs64lights::Mat4 &out, rs64lights::ScreenMap *mapOut = nullptr);
         bool fillRS64Shadows(const DrawParams &p, Framebuffer &framebuffer, uint32_t transformsIndex, hlslpp::float2 screenScale, hlslpp::float2 screenOffset, const rs64lights::Sun &sun, const rs64lights::FogParams &fog);
         void fillRS64Temporal(const DrawParams &p, Framebuffer &framebuffer, uint32_t transformsIndex, const rs64lights::Mat4 &viewFromScreen, interop::RS64ShadowBlurCB &bcb);
         void recordRS64Shadows(RenderWorker *worker, const Framebuffer &framebuffer, bool &depthState);

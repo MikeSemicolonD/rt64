@@ -8,7 +8,10 @@
 #include <cstdlib>
 #include <cstring>
 #include <map>
+#include <functional>
 #include <memory>
+#include <mutex>
+#include <string>
 #include <unordered_map>
 #include <utility>
 #include <vector>
@@ -17,7 +20,8 @@
 namespace rs64lights {
     constexpr uint32_t MaxLights = 32;
 
-    enum Kind : uint8_t { KindNone = 0, KindSprite = 1, KindLaser = 2, KindMesh = 3 };
+    // KindLampMark: not a light, where one of the game's blinking lamps (a 2D texture rectangle) is drawn this frame, for lamp presets.
+    enum Kind : uint8_t { KindNone = 0, KindSprite = 1, KindLaser = 2, KindMesh = 3, KindLampMark = 4 };
 
     struct Candidate {
         uint32_t transformIndex = 0;
@@ -34,6 +38,17 @@ namespace rs64lights {
         float shadowStart = 0.0f;
         // radius and shadowStart are in the model's units (scaled by its transform when resolved), not camera units.
         bool modelUnits = false;
+        // Light-preset extras (RT64 PointLight): beam direction (local, like the position) and cone cosines as RT64 defines them (lit where
+        // dot(surface -> light, beam) <= spotMaxCos; 1 = no cone); flicker 0-1 dims it by a smooth random signal keyed by seed.
+        float dir[3] = { 0.0f, -1.0f, 0.0f };
+        float spotMaxCos = 1.0f;
+        float spotFalloffCos = 1.0f;
+        float flicker = 0.0f;
+        uint32_t seed = 0;
+        // A KindLampMark: local = native screen (x, y), screenHalf = the lamp's half width in native pixels, color / intensity = its PRIM.
+        float screenHalf = 0.0f;
+        // A lamp preset's light: kept only while a lamp mark covers its spot on screen, taking the mark's colour and fade.
+        bool lampGated = false;
     };
 
     struct Resolved {
@@ -46,7 +61,31 @@ namespace rs64lights {
         uint8_t kind = KindNone;
         // An engine exhaust light (a mesh light in model units).
         bool engine = false;
+        // As Candidate, with dir in camera space.
+        float dir[3] = { 0.0f, -1.0f, 0.0f };
+        float spotMaxCos = 1.0f;
+        float spotFalloffCos = 1.0f;
+        float flicker = 0.0f;
+        uint32_t seed = 0;
+        bool lampGated = false;
     };
+
+    // Flicker gain at time t (seconds): 1 - flicker x smooth value noise at 12 steps a second, each light on its own sequence (seed).
+    inline float flickerGain(float flicker, uint32_t seed, double t) {
+        if (!(flicker > 0.0f)) {
+            return 1.0f;
+        }
+        const auto rnd = [seed](uint64_t k) {
+            uint64_t x = (k + 1) * 0x9E3779B97F4A7C15ull ^ (uint64_t(seed) << 17);
+            x = (x ^ (x >> 31)) * 0xBF58476D1CE4E5B9ull;
+            return float((x ^ (x >> 29)) & 0xFFFFFF) / float(0xFFFFFF);
+        };
+        const double u = t * 12.0;
+        const uint64_t k = uint64_t(u);
+        const float f = float(u - double(k)), s = f * f * (3.0f - 2.0f * f);
+        const float n = rnd(k) * (1.0f - s) + rnd(k + 1) * s;
+        return 1.0f - std::min(flicker, 1.0f) * n;
+    }
 
     // Row-vector convention (v * M), matching hlslpp::mul(float4, float4x4).
     struct Mat4 {
@@ -78,6 +117,17 @@ namespace rs64lights {
     inline void transform(const float v[4], const Mat4& a, float out[4]) {
         for (int j = 0; j < 4; ++j) {
             out[j] = v[0] * a.m[0][j] + v[1] * a.m[1][j] + v[2] * a.m[2][j] + v[3] * a.m[3][j];
+        }
+    }
+
+    // A direction (row vector, w = 0) through m, normalised; zero length stays as given.
+    inline void rotateDir(const float in[3], const Mat4& m, float out[3]) {
+        const float v[4] = { in[0], in[1], in[2], 0.0f };
+        float o[4];
+        transform(v, m, o);
+        const float len = std::sqrt(o[0] * o[0] + o[1] * o[1] + o[2] * o[2]);
+        for (int i = 0; i < 3; ++i) {
+            out[i] = (len > 1e-12f) ? o[i] / len : in[i];
         }
     }
 
@@ -152,30 +202,10 @@ namespace rs64lights {
         return true;
     }
 
-    // Player-craft engine glows: the glow cards' centres in their part's model space (from ROGUESQ_DUMP_MESH_VERTS), lit just behind the card.
-    // X-wing nozzles ride on the S-foil parts p1/p2 (two each), the Y-wing's are both in p0.3, the A-wing's are the nozzle rings closing its engine parts p4/p6.
-    constexpr uint32_t MaxExhaustLights = 5;
-
-    struct ExhaustEntry {
-        const char* key;
-        uint32_t count;
-        float pos[MaxExhaustLights][3];
-        float rgb[3];
-    };
-
-    inline const ExhaustEntry* exhaustTable(size_t& n) {
-        static const ExhaustEntry kExhaust[] = {
-            { "xwing#s0.p1.2", 2, { { -1093.0f, -622.0f, -4828.0f }, { 1093.0f, 622.0f, -4828.0f } }, { 1.0f, 0.45f, 0.4f } },
-            { "xwing#s0.p2.2", 2, { { -1093.0f, 622.0f, -4828.0f }, { 1093.0f, -622.0f, -4828.0f } }, { 1.0f, 0.45f, 0.4f } },
-            { "ywing#s0.p0.3", 2, { { -2393.0f, 62.0f, -3097.0f }, { 2393.0f, 62.0f, -3097.0f } }, { 1.0f, 0.45f, 0.4f } },
-            { "vwing#s0.p0.3", 2, { { -808.0f, -46.0f, -1962.0f }, { 808.0f, -46.0f, -1962.0f } }, { 1.0f, 0.45f, 0.4f } },
-            { "awing#s0.p4.0", 1, { { 883.0f, 107.0f, -2870.0f } }, { 1.0f, 0.6f, 0.35f } },
-            { "awing#s0.p6.0", 1, { { -883.0f, 107.0f, -2870.0f } }, { 1.0f, 0.6f, 0.35f } },
-            // Falcon: the exhaust strip follows the rear hull arc (radius ~7740 about the disc centre).
-            { "falcon#s0.p0.0", 5, { { 0.0f, 12.0f, -7740.0f }, { -1500.0f, 12.0f, -7593.0f }, { 1500.0f, 12.0f, -7593.0f }, { -3000.0f, 12.0f, -7135.0f }, { 3000.0f, 12.0f, -7135.0f } }, { 0.6f, 0.75f, 1.0f } },
-        };
-        n = sizeof(kExhaust) / sizeof(kExhaust[0]);
-        return kExhaust;
+    // The object name in mesh-registry keys: the HOB object's, except where two files give different models one name (the game loads one at a
+    // time, by name). pl_crafts/rmobil's ground vehicle is an object "vwing" with 7 nodes; the V-wing has 3. Mirrored by the RS64 Explorer.
+    inline const char* meshKeyName(const char* name, uint32_t nodes) {
+        return ((std::strcmp(name, "vwing") == 0) && (nodes == 7)) ? "rmobil" : name;
     }
 
     // Flying craft models (player craft, wingmen, enemy fighters and shuttles): they cast every frame but a stale history copy would be a trail.
@@ -202,122 +232,19 @@ namespace rs64lights {
         return false;
     }
 
-    // Inline (per-frame) draws are identified by a part's node mesh, "<name>#s<set>.p<part>.0"; its exhaust entry is the glow card in that part.
-    inline const char* exhaustKeyForPart(const char* meshKey) {
-        if (meshKey == nullptr) {
-            return nullptr;
-        }
-        const char* dot = std::strrchr(meshKey, '.');
-        if (dot == nullptr) {
-            return nullptr;
-        }
-        const size_t prefix = size_t(dot - meshKey) + 1;
-        size_t n = 0;
-        const ExhaustEntry* t = exhaustTable(n);
-        for (size_t i = 0; i < n; ++i) {
-            if ((std::strncmp(t[i].key, meshKey, prefix) == 0) && (std::strchr(t[i].key + prefix, '.') == nullptr)) {
-                return t[i].key;
-            }
-        }
-        return nullptr;
-    }
-
-    inline uint32_t exhaustLights(const char* meshKey, float radius, float intensity, Candidate* out, uint32_t cap) {
-        constexpr float kBehind = 200.0f;
-        if (meshKey == nullptr) {
-            return 0;
-        }
-        size_t count = 0;
-        const ExhaustEntry* table = exhaustTable(count);
-        for (size_t t = 0; t < count; ++t) {
-            const ExhaustEntry& e = table[t];
-            if (std::strcmp(meshKey, e.key) != 0) {
-                continue;
-            }
-            uint32_t n = 0;
-            for (uint32_t i = 0; (i < e.count) && (n < cap); ++i, ++n) {
-                out[n] = Candidate{};
-                out[n].local[0] = e.pos[i][0];
-                out[n].local[1] = e.pos[i][1];
-                out[n].local[2] = e.pos[i][2] - kBehind;
-                out[n].color[0] = e.rgb[0];
-                out[n].color[1] = e.rgb[1];
-                out[n].color[2] = e.rgb[2];
-                out[n].radius = radius;
-                out[n].intensity = intensity;
-                out[n].kind = KindMesh;
-                out[n].shadowStart = radius;
-                out[n].modelUnits = true;
-            }
-            return n;
-        }
-        return 0;
-    }
-
-    // meshKey is a mesh-registry key: "<hob object name>#s<set>.p<part>.<index>".
-    inline bool laserLight(const char* meshKey, float radius, Candidate& out) {
-        struct Entry {
-            const char* name;
-            float rgb[3];
-        };
-        static const Entry kLasers[] = {
-            { "red_laser", { 1.0f, 0.15f, 0.1f } },
-            { "green_laser", { 0.2f, 1.0f, 0.25f } },
-            { "ion_laser", { 0.35f, 0.55f, 1.0f } },
-        };
+    // Laser bolts (meshKey "<hob object name>#s<set>.p<part>.<index>"): pure light, never casters. Their lights are F1 Lights-tab mesh presets.
+    inline bool laserBolt(const char* meshKey) {
+        static const char* const kLasers[] = { "red_laser", "green_laser", "ion_laser" };
         if (meshKey == nullptr) {
             return false;
         }
-        for (const Entry& e : kLasers) {
-            const size_t n = std::strlen(e.name);
-            if ((std::strncmp(meshKey, e.name, n) == 0) && (meshKey[n] == '#')) {
-                out = Candidate{};
-                out.color[0] = e.rgb[0];
-                out.color[1] = e.rgb[1];
-                out.color[2] = e.rgb[2];
-                out.radius = radius;
-                out.intensity = 1.0f;
-                out.kind = KindLaser;
-                out.emissive = true;
+        for (const char* name : kLasers) {
+            const size_t n = std::strlen(name);
+            if ((std::strncmp(meshKey, name, n) == 0) && (meshKey[n] == '#')) {
                 return true;
             }
         }
         return false;
-    }
-
-    // Upgrade pickup (mesh `r_pow`, npcPowerUpUpdate): the mission-select ring's warm yellow from the translucent core; the solid frame casts. Zero intensity = none.
-    inline bool pickupLight(const char* meshKey, float radius, float intensity, Candidate& out) {
-        static const char kName[] = "r_pow";
-        const size_t n = sizeof(kName) - 1;
-        if ((meshKey == nullptr) || !(intensity > 0.0f) || (std::strncmp(meshKey, kName, n) != 0) || (meshKey[n] != '#')) {
-            return false;
-        }
-        out = Candidate{};
-        out.color[0] = 1.0f;
-        out.color[1] = 0.8f;
-        out.color[2] = 0.35f;
-        out.radius = radius;
-        out.intensity = intensity;
-        out.kind = KindLaser;
-        out.emissive = false;
-        return true;
-    }
-
-    // Proton torpedo: a red-orange glow riding on the torpedo mesh, carried by the laser path; the body is physical and casts (its trail is depth-write-off sprites).
-    inline bool torpedoLight(const char* meshKey, float radius, Candidate& out) {
-        static const char kName[] = "ph_torp";
-        const size_t n = sizeof(kName) - 1;
-        if ((meshKey == nullptr) || (std::strncmp(meshKey, kName, n) != 0) || (meshKey[n] != '#')) {
-            return false;
-        }
-        out = Candidate{};
-        out.color[0] = 1.0f;
-        out.color[1] = 0.4f;
-        out.color[2] = 0.2f;
-        out.radius = radius;
-        out.intensity = 1.0f;
-        out.kind = KindLaser;
-        return true;
     }
 
     // Candidate whose local position is already in camera space (no transform, any view).
@@ -377,31 +304,6 @@ namespace rs64lights {
         return true;
     }
 
-    // Warm glow of the table's lit ring: `count` camera-space lights on a circle in the table plane (axisX, axisD), lifted along `up`. Zero intensity = none.
-    inline uint32_t menuRingLights(const float center[3], const float axisX[3], const float axisD[3], const float up[3], float ringRadius, float lift, uint32_t count, float radius, float intensity, Candidate* out, uint32_t maxOut) {
-        if (!(intensity > 0.0f)) {
-            return 0;
-        }
-        const uint32_t n = std::min(count, maxOut);
-        for (uint32_t i = 0; i < n; ++i) {
-            const float a = 6.2831853f * float(i) / float(count);
-            const float ca = std::cos(a), sa = std::sin(a);
-            Candidate& c = out[i];
-            c = Candidate{};
-            c.transformIndex = CameraSpace;
-            for (int k = 0; k < 3; ++k) {
-                c.local[k] = center[k] + ringRadius * (ca * axisX[k] + sa * axisD[k]) + lift * up[k];
-            }
-            c.color[0] = 1.0f;
-            c.color[1] = 0.8f;
-            c.color[2] = 0.35f;
-            c.radius = radius;
-            c.intensity = intensity;
-            c.kind = KindMesh;
-        }
-        return n;
-    }
-
     // RT64's vertex path: clip = v * viewProj; ndc = (x/w, -y/w, z/w); screen = ndc * vpScale + vpTranslate;
     // raster ndc = (screen.xy - res/2) / (res.x/2, -res.y/2); final = raster ndc * screenScale + screenOffset; depth = screen.z.
     struct ScreenMap {
@@ -430,6 +332,73 @@ namespace rs64lights {
     // Maps (final ndc x, final ndc y, depth, 1) back to view space (divide by w after the multiply).
     inline bool viewFromScreen(const Mat4& viewProj, const ScreenMap& s, Mat4& out) {
         return inverse(mul(viewProj, clipToScreen(s)), out);
+    }
+
+    // The game draws its lamps in their own graphics task, after the 3D scene's, so lamp marks reach the light pass through this store:
+    // marks build up per workload; a later workload drawing lamps publishes the finished set.
+    struct LampMarks {
+        uint64_t workloadId = 0;
+        std::vector<Candidate> marks;
+    };
+
+    inline std::mutex& lampMarksMutex() {
+        static std::mutex m;
+        return m;
+    }
+
+    inline LampMarks& lampMarksBuilding() {
+        static LampMarks s;
+        return s;
+    }
+
+    inline LampMarks& lampMarksPublished() {
+        static LampMarks s;
+        return s;
+    }
+
+    inline void addLampMark(uint64_t workloadId, const Candidate& mark) {
+        std::lock_guard<std::mutex> lock(lampMarksMutex());
+        LampMarks& b = lampMarksBuilding();
+        if (b.workloadId != workloadId) {
+            if (!b.marks.empty()) {
+                lampMarksPublished() = std::move(b);
+            }
+            b = LampMarks{ workloadId, {} };
+        }
+        b.marks.push_back(mark);
+    }
+
+    // The lamp marks for a workload: the finished set when it is from within maxAge workloads of it, else the one still building.
+    inline std::vector<Candidate> lampMarksFor(uint64_t workloadId, uint64_t maxAge) {
+        std::lock_guard<std::mutex> lock(lampMarksMutex());
+        const auto recent = [&](const LampMarks& s) { return !s.marks.empty() && ((s.workloadId > workloadId ? s.workloadId - workloadId : workloadId - s.workloadId) <= maxAge); };
+        if (recent(lampMarksPublished())) {
+            return lampMarksPublished().marks;
+        }
+        return recent(lampMarksBuilding()) ? lampMarksBuilding().marks : std::vector<Candidate>();
+    }
+
+    // Native screen (x, y) -> final NDC, the space projectToScreen outputs.
+    inline void screenToFinalNdc(const ScreenMap& s, float x, float y, float out[2]) {
+        out[0] = ((x - s.res[0] * 0.5f) / (s.res[0] * 0.5f)) * s.screenScale[0] + s.screenOffset[0];
+        out[1] = ((y - s.res[1] * 0.5f) / (s.res[1] * -0.5f)) * s.screenScale[1] + s.screenOffset[1];
+    }
+
+    // Gates lamp lights by lamp marks (both in final NDC): a light keeps only when the nearest mark within reach of it (the mark's half
+    // width plus slack, per axis scale) covers it, and takes that mark's colour and fade. True = keep. Unit-tested in rs64_lights_test.
+    inline bool lampMatch(const float light[2], const float (*marks)[2], const float* reach, size_t count, size_t& best) {
+        float bestD = 0.0f;
+        bool found = false;
+        for (size_t i = 0; i < count; ++i) {
+            const float dx = (light[0] - marks[i][0]) / reach[i * 2 + 0], dy = (light[1] - marks[i][1]) / reach[i * 2 + 1];
+            const float d = dx * dx + dy * dy;
+            if ((d <= 1.0f) && (!found || (d < bestD))) {
+                bestD = d;
+                best = i;
+                found = true;
+            }
+        }
+        return found;
     }
 
     inline void projectToScreen(const Mat4& viewProj, const ScreenMap& s, const float view[3], float out[3]) {
@@ -1296,6 +1265,92 @@ namespace rs64lights {
         }
     }
 
+    // The light pass's view in a preset space, published each frame for the F1 Lights tab's Im3d gizmos: slot PresetLevel is map space in a level,
+    // camera space elsewhere; slot PresetMesh is the model space of one drawn part of the picked mesh preset. toNdc maps a point (row vector)
+    // to the final NDC the light pass draws in; depth is a screen depth inside the view, for unprojecting; yDown: the space's up is -y.
+    struct PresetView {
+        bool valid = false;
+        bool yDown = false;
+        Mat4 toNdc{};
+        Mat4 fromNdc{};
+        float cameraPos[3] = {};
+        float depth = 0.0f;
+    };
+
+    enum PresetSlot { PresetLevel = 0, PresetMesh = 1 };
+
+    inline std::mutex& presetViewMutex() {
+        static std::mutex m;
+        return m;
+    }
+
+    inline PresetView& presetViewShared(int slot) {
+        static PresetView v[2];
+        return v[slot];
+    }
+
+    inline void publishPresetView(const PresetView& v, int slot) {
+        std::lock_guard<std::mutex> lock(presetViewMutex());
+        presetViewShared(slot) = v;
+    }
+
+    inline PresetView presetView(int slot) {
+        std::lock_guard<std::mutex> lock(presetViewMutex());
+        return presetViewShared(slot);
+    }
+
+    // The view the inspector's frame uses, picked before Im3d's frame and read when its draw lists are drawn (both on RT64's state thread).
+    inline PresetView& inspectorView() {
+        static PresetView v;
+        return v;
+    }
+
+    // Light-preset library JSON read by the host (enabled mods, then roguesq_lights.json), merged into RT64's light library on its own thread at the next frame.
+    inline std::mutex& presetTextMutex() {
+        static std::mutex m;
+        return m;
+    }
+
+    inline std::vector<std::string>& presetTextQueue() {
+        static std::vector<std::string> q;
+        return q;
+    }
+
+    // Set with a queued set of files that replaces the library (a reload) rather than merging into it.
+    inline bool& presetTextReplaces() {
+        static bool replaces = false;
+        return replaces;
+    }
+
+    // Every light file in override order; the library is emptied before they merge at the next frame.
+    inline void queuePresetReload(std::vector<std::string> texts) {
+        std::lock_guard<std::mutex> lock(presetTextMutex());
+        presetTextQueue() = std::move(texts);
+        presetTextReplaces() = true;
+    }
+
+    inline std::vector<std::string> takePresetTexts(bool &replaces) {
+        std::lock_guard<std::mutex> lock(presetTextMutex());
+        replaces = std::exchange(presetTextReplaces(), false);
+        return std::exchange(presetTextQueue(), {});
+    }
+
+    // The host's reader for the files above (set by the host when it first reads them), for the F1 Lights tab's Reload light files.
+    inline std::function<void()>& presetReloader() {
+        static std::function<void()> f;
+        return f;
+    }
+
+    // Preset-space point under final NDC (x, y) at the view's depth.
+    inline void presetUnproject(const PresetView& v, float x, float y, float out[3]) {
+        const float in[4] = { x, y, v.depth, 1.0f };
+        float o[4];
+        transform(in, v.fromNdc, o);
+        for (int i = 0; i < 3; ++i) {
+            out[i] = o[i] / o[3];
+        }
+    }
+
     inline float envFloat(const char* name, float def) {
         const char* e = std::getenv(name);
         return (e && *e) ? (float)std::atof(e) : def;
@@ -1308,7 +1363,6 @@ namespace rs64lights {
         float wrap;
         float spriteRadius;
         float spriteRadiusMax;
-        float laserRadius;
         float debugRange;
         bool log;
         std::atomic<bool> shadows;
@@ -1322,21 +1376,14 @@ namespace rs64lights {
         float shadowTerrainTMin;
         bool lightShadows;
         float lightShadowEnd;
-        float menuHoloRadius;
-        float menuHoloGain;
-        float menuHoloFalloff;
-        float menuRingGain;
         float menuImageGain;
         float temporalAlpha;
         float hangarFloorCos;
-        float torpedoRadius;
         std::atomic<bool> fogShafts;
         int fogShaftsSteps;
         float fogShaftsStrength;
         int fogShaftsDebug;
         bool shadowCutout;
-        float pickupGain;
-        float pickupRadius;
         std::atomic<bool> softShadows;
         int softRays;
         float sunAngleDeg;
@@ -1349,8 +1396,6 @@ namespace rs64lights {
         int shadowHistoryInterval;
         float shadowHistorySkip;
         bool logTiming;
-        float exhaustGain;
-        float exhaustRadius;
         std::atomic<bool> ao;
         int aoRays;
         float aoRange;
@@ -1379,7 +1424,6 @@ namespace rs64lights {
             envFloat("ROGUESQ_RT_LIGHTS_WRAP", 0.3f),
             envFloat("ROGUESQ_RT_LIGHTS_SPRITE_RADIUS", 3.0f),
             envFloat("ROGUESQ_RT_LIGHTS_SPRITE_RADIUS_MAX", 1200.0f),
-            envFloat("ROGUESQ_RT_LIGHTS_LASER_RADIUS", 250.0f),
             envFloat("ROGUESQ_RT_LIGHTS_DEBUG_RANGE", 4000.0f),
             envFloat("ROGUESQ_LOG_RT_LIGHTS", 0.0f) != 0.0f,
             envFloat("ROGUESQ_RT_SHADOWS", 0.0f) != 0.0f,
@@ -1393,21 +1437,14 @@ namespace rs64lights {
             envFloat("ROGUESQ_RT_SHADOWS_TERRAIN_TMIN", 0.0f),
             envFloat("ROGUESQ_RT_LIGHTS_SHADOWS", 1.0f) != 0.0f,
             envFloat("ROGUESQ_RT_LIGHTS_SHADOW_END", 0.1f),
-            envFloat("ROGUESQ_RT_MENU_HOLO_RADIUS", 20000.0f),
-            envFloat("ROGUESQ_RT_MENU_HOLO_GAIN", 1.0f),
-            envFloat("ROGUESQ_RT_MENU_HOLO_FALLOFF", 1.0f),
-            envFloat("ROGUESQ_RT_MENU_RING_GAIN", 3.0f),
             envFloat("ROGUESQ_RT_MENU_IMAGE_GAIN", 2.0f),
             std::clamp(envFloat("ROGUESQ_RT_TEMPORAL", 0.2f), 0.0f, 1.0f),
             envFloat("ROGUESQ_RT_HANGAR_FLOOR_COS", 0.995f),
-            envFloat("ROGUESQ_RT_LIGHTS_TORPEDO_RADIUS", 750.0f),
             envFloat("ROGUESQ_RT_FOG_SHAFTS", 0.0f) != 0.0f,
             std::clamp((int)envFloat("ROGUESQ_RT_FOG_SHAFTS_STEPS", 12.0f), 4, 32),
             envFloat("ROGUESQ_RT_FOG_SHAFTS_STRENGTH", 0.35f),
             (int)envFloat("ROGUESQ_RT_FOG_SHAFTS_DEBUG", 0.0f),
             envFloat("ROGUESQ_RT_SHADOWS_CUTOUT", 1.0f) != 0.0f,
-            envFloat("ROGUESQ_RT_LIGHTS_PICKUP_GAIN", 3.0f),
-            envFloat("ROGUESQ_RT_LIGHTS_PICKUP_RADIUS", 1500.0f),
             envFloat("ROGUESQ_RT_SHADOWS_SOFT", 1.0f) != 0.0f,
             std::clamp((int)envFloat("ROGUESQ_RT_SHADOWS_SOFT_RAYS", 4.0f), 1, 16),
             envFloat("ROGUESQ_RT_SHADOWS_SUN_ANGLE", 1.0f),
@@ -1420,8 +1457,6 @@ namespace rs64lights {
             std::max((int)envFloat("ROGUESQ_RT_SHADOWS_HISTORY_INTERVAL", 8.0f), 1),
             envFloat("ROGUESQ_RT_SHADOWS_HISTORY_SKIP", 0.0f),
             envFloat("ROGUESQ_LOG_RT_TIMING", 0.0f) != 0.0f,
-            envFloat("ROGUESQ_RT_LIGHTS_EXHAUST_GAIN", 0.8f),
-            envFloat("ROGUESQ_RT_LIGHTS_EXHAUST_RADIUS", 4000.0f),
             envFloat("ROGUESQ_RT_AO", 0.0f) != 0.0f,
             std::clamp((int)envFloat("ROGUESQ_RT_AO_RAYS", 2.0f), 1, 8),
             envFloat("ROGUESQ_RT_AO_RANGE", 0.04f),
@@ -1622,16 +1657,14 @@ namespace rs64lights {
         return s_dir.v;
     }
 
-    // Hologram light position in the briefing room's fixed camera space (the shared room origin); ROGUESQ_RT_MENU_HOLO=x,y,z overrides.
+    // Where the briefing room's preview-image glow sits, in its fixed camera space (the hologram, the shared room origin), and its reach and
+    // falloff; the hologram's own light is the model-lights preset briefing_hologram at the same place.
     inline const float* menuHoloPos() {
-        static const struct Pos {
-            float v[3] = { 0.0f, 22.0f, 11068.0f };
-            Pos() {
-                parseVec3(std::getenv("ROGUESQ_RT_MENU_HOLO"), v);
-            }
-        } s_pos;
-        return s_pos.v;
+        static const float v[3] = { 0.0f, 22.0f, 11068.0f };
+        return v;
     }
+    constexpr float MenuHoloRadius = 20000.0f;
+    constexpr float MenuHoloFalloff = 1.0f;
 
     // The GBI captures (terrain, no-cast lasers) and the world-vertex pass feed the scene for sun shadows, shadowed lights and fog shafts.
     inline bool sceneCaptureEnabled(const Config& c) {

@@ -702,6 +702,7 @@ namespace RT64 {
                 const float lrx = ((w0 >> 12) & 0xFFFu) / 4.0f, lry = (w0 & 0xFFFu) / 4.0f;
                 const float ulx = ((w1 >> 12) & 0xFFFu) / 4.0f, uly = (w1 & 0xFFFu) / 4.0f;
                 f5_hud_probe(state, "texrect", 0.5f * (ulx + lrx), 0.5f * (uly + lry), lrx - ulx, lry - uly);
+                f5_lamp_light(state, 0.5f * (ulx + lrx), 0.5f * (uly + lry), 0.5f * (lrx - ulx));
             }
             // ROGUESQ_LOG_TEXRECT_TALL=<min px>: every texrect at least this tall and 16 px wide (menu background strips and sweeps), with its texture start/step and cycle type.
             {

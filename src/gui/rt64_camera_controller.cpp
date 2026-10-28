@@ -4,6 +4,8 @@
 
 #include "rt64_camera_controller.h"
 
+#include <cmath>
+
 #include "common/rt64_math.h"
 #include "imgui/imgui.h"
 
@@ -22,8 +24,16 @@ namespace RT64 {
             gameFrame.enableFreeCamera(freeCamIndex);
         }
         */
-        if (camera.enabled && !ImGui::GetIO().WantCaptureMouse) {
-            float cameraSpeed = (camera.farPlane - camera.nearPlane) / 5.0f;
+        float cameraSpeed = (camera.farPlane - camera.nearPlane) / 5.0f;
+
+        // RS64: planes read from a non-standard projection can collapse (near ~= far), which froze pan and dolly; fall back to the game's scale.
+        const float MinCameraSpeed = 5000.0f;
+        if (!std::isfinite(cameraSpeed) || (cameraSpeed < MinCameraSpeed)) {
+            cameraSpeed = MinCameraSpeed;
+        }
+
+        const ImGuiIO &io = ImGui::GetIO();
+        if (camera.enabled && !io.WantCaptureMouse) {
             bool leftAlt = ImGui::IsKeyDown(ImGuiKey_LeftAlt);
             bool leftCtrl = ImGui::IsKeyDown(ImGuiKey_LeftCtrl);
             const hlslpp::float2 delta = hlslpp::float2(cursorPos - lastCursorPos) / hlslpp::float2(windowSize);
@@ -33,11 +43,27 @@ namespace RT64 {
                 }
                 else if (leftAlt) {
                     const float CameraRotationSpeed = 5.0f;
-                    rotatePerspective(camera, delta.x * CameraRotationSpeed, delta.y * CameraRotationSpeed);
+                    rotatePerspective(camera, delta.x * CameraRotationSpeed, -delta.y * CameraRotationSpeed);
                 }
                 else {
-                    movePerspective(camera, { delta.x * cameraSpeed, -delta.y * cameraSpeed, 0.0f });
+                    movePerspective(camera, { delta.x * cameraSpeed, delta.y * cameraSpeed, 0.0f });
                 }
+            }
+
+            // RS64: the wheel dollies like Ctrl + middle drag, a tenth of the drag speed per notch.
+            if (io.MouseWheel != 0.0f) {
+                movePerspective(camera, { 0.0f, 0.0f, -io.MouseWheel * cameraSpeed * 0.1f });
+            }
+        }
+
+        // RS64: WASD flies (Q/E down/up, Shift x4) at cameraSpeed per second, unless an ImGui field has the keyboard.
+        if (camera.enabled && !io.WantCaptureKeyboard) {
+            const float step = cameraSpeed * io.DeltaTime * (ImGui::IsKeyDown(ImGuiKey_LeftShift) ? 4.0f : 1.0f);
+            const float side = float(ImGui::IsKeyDown(ImGuiKey_A)) - float(ImGui::IsKeyDown(ImGuiKey_D));
+            const float up = float(ImGui::IsKeyDown(ImGuiKey_E)) - float(ImGui::IsKeyDown(ImGuiKey_Q));
+            const float forward = float(ImGui::IsKeyDown(ImGuiKey_S)) - float(ImGui::IsKeyDown(ImGuiKey_W));
+            if ((side != 0.0f) || (up != 0.0f) || (forward != 0.0f)) {
+                movePerspective(camera, { side * step, up * step, forward * step });
             }
         }
 

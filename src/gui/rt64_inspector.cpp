@@ -7,6 +7,7 @@
 #include <algorithm>
 #include <iomanip>
 
+#include "hle/rt64_rs64_lights.h"
 #include "im3d/im3d.h"
 #include "im3d/im3d_math.h"
 #include "imgui/imgui.h"
@@ -259,8 +260,56 @@ namespace RT64 {
             }
         }
 
-        ImGui::Render();
+        // RS64: RT64's Im3d renderer is unported, so its draw lists (light spheres, gizmos) go through ImGui's background list, projected with the light pass's view.
         Im3d::EndFrame();
+        const rs64lights::PresetView presetView = rs64lights::inspectorView();
+        if (presetView.valid) {
+            ImDrawList *drawList = ImGui::GetBackgroundDrawList();
+            auto project = [&](const Im3d::VertexData &v, ImVec2 &out) {
+                const float in[4] = { v.m_positionSize.x, v.m_positionSize.y, v.m_positionSize.z, 1.0f };
+                float clip[4];
+                rs64lights::transform(in, presetView.toNdc, clip);
+                if (!(clip[3] > 1e-4f)) {
+                    return false;
+                }
+
+                out = ImVec2((clip[0] / clip[3] + 1.0f) * 0.5f * displaySize.x, (1.0f - clip[1] / clip[3]) * 0.5f * displaySize.y);
+                return true;
+            };
+            auto color = [](const Im3d::VertexData &v) {
+                const uint32_t c = v.m_color;
+                return IM_COL32(c >> 24, (c >> 16) & 0xFF, (c >> 8) & 0xFF, c & 0xFF);
+            };
+
+            for (Im3d::U32 l = 0; l < Im3d::GetDrawListCount(); l++) {
+                const Im3d::DrawList &list = Im3d::GetDrawLists()[l];
+                const Im3d::VertexData *v = list.m_vertexData;
+                ImVec2 p[3];
+                if (list.m_primType == Im3d::DrawPrimitive_Triangles) {
+                    for (Im3d::U32 i = 0; i + 2 < list.m_vertexCount; i += 3) {
+                        if (project(v[i], p[0]) && project(v[i + 1], p[1]) && project(v[i + 2], p[2])) {
+                            drawList->AddTriangleFilled(p[0], p[1], p[2], color(v[i]));
+                        }
+                    }
+                }
+                else if (list.m_primType == Im3d::DrawPrimitive_Lines) {
+                    for (Im3d::U32 i = 0; i + 1 < list.m_vertexCount; i += 2) {
+                        if (project(v[i], p[0]) && project(v[i + 1], p[1])) {
+                            drawList->AddLine(p[0], p[1], color(v[i]), std::max(v[i].m_positionSize.w, 1.0f));
+                        }
+                    }
+                }
+                else {
+                    for (Im3d::U32 i = 0; i < list.m_vertexCount; i++) {
+                        if (project(v[i], p[0])) {
+                            drawList->AddCircleFilled(p[0], std::max(v[i].m_positionSize.w * 0.5f, 1.0f), color(v[i]));
+                        }
+                    }
+                }
+            }
+        }
+
+        ImGui::Render();
         frameMutex.unlock();
     }
 

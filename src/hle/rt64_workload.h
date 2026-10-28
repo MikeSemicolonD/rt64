@@ -221,6 +221,11 @@ namespace RT64 {
         std::vector<SpriteCommand> spriteCommands;
         std::vector<interop::PointLight> pointLights;
         std::vector<rs64lights::Candidate> rs64Lights;
+        // The first drawn part of the F1 Lights tab's picked mesh preset (its transform and view), for that preset's gizmo view; UINT32_MAX = none.
+        uint32_t rs64MeshPickTransform = UINT32_MAX;
+        uint32_t rs64MeshPickView = 0;
+        // The light-preset level code of a front-end frame (PresetLights::BriefingRoom / Hangar), else PresetLights::NoLevel (-1).
+        int rs64PresetScene = -1;
         rs64lights::Sun rs64Sun;
         rs64lights::TerrainFrame rs64Terrain;
         rs64lights::TerrainPassFrame rs64TerrainPass;

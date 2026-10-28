@@ -27,6 +27,8 @@ namespace RT64 {
         spriteCommands.clear();
         pointLights.clear();
         rs64Lights.clear();
+        rs64MeshPickTransform = UINT32_MAX;
+        rs64PresetScene = -1;
         rs64Sun = rs64lights::Sun{};
         rs64Terrain.map.reset();
         rs64Terrain.samples.clear();

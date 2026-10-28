@@ -125,7 +125,15 @@ float4 PSMain(in float4 pos : SV_Position, in float2 uv : TEXCOORD0) : SV_TARGET
 #endif
         const float att = pow(saturate(1.0f - dist / radius), gLights.lightParams[i].x);
         const float ndl = saturate((dot(n, toLight / max(dist, 1e-4f)) + gLights.wrap) / (1.0f + gLights.wrap));
-        sum += gLights.lightColor[i].rgb * gLights.lightColor[i].w * att * ndl * vis;
+        // Spot cone as RT64's Lights.hlsli: lit where dot(surface -> light, beam) <= max cosine, fading out from the falloff cosine to it.
+        float spot = 1.0f;
+        const float maxCos = gLights.lightParams[i].z, fallCos = gLights.lightParams[i].w;
+        if (maxCos < 1.0f) {
+            const float d = dot(toLight / max(dist, 1e-4f), gLights.lightSpot[i].xyz);
+            spot = (d > maxCos) ? 0.0f : ((maxCos - fallCos) > 1e-5f ? 1.0f - saturate((d - fallCos) / (maxCos - fallCos)) : 1.0f);
+        }
+
+        sum += gLights.lightColor[i].rgb * gLights.lightColor[i].w * att * ndl * vis * spot;
     }
 
     if (gLights.debugMode == 2) {

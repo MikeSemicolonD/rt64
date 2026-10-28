@@ -4,6 +4,8 @@
 
 #include "rt64_framebuffer_renderer.h"
 
+#include <algorithm>
+#include <array>
 #include <atomic>
 #include <cstdint>
 #include <cstdio>
@@ -2075,7 +2077,7 @@ namespace RT64 {
             }
         }
         const bool lightsMSAA = (p.fbStorage->colorTarget != nullptr) && (p.fbStorage->colorTarget->multisampling.sampleCount > 1);
-        const bool lightsWanted = lightsCfg.enabled && p.rs64Lights && (p.fbStorage->colorTarget != nullptr) && !lightsMSAA && !p.curWorkload->rs64Lights.empty();
+        const bool lightsWanted = lightsCfg.enabled && p.rs64Lights && (p.fbStorage->colorTarget != nullptr) && !lightsMSAA && !(p.curWorkload->rs64Lights.empty() && p.curWorkload->pointLights.empty());
         if (lightsCfg.enabled && lightsMSAA) {
             static bool s_warned = false;
             if (!s_warned) {
@@ -2785,7 +2787,7 @@ namespace RT64 {
         return true;
     }
 
-    bool FramebufferRenderer::rs64ViewFromScreen(const DrawParams &p, uint32_t transformsIndex, hlslpp::float2 screenScale, hlslpp::float2 screenOffset, rs64lights::Mat4 &out) {
+    bool FramebufferRenderer::rs64ViewFromScreen(const DrawParams &p, uint32_t transformsIndex, hlslpp::float2 screenScale, hlslpp::float2 screenOffset, rs64lights::Mat4 &out, rs64lights::ScreenMap *mapOut) {
         const DrawData &drawData = p.curWorkload->drawData;
         if (transformsIndex >= drawData.rspViewports.size()) {
             return false;
@@ -2811,6 +2813,10 @@ namespace RT64 {
         map.screenScale[1] = screenScale.y;
         map.screenOffset[0] = screenOffset.x;
         map.screenOffset[1] = screenOffset.y;
+        if (mapOut != nullptr) {
+            *mapOut = map;
+        }
+
         return rs64lights::viewFromScreen(viewProj, map, out);
     }
 
@@ -2818,13 +2824,34 @@ namespace RT64 {
         const DrawData &drawData = p.curWorkload->drawData;
         const auto &candidates = p.curWorkload->rs64Lights;
         rs64lights::Mat4 inv;
-        if (!rs64ViewFromScreen(p, transformsIndex, screenScale, screenOffset, inv)) {
+        rs64lights::ScreenMap screenMap;
+        if (!rs64ViewFromScreen(p, transformsIndex, screenScale, screenOffset, inv, &screenMap)) {
             return false;
         }
         const bool lerp = drawData.lerpWorldTransforms.size() == drawData.worldTransforms.size();
         const auto &world = lerp ? drawData.lerpWorldTransforms : drawData.worldTransforms;
         thread_local std::vector<rs64lights::Resolved> resolved;
         resolved.clear();
+        // The game's lamps drawn this frame (2D rectangles), in final NDC with their reach (half width plus slack, per axis).
+        thread_local std::vector<std::array<float, 2>> lampMarks;
+        thread_local std::vector<float> lampReach;
+        thread_local std::vector<const rs64lights::Candidate *> lampMarkOf;
+        lampMarks.clear();
+        lampReach.clear();
+        lampMarkOf.clear();
+        // Lamp rectangles are 2D and come in the game's next graphics task, so they are taken from the shared store (rs64lights::lampMarksFor).
+        thread_local std::vector<rs64lights::Candidate> lampMarkSet;
+        lampMarkSet = rs64lights::lampMarksFor(p.curWorkload->workloadId, 3);
+        for (const rs64lights::Candidate &c : lampMarkSet) {
+            float n[2];
+            rs64lights::screenToFinalNdc(screenMap, c.local[0], c.local[1], n);
+            lampMarks.push_back({ n[0], n[1] });
+            const float slack = c.screenHalf * 1.5f + 2.0f;
+            lampReach.push_back(slack / (screenMap.res[0] * 0.5f) * screenMap.screenScale[0]);
+            lampReach.push_back(slack / (screenMap.res[1] * 0.5f) * screenMap.screenScale[1]);
+            lampMarkOf.push_back(&c);
+        }
+
         for (const rs64lights::Candidate &c : candidates) {
             const bool cameraSpace = (c.transformIndex == rs64lights::CameraSpace);
             if (!cameraSpace && ((c.transformIndex >= world.size()) || !rs64SameView(drawData, c.viewIndex, transformsIndex, c.modelUnits))) {
@@ -2848,11 +2875,158 @@ namespace RT64 {
             r.shadowStart = c.shadowStart * rs64lights::config().spriteShadowStart;
             r.kind = c.kind;
             r.engine = (c.kind == rs64lights::KindMesh) && c.modelUnits;
+            r.spotMaxCos = c.spotMaxCos;
+            r.spotFalloffCos = c.spotFalloffCos;
+            r.flicker = c.flicker;
+            r.seed = c.seed;
+            if (cameraSpace) {
+                std::copy(c.dir, c.dir + 3, r.dir);
+            }
+            else {
+                rs64lights::rotateDir(c.dir, rs64ToMat4(world[c.transformIndex]), r.dir);
+            }
             if (c.modelUnits && !cameraSpace) {
                 const float s = rs64lights::transformScale(rs64ToMat4(world[c.transformIndex]));
                 r.radius = c.radius * s;
                 r.shadowStart = c.shadowStart * s;
             }
+            r.lampGated = c.lampGated;
+            resolved.push_back(r);
+        }
+
+        // Lamp presets' lights shine only while a lamp is drawn on their spot, in its colour and fade (blink, facing).
+        rs64lights::Mat4 lampViewProj;
+        const bool lampProj = rs64ViewProj(p, transformsIndex, lampViewProj);
+        const size_t lampLights = std::count_if(resolved.begin(), resolved.end(), [](const rs64lights::Resolved &r) { return r.lampGated; });
+        const size_t beforeGate = resolved.size();
+        thread_local std::vector<std::array<float, 3>> lampProjected;
+        lampProjected.clear();
+        resolved.erase(std::remove_if(resolved.begin(), resolved.end(), [&](rs64lights::Resolved &r) {
+            if (!r.lampGated) {
+                return false;
+            }
+
+            float s[3];
+            size_t best = 0;
+            if (!lampProj || lampMarks.empty()) {
+                return true;
+            }
+
+            rs64lights::projectToScreen(lampViewProj, screenMap, r.pos, s);
+            lampProjected.push_back({ s[0], s[1], s[2] });
+            if ((s[2] < 0.0f) || (s[2] > 1.0f) || !rs64lights::lampMatch(s, reinterpret_cast<const float (*)[2]>(lampMarks.data()), lampReach.data(), lampMarks.size(), best)) {
+                return true;
+            }
+
+            // The lamp's own colour at the preset's strength (its colour's peak).
+            const rs64lights::Candidate &m = *lampMarkOf[best];
+            const float strength = std::max(r.color[0], std::max(r.color[1], r.color[2]));
+            for (int j = 0; j < 3; ++j) {
+                r.color[j] = m.color[j] * strength;
+            }
+
+            r.intensity *= m.intensity;
+            return false;
+        }), resolved.end());
+
+        // Every frame with lamps on screen for the first 100, then one in 300.
+        if (rs64lights::config().log && !lampMarks.empty()) {
+            static uint32_t s_lampLog = 0;
+            if ((s_lampLog++ < 100) || ((s_lampLog % 300) == 0)) {
+                fprintf(stderr, "[rt-lights] lamps: %zu drawn, %zu lamp lights, %zu lit (res %.0fx%.0f scale %.3f,%.3f offset %.3f,%.3f)\n", lampMarks.size(), lampLights,
+                    lampLights - (beforeGate - resolved.size()), screenMap.res[0], screenMap.res[1], screenMap.screenScale[0], screenMap.screenScale[1], screenMap.screenOffset[0], screenMap.screenOffset[1]);
+                // Each of the first marks with the nearest projected lamp light, both in final NDC: what the match compares.
+                for (size_t i = 0; (i < lampMarks.size()) && (i < 4); ++i) {
+                    float bestD = 1e9f;
+                    std::array<float, 3> near3 = { 0.0f, 0.0f, 0.0f };
+                    for (const auto &q : lampProjected) {
+                        const float d = std::hypot(q[0] - lampMarks[i][0], q[1] - lampMarks[i][1]);
+                        if (d < bestD) {
+                            bestD = d;
+                            near3 = q;
+                        }
+                    }
+
+                    fprintf(stderr, "[rt-lights]   lamp px (%.1f, %.1f) half %.1f -> ndc (%.3f, %.3f) reach (%.3f, %.3f); nearest light ndc (%.3f, %.3f) z %.3f, %zu projected\n",
+                        lampMarkOf[i]->local[0], lampMarkOf[i]->local[1], lampMarkOf[i]->screenHalf, lampMarks[i][0], lampMarks[i][1], lampReach[i * 2], lampReach[i * 2 + 1],
+                        near3[0], near3[1], near3[2], lampProjected.size());
+                }
+            }
+        }
+
+        // RT64 light presets (inspector Lights tab): level map space (the terrain pass's frame) in a level, camera space elsewhere; skipped while a level's origin is unknown.
+        const rs64lights::TerrainFrame &tf = p.curWorkload->rs64Terrain;
+        // A front-end scene (rs64PresetScene) is camera space even with a terrain map (the briefing room's hologram draws the level's terrain).
+        const bool inLevel = (tf.map != nullptr) && (p.curWorkload->rs64PresetScene == -1);
+        const bool originKnown = inLevel && !tf.mixed && (tf.transformIndex < world.size()) && (tf.exact || (rs64Shadow.terrainOriginVersion == tf.map->version));
+        float mapToCamera[3][4] = {};
+        float mapScale = 1.0f;
+        rs64lights::Mat4 presetToCamera = rs64lights::identity();
+        if (originKnown) {
+            const rs64lights::Mat4 recordToCamera = rs64ToMat4(world[tf.transformIndex]);
+            rs64lights::terrainInstanceTransform(recordToCamera, tf.exact ? tf.exactX : rs64Shadow.terrainOriginX, tf.exact ? tf.exactZ : rs64Shadow.terrainOriginZ, mapToCamera);
+            mapScale = rs64lights::transformScale(recordToCamera);
+            for (int j = 0; j < 3; ++j) {
+                for (int k = 0; k < 4; ++k) {
+                    presetToCamera.m[k][j] = mapToCamera[j][k];
+                }
+            }
+        }
+        // Gizmo views for the F1 Lights tab: a space -> camera transform to space -> final NDC, the camera's place in the space, a depth to unproject at.
+        rs64lights::Mat4 cameraToNdc;
+        const bool haveNdc = rs64lights::inverse(inv, cameraToNdc);
+        const auto gizmoView = [&](const rs64lights::Mat4 &spaceToCamera, bool yDown) {
+            rs64lights::PresetView v;
+            rs64lights::Mat4 cameraFromSpace;
+            if (!haveNdc || !rs64lights::inverse(spaceToCamera, cameraFromSpace)) {
+                return v;
+            }
+            v.toNdc = rs64lights::mul(spaceToCamera, cameraToNdc);
+            v.valid = rs64lights::inverse(v.toNdc, v.fromNdc);
+            v.yDown = yDown;
+            for (int j = 0; j < 3; ++j) {
+                v.cameraPos[j] = cameraFromSpace.m[3][j];
+            }
+            v.depth = drawData.rspViewports[transformsIndex].translate.z;
+            return v;
+        };
+        if (!inLevel || originKnown) {
+            rs64lights::publishPresetView(gizmoView(presetToCamera, originKnown), rs64lights::PresetLevel);
+        }
+        // The picked mesh preset's part: its model space (the game's models are Y-down), when it was drawn in this view.
+        const uint32_t pickTi = p.curWorkload->rs64MeshPickTransform;
+        const bool pickHere = (pickTi < world.size()) && rs64SameView(drawData, p.curWorkload->rs64MeshPickView, transformsIndex, true);
+        rs64lights::publishPresetView(pickHere ? gizmoView(rs64ToMat4(world[pickTi]), true) : rs64lights::PresetView{}, rs64lights::PresetMesh);
+        for (const interop::PointLight &l : p.curWorkload->pointLights) {
+            if (inLevel && !originKnown) {
+                break;
+            }
+            const float m[3] = { l.position.x, l.position.y, l.position.z };
+            rs64lights::Resolved r;
+            for (int j = 0; j < 3; ++j) {
+                r.pos[j] = originKnown ? (mapToCamera[j][0] * m[0] + mapToCamera[j][1] * m[1] + mapToCamera[j][2] * m[2] + mapToCamera[j][3]) : m[j];
+            }
+            r.radius = l.attenuationRadius * mapScale;
+            r.color[0] = l.diffuseColor.x;
+            r.color[1] = l.diffuseColor.y;
+            r.color[2] = l.diffuseColor.z;
+            r.intensity = 1.0f;
+            r.falloff = l.attenuationExponent;
+            r.shadowStart = l.shadowOffset * mapScale;
+            r.kind = rs64lights::KindMesh;
+            const float d[3] = { l.direction.x, l.direction.y, l.direction.z };
+            for (int j = 0; j < 3; ++j) {
+                r.dir[j] = originKnown ? (mapToCamera[j][0] * d[0] + mapToCamera[j][1] * d[1] + mapToCamera[j][2] * d[2]) : d[j];
+            }
+            const float dirLen = std::sqrt(r.dir[0] * r.dir[0] + r.dir[1] * r.dir[1] + r.dir[2] * r.dir[2]);
+            for (float &v : r.dir) {
+                v = (dirLen > 1e-12f) ? v / dirLen : v;
+            }
+            r.spotMaxCos = l.spotMaxCosine;
+            r.spotFalloffCos = l.spotFalloffCosine;
+            r.flicker = l.flickerIntensity;
+            // A level light's flicker sequence follows its place (stable while it isn't moved).
+            r.seed = uint32_t(rs64lights::fnv1a64(reinterpret_cast<const uint8_t *>(m), sizeof(m)));
             resolved.push_back(r);
         }
 
@@ -2886,10 +3060,15 @@ namespace RT64 {
         cb.normalBias = cfg.shadowNormalBias;
         cb.terrainTMinScale = cfg.shadowTerrainTMin;
         cb.shadowParams = { cfg.lightShadowEnd, 0.0f, (cfg.terrainNormals && rs64Shadow.terrainNormalGpu) ? 1.0f : 0.0f, cfg.terrainNormalWindow };
+        // Flicker runs on wall time, so it keeps its pace whatever the frame rate.
+        static const auto s_flickerStart = std::chrono::steady_clock::now();
+        const double flickerT = std::chrono::duration<double>(std::chrono::steady_clock::now() - s_flickerStart).count();
         for (size_t i = 0; i < count; ++i) {
-            cb.lightPosRadius[i] = { chosen[i].pos[0], chosen[i].pos[1], chosen[i].pos[2], chosen[i].radius };
-            cb.lightColor[i] = { chosen[i].color[0], chosen[i].color[1], chosen[i].color[2], chosen[i].intensity };
-            cb.lightParams[i] = { chosen[i].falloff, chosen[i].shadowStart, 0.0f, 0.0f };
+            const rs64lights::Resolved &c = chosen[i];
+            cb.lightPosRadius[i] = { c.pos[0], c.pos[1], c.pos[2], c.radius };
+            cb.lightColor[i] = { c.color[0], c.color[1], c.color[2], c.intensity * rs64lights::flickerGain(c.flicker, c.seed, flickerT) };
+            cb.lightParams[i] = { c.falloff, c.shadowStart, c.spotMaxCos, c.spotFalloffCos };
+            cb.lightSpot[i] = { c.dir[0], c.dir[1], c.dir[2], 0.0f };
         }
 
         void *bytes = framebuffer.rs64LightsBuffer->map();

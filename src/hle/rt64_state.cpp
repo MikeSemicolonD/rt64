@@ -6,6 +6,8 @@
 #include <unordered_set>
 #include "rt64_state.h"
 
+#include "rt64_rs64_mcp.h"
+
 #include <cassert>
 #include <chrono>
 #include <cinttypes>
@@ -1893,6 +1895,10 @@ namespace RT64 {
 
         // Inspect the current workload before submission.
         lastWorkloadIndex = ext.workloadQueue->writeCursor;
+        // A front-end scene wins over a terrain map (the briefing room's hologram draws the level's terrain).
+        const int presetLevel = (workload.rs64PresetScene != PresetLights::NoLevel) ? workload.rs64PresetScene
+            : (workload.rs64Terrain.map ? int(workload.rs64Terrain.map->level) : PresetLights::NoLevel);
+        lightsLibraryInspector.currentLevel = presetLevel;
         if (ext.userConfig->developerMode && ext.app->inspectorVisible) {
             inspect();
         } else if (GetRenderHookImgui() != nullptr) {
@@ -1902,9 +1908,30 @@ namespace RT64 {
             inspect();
         }
 
+        // RS64: light presets the host queued (enabled mods, then roguesq_lights.json); a later file overrides a same-named preset.
+        // A reload (a light file changed, or Reload light files) replaces the library, dropping unsaved edits made here.
+        bool presetsReplace = false;
+        std::vector<std::string> presetTexts = rs64lights::takePresetTexts(presetsReplace);
+        if (presetsReplace) {
+            lightsLibrary.presetMap.clear();
+        }
+
+        for (const std::string &text : presetTexts) {
+            try {
+                const json jroot = json::parse(text);
+                if (jroot.contains("presets")) {
+                    lightsLibrary.readJson(jroot);
+                }
+            }
+            catch (const std::exception &e) {
+                fprintf(stderr, "[RT64] light presets not loaded: %s\n", e.what());
+            }
+        }
+
         // Add any lights to the workload from the presets that are activated.
         for (const auto &it : lightsLibrary.presetMap) {
-            if (!it.second.enabled) {
+            // Mesh and sprite presets are emitted per drawn part / sprite by the F5 GBI instead.
+            if (!it.second.enabled || !it.second.appliesTo(presetLevel) || !it.second.mesh.empty() || !it.second.sprite.empty()) {
                 continue;
             }
 
@@ -1916,6 +1943,9 @@ namespace RT64 {
                 workload.pointLights.emplace_back(lightIt.second.description);
             }
         }
+
+        lightsLibraryInspector.seenMeshes.clear();
+        lightsLibraryInspector.seenSprites.clear();
 
         for (uint32_t f = 0; f < workload.fbPairCount; f++) {
             FramebufferPair &fbPair = workload.fbPairs[f];
@@ -2154,6 +2184,8 @@ namespace RT64 {
     }
     
     void State::updateScreen(const VI &newVI, bool fromEarlyPresent) {
+        rs64mcp::drain(*this);
+
         if (!fromEarlyPresent) {
             viTickCounter++;
         }
@@ -2395,6 +2427,39 @@ namespace RT64 {
         const uint32_t previousMSAACount = userConfig.msaaSampleCount();
         Workload &workload = ext.workloadQueue->workloads[lastWorkloadIndex];
         InspectorMode inspectorMode = InspectorMode::None;
+
+        // RS64: Im3d's camera and cursor ray from the light pass's view in the picked preset's space (its part's model space for a mesh preset,
+        // else the level's map space or camera space), so the Lights tab's spheres and gizmos work; inspector->endFrame draws with the same view.
+        const auto pickedIt = lightsLibrary.presetMap.find(lightsLibraryInspector.selectedPresetName);
+        const bool meshPicked = (pickedIt != lightsLibrary.presetMap.end()) && !pickedIt->second.mesh.empty();
+        const rs64lights::PresetView presetView = rs64lights::presetView(meshPicked ? rs64lights::PresetMesh : rs64lights::PresetLevel);
+        rs64lights::inspectorView() = presetView;
+        lightsLibraryInspector.meshViewValid = meshPicked && presetView.valid;
+        if (presetView.valid) {
+            const ImGuiIO &io = ImGui::GetIO();
+            const float width = std::max(io.DisplaySize.x, 1.0f);
+            const float height = std::max(io.DisplaySize.y, 1.0f);
+            float center[3], top[3], bottom[3], cursor[3];
+            rs64lights::presetUnproject(presetView, 0.0f, 0.0f, center);
+            rs64lights::presetUnproject(presetView, 0.0f, 1.0f, top);
+            rs64lights::presetUnproject(presetView, 0.0f, -1.0f, bottom);
+            rs64lights::presetUnproject(presetView, io.MousePos.x / width * 2.0f - 1.0f, 1.0f - io.MousePos.y / height * 2.0f, cursor);
+            const Im3d::Vec3 eye(presetView.cameraPos[0], presetView.cameraPos[1], presetView.cameraPos[2]);
+            const Im3d::Vec3 forward = Im3d::Vec3(center[0], center[1], center[2]) - eye;
+            const Im3d::Vec3 screenHeight = Im3d::Vec3(top[0], top[1], top[2]) - Im3d::Vec3(bottom[0], bottom[1], bottom[2]);
+            Im3d::AppData &appData = Im3d::GetAppData();
+            appData.m_viewOrigin = eye;
+            appData.m_viewDirection = Im3d::Normalize(forward);
+            appData.m_worldUp = presetView.yDown ? Im3d::Vec3(0.0f, -1.0f, 0.0f) : Im3d::Vec3(0.0f, 1.0f, 0.0f);
+            appData.m_projScaleY = Im3d::Length(screenHeight) / std::max(Im3d::Length(forward), 1e-6f);
+            appData.m_projOrtho = false;
+            appData.m_viewportSize = Im3d::Vec2(width, height);
+            appData.m_cursorRayOrigin = eye;
+            appData.m_cursorRayDirection = Im3d::Normalize(Im3d::Vec3(cursor[0], cursor[1], cursor[2]) - eye);
+            appData.m_keyDown[Im3d::Mouse_Left] = io.MouseDown[0] && !io.WantCaptureMouse;
+            appData.m_deltaTime = io.DeltaTime;
+        }
+
         inspector->newFrame(ext.framebufferGraphicsWorker);
 
         // Host ImGui hook (e.g. the controls/rebind window). Runs between
@@ -2784,13 +2849,24 @@ namespace RT64 {
                     inspectorMode = !sceneLibraryInspector.selectedPresetName.empty() ? InspectorMode::Scene : InspectorMode::None;
                     ImGui::EndTabItem();
                 }
+#           endif
 
+                // RS64's light pass shades these presets (fillRS64Lights).
                 if (ImGui::BeginTabItem("Lights")) {
+                    // RS64: re-read the enabled mods' and the exe's roguesq_lights.json (replacing the library at the next frame); unsaved edits here are dropped.
+                    // The host also does this by itself when one of those files changes.
+                    ImGui::BeginDisabled(!rs64lights::presetReloader());
+                    if (ImGui::Button("Reload light files")) {
+                        rs64lights::presetReloader()();
+                    }
+
+                    ImGui::EndDisabled();
                     lightsLibraryInspector.inspectLibrary(lightsLibrary, ext.appWindow->windowHandle);
                     inspectorMode = !lightsLibraryInspector.selectedPresetName.empty() ? InspectorMode::Light : InspectorMode::None;
                     ImGui::EndTabItem();
                 }
 
+#           if RT_ENABLED
                 if (ImGui::BeginTabItem("Materials")) {
                     materialLibraryInspector.inspectLibrary(materialLibrary, ext.appWindow->windowHandle);
                     inspectorMode = !materialLibraryInspector.selectedPresetName.empty() ? InspectorMode::Material : InspectorMode::None;

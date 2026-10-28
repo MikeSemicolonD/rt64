@@ -595,6 +595,8 @@ namespace RT64 {
     }
 
     void RDP::loadTile(uint8_t tile, uint16_t uls, uint16_t ult, uint16_t lrs, uint16_t lrt) {
+        rs64BlockAddress = texture.address + ((((ult >> 2) * texture.width + (uls >> 2)) << texture.siz) >> 1);
+        rs64BlockBytes = ((((lrs - uls) >> 2) + 1) << texture.siz) >> 1;
 #ifdef LOG_LOAD_METHODS
         RT64_LOG_PRINTF("RDP::loadTile(tile %u, uls %u, ult %u, lrs %u, lrt %u)", tile, uls, ult, lrs, lrt);
 #endif
@@ -738,7 +740,11 @@ namespace RT64 {
         if ((t.uls > t.lrs) || (t.lrs >= 0x800)) {
             return;
         }
-        
+
+        // RS64: the copied range, as loadBlockOperation deduces it.
+        rs64BlockAddress = texture.address + (t.uls << texture.siz >> 1) + (texture.width << texture.siz >> 1) * t.ult;
+        rs64BlockBytes = (((t.lrs - t.uls) >> (4 - t.siz)) + 1) << 3;
+
 #   ifdef ASSERT_LOAD_METHODS
         assert((t.uls != t.lrs) || ((t.uls & 0x3) == 0) && "Unknown and possibly undefined hardware behavior.");
         assert((t.siz == texture.siz) && "Different tile and texture sizes are not currently supported.");

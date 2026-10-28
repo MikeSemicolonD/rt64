@@ -978,14 +978,11 @@ namespace RT64 {
             const uint32_t d = f5_depth(state);
             return d < (uint32_t)F5_MAX_DEPTH && s_chunk_base[d] != 0 && off >= s_chunk_base[d] + 0x108u;
         }
-        // HOB mesh registry: per-mesh DL chunk -> mesh index, meshdef1 -> mesh index, and per-mesh light templates.
+        // HOB mesh registry: per-mesh DL chunk -> mesh index, meshdef1 -> mesh index, and per-mesh caster flags. Mesh lights are F1 Lights-tab presets keyed by names.
         struct F5MeshRegistry {
             std::unordered_map<uint32_t, uint32_t> chunkMesh, md1Mesh;
             std::vector<std::string> names;
-            std::vector<rs64lights::Candidate> laser;
             std::vector<uint8_t> noCast;
-            // Engine-glow table key for a chunk draw of this mesh (exact glow-card part) and for an inline draw identified by it (its part's glow card); nullptr = none.
-            std::vector<const char*> exhaustPart;
             // Flying craft (rs64lights::movingCraft): kept out of shadow history.
             std::vector<uint8_t> craft;
             uint64_t sig = 0;
@@ -1020,9 +1017,7 @@ namespace RT64 {
             p.chunkMesh.clear();
             p.md1Mesh.clear();
             p.names.clear();
-            p.laser.clear();
             p.noCast.clear();
-            p.exhaustPart.clear();
             p.craft.clear();
             for (uint32_t b = 0; b < 25; ++b) {
                 uint32_t idx = rd_be_u16(ram, 0x801394B0u + b * 2);
@@ -1031,8 +1026,10 @@ namespace RT64 {
                     const uint32_t obj = rd_be_u32(ram, e + 4);
                     idx = rd_be_u16(ram, e);
                     if (!f5_vaddr_ok(obj, 0x74)) continue;
-                    char name[17] = {};
-                    for (int i = 0; i < 16; ++i) name[i] = (char)ram[((obj & 0x00FFFFFFu) + i) ^ 3];
+                    char hobName[17] = {};
+                    for (int i = 0; i < 16; ++i) hobName[i] = (char)ram[((obj & 0x00FFFFFFu) + i) ^ 3];
+                    const uint32_t nodeList = rd_be_u32(ram, obj + 0x14);
+                    const char* name = rs64lights::meshKeyName(hobName, f5_vaddr_ok(nodeList, 2) ? rd_be_u16(ram, nodeList) : 0);
                     for (uint32_t si = 0; si < 4; ++si) {
                         const uint32_t t = rd_be_u32(ram, obj + 0x18 + si * 4);
                         if (!f5_vaddr_ok(t, 8)) continue;
@@ -1049,15 +1046,7 @@ namespace RT64 {
                                 char key[64];
                                 std::snprintf(key, sizeof key, "%s#s%u.p%u.%u", name, si, part, j);
                                 p.names.emplace_back(key);
-                                rs64lights::Candidate lc;
-                                if (!rs64lights::laserLight(key, rs64lights::config().laserRadius, lc) && !rs64lights::torpedoLight(key, rs64lights::config().torpedoRadius, lc)
-                                    && !rs64lights::pickupLight(key, rs64lights::config().pickupRadius, rs64lights::config().pickupGain, lc)) {
-                                    lc = rs64lights::Candidate{};
-                                }
-                                p.laser.push_back(lc);
-                                p.noCast.push_back((lc.emissive || rs64lights::emissiveSurface(key)) ? 1 : (rs64lights::cutoutDenied(key) ? 2 : 0));
-                                const char* part = rs64lights::exhaustKeyForPart(key);
-                                p.exhaustPart.push_back(part);
+                                p.noCast.push_back((rs64lights::laserBolt(key) || rs64lights::emissiveSurface(key)) ? 1 : (rs64lights::cutoutDenied(key) ? 2 : 0));
                                 p.craft.push_back(rs64lights::movingCraft(key) ? 1 : 0);
                                 p.md1Mesh.emplace(md, meshIdx);
                                 for (uint32_t off : { 0x3Cu, 0x40u }) {
@@ -1151,25 +1140,19 @@ namespace RT64 {
                 static const float identity[9] = { 1, 0, 0, 0, 1, 0, 0, 0, 1 };
                 sun.valid = rs64lights::sunCameraDir((menu == rs64lights::MenuSceneHangar) ? rs64lights::hangarSunDir() : rs64lights::menuSunDir(), identity, sun.dir);
                 sun.color[0] = sun.color[1] = sun.color[2] = 1.0f;
+                Workload& wl = state->ext.workloadQueue->workloads[state->ext.workloadQueue->writeCursor];
                 if (menu == rs64lights::MenuSceneHangar) {
                     sun.fromModel = true;
+                    wl.rs64PresetScene = PresetLights::Hangar;
                 }
+                // The briefing room's hologram and table-ring lights are light presets (mods/model-lights, level -3); the preview image's glow
+                // follows the image, so it stays here.
                 if (rs64lights::config().enabled && (menu == rs64lights::MenuSceneMissionSelect)) {
-                    auto& lights = state->ext.workloadQueue->workloads[state->ext.workloadQueue->writeCursor].rs64Lights;
-                    rs64lights::Candidate holo;
-                    rs64lights::menuHoloLight(rs64lights::menuHoloPos(), rs64lights::config().menuHoloRadius, rs64lights::config().menuHoloGain, rs64lights::config().menuHoloFalloff, holo);
-                    lights.push_back(holo);
-                    // Table ring in the same fixed camera space: centre, in-plane axes and normal measured from the table-top geometry.
-                    static const float kCenter[3] = { 0.0f, 1080.0f, 11216.0f };
-                    static const float kAxisX[3] = { 1.0f, 0.0f, 0.0f };
-                    static const float kAxisD[3] = { 0.0f, -0.139f, 0.990f };
-                    static const float kUp[3] = { 0.0f, -0.990f, -0.139f };
-                    rs64lights::Candidate ring[6];
-                    const uint32_t n = rs64lights::menuRingLights(kCenter, kAxisX, kAxisD, kUp, 2900.0f, 150.0f, 6, 2500.0f, rs64lights::config().menuRingGain, ring, 6);
-                    lights.insert(lights.end(), ring, ring + n);
+                    auto& lights = wl.rs64Lights;
+                    wl.rs64PresetScene = PresetLights::BriefingRoom;
                     rs64lights::MenuImageGlow& glow = rs64lights::menuImageGlow();
                     rs64lights::Candidate image;
-                    if (rs64lights::menuImageLight(glow, rs64lights::menuHoloPos(), rs64lights::config().menuHoloRadius, rs64lights::config().menuImageGain, rs64lights::config().menuHoloFalloff, image)) {
+                    if (rs64lights::menuImageLight(glow, rs64lights::menuHoloPos(), rs64lights::MenuHoloRadius, rs64lights::config().menuImageGain, rs64lights::MenuHoloFalloff, image)) {
                         lights.push_back(image);
                     }
                     glow = rs64lights::MenuImageGlow{};
@@ -1402,15 +1385,13 @@ namespace RT64 {
             t.samples.push_back(s);
         }
         static uint64_t s_sun_task = ~0ull;
-        static rs64lights::Candidate s_pending_laser;
-        static bool s_pending_laser_valid = false;
         // 1 = never casts (laser bolt), 2 = its cutout faces never cast (light-source glow card).
         static uint8_t s_pending_nocast = 0;
-        // Engine-glow table key whose lights are emitted at the next vertex load (that part's transform); nullptr = none.
-        static const char* s_pending_exhaust = nullptr;
-        // The task that armed it: an armed part with no vertex load in that task must not fire in the next one, under its first transform.
-        static uint64_t s_pending_exhaust_task = ~0ull;
         static bool s_pending_craft = false;
+        // Mesh-registry key of the part armed for the next vertex load (that part's transform), for light presets attached to a mesh; empty = none.
+        static std::string s_pending_mesh;
+        // The task that armed it: an armed part with no vertex load in that task must not fire in the next one, under its first transform.
+        static uint64_t s_pending_mesh_task = ~0ull;
         static void f5_push_light(State* state, const rs64lights::Candidate& c) {
             auto& lights = state->ext.workloadQueue->workloads[state->ext.workloadQueue->writeCursor].rs64Lights;
             if (lights.size() < 512) {
@@ -1429,6 +1410,173 @@ namespace RT64 {
                     }
                 }
                 ++((c.kind == rs64lights::KindLaser) ? s_lasers : s_sprites);
+            }
+        }
+        // Effect-sprite light-preset key: "spr:<texture name>" (e.g. "spr:explo008", the sprite-animation frame's name) of the texture record
+        // whose texels the last loadBlock read: the game's record table (count u16 0x80128EF0, table 0x80128F08, 0x24 each: texel size u16 +0x0C,
+        // texel address +0x10, name +0x14). Empty when no record holds the block.
+        static std::string f5_sprite_key_lookup(State* state, uint32_t block);
+        // Cached per task: a frame's sprites reuse a few textures.
+        static std::string f5_sprite_key(State* state) {
+            const uint32_t block = 0x80000000u | (state->rdp->rs64BlockAddress & 0x00FFFFFFu);
+            if ((state->rdp->rs64BlockBytes == 0) || !f5_host_vaddr_ok(block, 4)) {
+                return std::string();
+            }
+            static std::unordered_map<uint32_t, std::string> s_keys;
+            static uint64_t s_task = ~0ull;
+            if (s_task != state->displayListCounter) {
+                s_task = state->displayListCounter;
+                s_keys.clear();
+            }
+            const auto it = s_keys.find(block);
+            if (it != s_keys.end()) {
+                return it->second;
+            }
+            return s_keys[block] = f5_sprite_key_lookup(state, block);
+        }
+        static std::string f5_sprite_key_lookup(State* state, uint32_t block) {
+            const uint8_t* ram = state->RDRAM;
+            const uint32_t count = rd_be_u16(ram, 0x80128EF0u), table = rd_be_u32(ram, 0x80128F08u);
+            for (uint32_t i = 0; (i < count) && (i < 8192); ++i) {
+                const uint32_t e = table + i * 0x24u;
+                if (!f5_host_vaddr_ok(e, 0x24)) {
+                    break;
+                }
+                const uint32_t texels = rd_be_u32(ram, e + 0x10);
+                if ((block < texels) || (block - texels >= rd_be_u16(ram, e + 0x0C))) {
+                    continue;
+                }
+                char name[17];
+                for (int c = 0; c < 16; ++c) {
+                    name[c] = (char)ram[((e + 0x14 + c) & 0x00FFFFFFu) ^ 3];
+                }
+                name[16] = '\0';
+                return name[0] ? "spr:" + std::string(name) : std::string();
+            }
+            return std::string();
+        }
+        // Light presets keyed by this sprite: their lights at the sprite (at: its placement), radius x its camera size (capped as the automatic light's), brightness x its PRIM
+        // alpha so they fade with it. Records the key for the Lights tab's picker. True when a preset matched (its lights, or none, replace
+        // the automatic sprite light).
+        static bool f5_push_sprite_presets(State* state, const std::string& key, uint32_t prim, float cameraSize, const rs64lights::Candidate& at) {
+            if (key.empty()) {
+                return false;
+            }
+            PresetLightsLibraryInspector& inspector = state->lightsLibraryInspector;
+            if (inspector.seenSprites.size() < 4096) {
+                inspector.seenSprites[key] = prim;
+            }
+            if (rs64lights::config().log) {
+                static std::set<std::string> s_logged;
+                if ((s_logged.size() < 512) && s_logged.insert(key).second) {
+                    std::fprintf(stderr, "[rt-lights] sprite %s prim=%08X\n", key.c_str(), prim);
+                }
+            }
+            bool matched = false;
+            for (const auto& it : state->lightsLibrary.presetMap) {
+                const PresetLights& preset = it.second;
+                if (!preset.enabled || !preset.appliesTo(inspector.currentLevel) || !PresetLights::meshMatches(preset.sprite, key)) {
+                    continue;
+                }
+                matched = true;
+                for (const auto& lightIt : preset.lightMap) {
+                    if (!lightIt.second.enabled) {
+                        continue;
+                    }
+                    const interop::PointLight& d = lightIt.second.description;
+                    rs64lights::Candidate c = at;
+                    c.color[0] = d.diffuseColor.x;
+                    c.color[1] = d.diffuseColor.y;
+                    c.color[2] = d.diffuseColor.z;
+                    c.radius = std::min(cameraSize * d.attenuationRadius, rs64lights::config().spriteRadiusMax);
+                    c.intensity = float(prim & 0xFFu) / 255.0f;
+                    c.falloff = d.attenuationExponent;
+                    c.shadowStart = cameraSize;
+                    c.kind = rs64lights::KindSprite;
+                    c.flicker = d.flickerIntensity;
+                    const std::string id = it.first + '/' + lightIt.first;
+                    c.seed = uint32_t(rs64lights::fnv1a64(reinterpret_cast<const uint8_t*>(id.data()), id.size()));
+                    f5_push_light(state, c);
+                }
+            }
+            return matched;
+        }
+        // The game's blinking lamps (func_80071928's draw list) use texture record "halo" (material slot 20 -> record 19): each one drawn is a
+        // lamp mark (its screen spot, size, PRIM colour and fade) that lamp presets' lights at the glw hardpoints match against (fillRS64Lights).
+        void f5_lamp_light(State* state, float cx, float cy, float halfW) {
+            if (!rs64lights::config().enabled || !(halfW > 0.0f) || (f5_sprite_key(state) != "spr:halo")) {
+                return;
+            }
+            const auto& prim = state->rdp->primColorStack[state->rdp->primColorStackSize - 1];
+            rs64lights::Candidate mark;
+            mark.kind = rs64lights::KindLampMark;
+            mark.local[0] = cx;
+            mark.local[1] = cy;
+            mark.screenHalf = halfW;
+            mark.color[0] = float(prim.x);
+            mark.color[1] = float(prim.y);
+            mark.color[2] = float(prim.z);
+            mark.intensity = float(prim.w);
+            // The workload being parsed gets its id when it is advanced (State::advanceWorkload): the next one.
+            rs64lights::addLampMark(state->workloadId + 1, mark);
+        }
+        // F1 Lights-tab presets attached to this part's mesh key: their lights in the part's model space, once per part per transform. Lists the key for the tab's Mesh picker.
+        static void f5_push_mesh_presets(State* state, const std::string& key) {
+            PresetLightsLibraryInspector& inspector = state->lightsLibraryInspector;
+            if (inspector.seenMeshes.size() < 4096) {
+                inspector.seenMeshes.insert(key);
+            }
+            const uint32_t ti = state->rsp->curTransformIndex;
+            static std::string s_lastKey;
+            static uint32_t s_lastTransform = UINT32_MAX;
+            static uint64_t s_lastTask = ~0ull;
+            if ((key == s_lastKey) && (ti == s_lastTransform) && (s_lastTask == state->displayListCounter)) {
+                return;
+            }
+            s_lastKey = key;
+            s_lastTransform = ti;
+            s_lastTask = state->displayListCounter;
+            for (const auto& it : state->lightsLibrary.presetMap) {
+                const PresetLights& preset = it.second;
+                if (!preset.enabled || !preset.appliesTo(inspector.currentLevel) || !PresetLights::meshMatches(preset.mesh, key)) {
+                    continue;
+                }
+                Workload& wl = state->ext.workloadQueue->workloads[state->ext.workloadQueue->writeCursor];
+                if ((it.first == inspector.selectedPresetName) && (wl.rs64MeshPickTransform == UINT32_MAX)) {
+                    wl.rs64MeshPickTransform = ti;
+                    wl.rs64MeshPickView = state->rsp->curViewProjIndex;
+                }
+                for (const auto& lightIt : preset.lightMap) {
+                    if (!lightIt.second.enabled) {
+                        continue;
+                    }
+                    const interop::PointLight& d = lightIt.second.description;
+                    rs64lights::Candidate c;
+                    c.transformIndex = ti;
+                    c.local[0] = d.position.x;
+                    c.local[1] = d.position.y;
+                    c.local[2] = d.position.z;
+                    c.color[0] = d.diffuseColor.x;
+                    c.color[1] = d.diffuseColor.y;
+                    c.color[2] = d.diffuseColor.z;
+                    c.radius = d.attenuationRadius;
+                    c.intensity = 1.0f;
+                    c.falloff = d.attenuationExponent;
+                    c.shadowStart = d.shadowOffset;
+                    c.kind = rs64lights::KindMesh;
+                    c.modelUnits = !preset.cameraUnits;
+                    c.lampGated = preset.lamp;
+                    c.dir[0] = d.direction.x;
+                    c.dir[1] = d.direction.y;
+                    c.dir[2] = d.direction.z;
+                    c.spotMaxCos = d.spotMaxCosine;
+                    c.spotFalloffCos = d.spotFalloffCosine;
+                    c.flicker = d.flickerIntensity;
+                    // Each light flickers on its own sequence, the same on every copy of the part.
+                    const std::string id = it.first + '/' + lightIt.first;
+                    c.seed = uint32_t(rs64lights::fnv1a64(reinterpret_cast<const uint8_t*>(id.data()), id.size()));
+                    f5_push_light(state, c);
+                }
             }
         }
         // ROGUESQ_DUMP_MESH_VERTS=<mesh name prefix>: unique (part, model-space position, colour) of that mesh's vertices, written once to dumps/mesh-verts-<prefix>.txt after 300 tasks.
@@ -1681,8 +1829,8 @@ namespace RT64 {
             f5_next_chunk(state, dl);
         }
 
-        // A call or branch into a registered mesh chunk arms its light and no-cast mark for the next vertex load. Exhaust lights arm only at the part's own
-        // modelview load (op_01): a chunk address can belong to another model in the hangar, which put engine lights on the wrong transform.
+        // A call or branch into a registered mesh chunk arms its no-cast mark, and its mesh key for light presets unless the part's own modelview load
+        // (op_01) named one: a chunk address can belong to another model in the hangar, which put engine lights on the wrong transform.
         static void f5_arm_mesh_emitters(State* state, uint32_t target) {
             if (!rs64lights::emitterLookupEnabled(rs64lights::config())) {
                 return;
@@ -1692,18 +1840,12 @@ namespace RT64 {
             if (it == reg.chunkMesh.end()) {
                 return;
             }
-            if (reg.laser[it->second].kind == rs64lights::KindLaser) {
-                s_pending_laser = reg.laser[it->second];
-                s_pending_laser_valid = true;
-                if (rs64lights::config().log) {
-                    static uint32_t s_n = 0;
-                    if ((++s_n % 120) == 1) {
-                        std::fprintf(stderr, "[rt-lights] chunk emitter: %s\n", reg.names[it->second].c_str());
-                    }
-                }
-            }
             s_pending_nocast = reg.noCast[it->second];
             s_pending_craft = (reg.craft[it->second] != 0);
+            if (s_pending_mesh.empty()) {
+                s_pending_mesh = reg.names[it->second];
+                s_pending_mesh_task = state->displayListCounter;
+            }
         }
 
         // 0x07: branch to chunk w1.
@@ -2560,23 +2702,11 @@ namespace RT64 {
                 if (md != 0) {
                     F5MeshRegistry& reg = f5_mesh_registry(state);
                     const auto mi = reg.md1Mesh.find(md);
-                    if ((mi != reg.md1Mesh.end()) && (reg.exhaustPart[mi->second] != nullptr)) {
-                        s_pending_exhaust = reg.exhaustPart[mi->second];
-                        s_pending_exhaust_task = state->displayListCounter;
-                    }
                     if (mi != reg.md1Mesh.end()) {
                         s_pending_craft = (reg.craft[mi->second] != 0);
                         s_pending_nocast = reg.noCast[mi->second];
-                    }
-                    if ((mi != reg.md1Mesh.end()) && (reg.laser[mi->second].kind == rs64lights::KindLaser)) {
-                        s_pending_laser = reg.laser[mi->second];
-                        s_pending_laser_valid = true;
-                        if (rs64lights::config().log) {
-                            static uint32_t s_n = 0;
-                            if ((++s_n % 120) == 1) {
-                                std::fprintf(stderr, "[rt-lights] inline emitter: %s\n", reg.names[mi->second].c_str());
-                            }
-                        }
+                        s_pending_mesh = reg.names[mi->second];
+                        s_pending_mesh_task = state->displayListCounter;
                     }
                 }
             }
@@ -2789,32 +2919,8 @@ namespace RT64 {
             f5_mesh_vertex_dump(state, out, n);
             if (!s_cull_skip) {
                 state->rsp->setVertex(0x80000000u | F5_VTX_SCRATCH, n, 0);
-                if (s_pending_laser_valid && rs64lights::config().enabled) {
-                    rs64lights::Candidate c = s_pending_laser;
-                    c.transformIndex = state->rsp->curTransformIndex;
-                    f5_push_light(state, c);
-                }
-                if ((s_pending_exhaust != nullptr) && (s_pending_exhaust_task == state->displayListCounter) && rs64lights::config().enabled && (rs64lights::config().exhaustGain > 0.0f)) {
-                    // A large part (the Falcon hull) can arrive in several vertex batches under one transform: emit its lights once.
-                    static const char* s_lastKey = nullptr;
-                    static uint32_t s_lastTransform = UINT32_MAX;
-                    static uint64_t s_lastTask = ~0ull;
-                    const bool again = (s_lastKey == s_pending_exhaust) && (s_lastTransform == state->rsp->curTransformIndex) && (s_lastTask == state->displayListCounter);
-                    s_lastKey = s_pending_exhaust;
-                    s_lastTransform = state->rsp->curTransformIndex;
-                    s_lastTask = state->displayListCounter;
-                    rs64lights::Candidate ex[rs64lights::MaxExhaustLights];
-                    const uint32_t m = again ? 0 : rs64lights::exhaustLights(s_pending_exhaust, rs64lights::config().exhaustRadius, rs64lights::config().exhaustGain, ex, rs64lights::MaxExhaustLights);
-                    for (uint32_t k = 0; k < m; ++k) {
-                        ex[k].transformIndex = state->rsp->curTransformIndex;
-                        f5_push_light(state, ex[k]);
-                    }
-                    if (rs64lights::config().log) {
-                        static uint32_t s_n = 0;
-                        if ((++s_n % 120) == 1) {
-                            std::fprintf(stderr, "[rt-lights] exhaust: %s lights=%u\n", s_pending_exhaust, m);
-                        }
-                    }
+                if (!s_pending_mesh.empty() && (s_pending_mesh_task == state->displayListCounter) && rs64lights::config().enabled) {
+                    f5_push_mesh_presets(state, s_pending_mesh);
                 }
                 if (s_pending_craft && rs64lights::sceneCaptureEnabled(rs64lights::config())) {
                     auto& craft = state->ext.workloadQueue->workloads[state->ext.workloadQueue->writeCursor].rs64Craft;
@@ -2828,10 +2934,9 @@ namespace RT64 {
                     (s_pending_nocast == 1 ? wl.rs64NoCast : wl.rs64NoCastCutout).push_back(state->rsp->curTransformIndex);
                 }
             }
-            s_pending_laser_valid = false;
             s_pending_nocast = 0;
-            s_pending_exhaust = nullptr;
             s_pending_craft = false;
+            s_pending_mesh.clear();
             s_cache_count = n;
         }
 
@@ -3031,17 +3136,23 @@ namespace RT64 {
                     state->rsp->drawIndexedTri(F5_FACE_SLOT, F5_FACE_SLOT + 1, F5_FACE_SLOT + 3);
                     if (rs64lights::config().enabled) {
                         const float modelScale = std::sqrt((float)savedModel[0][0] * (float)savedModel[0][0] + (float)savedModel[0][1] * (float)savedModel[0][1] + (float)savedModel[0][2] * (float)savedModel[0][2]);
+                        // Where the sprite's light sits; a light preset keyed by its texture replaces the automatic light.
+                        rs64lights::Candidate at;
+                        at.transformIndex = state->rsp->curTransformIndex;
+                        if (!s_sprite_xform) {
+                            at.local[0] = (float)c.x;
+                            at.local[1] = (float)c.y;
+                            at.local[2] = (float)c.z;
+                        }
+                        const std::string spriteKey = f5_sprite_key(state);
+                        const bool presetLit = f5_push_sprite_presets(state, spriteKey, w1, spriteSize * modelScale, at);
                         rs64lights::Candidate lc;
-                        if (rs64lights::spriteLight(w1, spriteSize * modelScale, rs64lights::config().spriteRadius, rs64lights::config().spriteRadiusMax, lc)) {
-                            lc.transformIndex = state->rsp->curTransformIndex;
-                            if (!s_sprite_xform) {
-                                lc.local[0] = (float)c.x;
-                                lc.local[1] = (float)c.y;
-                                lc.local[2] = (float)c.z;
-                            }
+                        if (!presetLit && rs64lights::spriteLight(w1, spriteSize * modelScale, rs64lights::config().spriteRadius, rs64lights::config().spriteRadiusMax, lc)) {
+                            lc.transformIndex = at.transformIndex;
+                            std::copy(at.local, at.local + 3, lc.local);
                             f5_push_light(state, lc);
                         }
-                        else if (rs64lights::config().log) {
+                        else if (!presetLit && rs64lights::config().log) {
                             // Distinct rejected prim colours (with the render tile's format), counted and listed every 300 rejections.
                             static std::map<uint64_t, uint32_t> s_rej;
                             static uint32_t s_n = 0;

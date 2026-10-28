@@ -1614,7 +1614,8 @@ namespace RT64 {
         openCall = false;
     }
 
-    void DebuggerInspector::rightClick(const Workload &workload, hlslpp::float2 cursorPos) {
+    // RS64: the picker's hit test without the popup, front-most first (also used by the MCP pick method).
+    std::vector<DebuggerInspector::CallIndices> DebuggerInspector::pickCalls(const Workload &workload, hlslpp::float2 cursorPos) {
         typedef std::pair<CallIndices, float> Hit;
         std::vector<Hit> hits;
         hlslpp::float3 triCoords[3];
@@ -1679,23 +1680,29 @@ namespace RT64 {
             }
         }
 
-        if (!hits.empty()) {
-            // Sort hits by depth and only insert one entry per draw call.
-            std::set<CallIndices> insertedIndices;
-            popupCalls.clear();
-            std::sort(hits.begin(), hits.end(), [](Hit a, Hit b) {
-                return a.second < b.second;
-            });
+        // Sort hits by depth and only insert one entry per draw call.
+        std::vector<CallIndices> picked;
+        std::set<CallIndices> insertedIndices;
+        std::sort(hits.begin(), hits.end(), [](Hit a, Hit b) {
+            return a.second < b.second;
+        });
 
-            for (auto hit : hits) {
-                if (insertedIndices.find(hit.first) != insertedIndices.end()) {
-                    continue;
-                }
-
-                popupCalls.push_back(hit.first);
-                insertedIndices.insert(hit.first);
+        for (auto hit : hits) {
+            if (insertedIndices.find(hit.first) != insertedIndices.end()) {
+                continue;
             }
 
+            picked.push_back(hit.first);
+            insertedIndices.insert(hit.first);
+        }
+
+        return picked;
+    }
+
+    void DebuggerInspector::rightClick(const Workload &workload, hlslpp::float2 cursorPos) {
+        std::vector<CallIndices> picked = pickCalls(workload, cursorPos);
+        if (!picked.empty()) {
+            popupCalls = std::move(picked);
             ImGui::OpenPopup("##popupCallindices");
         }
     }

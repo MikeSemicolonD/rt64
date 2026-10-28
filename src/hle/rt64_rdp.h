@@ -76,6 +76,9 @@ namespace RT64 {
         uint32_t tmemLoadTag = 0;
         LoadTexture texture = {};
         LoadTile tiles[RDP_TILES] = {};
+        // RS64: RDRAM range of the last loadBlock (the bytes it copies to TMEM), for effect-sprite light keys.
+        uint32_t rs64BlockAddress = 0;
+        uint32_t rs64BlockBytes = 0;
         uint64_t tileReplacementHashes[RDP_TILES] = {};
 
         struct {

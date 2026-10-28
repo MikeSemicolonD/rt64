@@ -71,6 +71,12 @@ namespace RT64 {
             lightMap[name] = light;
         }
 
+        level = jsonObj.value("level", AnyLevel);
+        mesh = jsonObj.value("mesh", std::string());
+        cameraUnits = jsonObj.value("cameraUnits", false);
+        lamp = jsonObj.value("lamp", false);
+        sprite = jsonObj.value("sprite", std::string());
+
         return true;
     }
 
@@ -85,6 +91,26 @@ namespace RT64 {
             jlight["description"] = it.second.description;
             jlight["enabled"] = it.second.enabled;
             jsonObj["lights"].push_back(jlight);
+        }
+
+        if (level != AnyLevel) {
+            jsonObj["level"] = level;
+        }
+
+        if (!mesh.empty()) {
+            jsonObj["mesh"] = mesh;
+        }
+
+        if (cameraUnits) {
+            jsonObj["cameraUnits"] = true;
+        }
+
+        if (lamp) {
+            jsonObj["lamp"] = true;
+        }
+
+        if (!sprite.empty()) {
+            jsonObj["sprite"] = sprite;
         }
 
         return true;
@@ -119,6 +145,63 @@ namespace RT64 {
 
             if (expandedHeader) {
                 ImGui::Indent();
+                ImGui::InputInt("Level (-1 outside missions, -2 all, -3 briefing room, -4 hangar)", &presetIt->second.level);
+
+                // RS64: attach to a model part; positions become that part's model space (no spheres or gizmo yet).
+                std::string &mesh = presetIt->second.mesh;
+                char meshText[512];
+                strncpy(meshText, mesh.c_str(), sizeof(meshText) - 1);
+                meshText[sizeof(meshText) - 1] = '\0';
+                if (ImGui::InputText("Mesh (empty = level space)", meshText, sizeof(meshText))) {
+                    mesh = meshText;
+                }
+
+                if (ImGui::BeginCombo("Pick a mesh drawn now", nullptr, ImGuiComboFlags_NoPreview)) {
+                    for (const std::string &key : seenMeshes) {
+                        if (ImGui::Selectable(key.c_str(), key == mesh)) {
+                            mesh = key;
+                            presetIt->second.level = PresetLights::AnyLevel;
+                        }
+                    }
+
+                    ImGui::EndCombo();
+                }
+
+                // RS64: effect sprites (fire, smoke, explosions) by texture key; each key in the picker is drawn in its sprite's colour.
+                std::string &sprite = presetIt->second.sprite;
+                char spriteText[512];
+                strncpy(spriteText, sprite.c_str(), sizeof(spriteText) - 1);
+                spriteText[sizeof(spriteText) - 1] = '\0';
+                if (ImGui::InputText("Sprite (spr: keys, '|' between)", spriteText, sizeof(spriteText))) {
+                    sprite = spriteText;
+                }
+
+                if (ImGui::BeginCombo("Add a sprite drawn now", nullptr, ImGuiComboFlags_NoPreview)) {
+                    for (const auto &[key, prim] : seenSprites) {
+                        const ImVec4 colour((prim >> 24) / 255.0f, ((prim >> 16) & 0xFF) / 255.0f, ((prim >> 8) & 0xFF) / 255.0f, 1.0f);
+                        ImGui::PushStyleColor(ImGuiCol_Text, colour);
+                        if (ImGui::Selectable(key.c_str(), PresetLights::meshMatches(sprite, key))) {
+                            sprite = sprite.empty() ? key : (sprite + "|" + key);
+                            presetIt->second.level = PresetLights::AnyLevel;
+                        }
+
+                        ImGui::PopStyleColor();
+                    }
+
+                    ImGui::EndCombo();
+                }
+
+                // The frame's Im3d view is one space: a mesh preset's spheres show while it is picked and its part is drawn (meshViewValid);
+                // level presets' spheres hide while a mesh preset is picked.
+                const bool meshScoped = !mesh.empty();
+                const bool pickedHere = (presetIt->first == selectedPresetName);
+                const auto picked = library.presetMap.find(selectedPresetName);
+                const bool meshPicked = (picked != library.presetMap.end()) && !picked->second.mesh.empty();
+                const bool spheresHidden = !sprite.empty() || (meshScoped ? !(pickedHere && meshViewValid) : meshPicked);
+                ImGui::BeginDisabled(!meshScoped);
+                ImGui::Checkbox("Radius in camera units", &presetIt->second.cameraUnits);
+                ImGui::Checkbox("Follows the game's blinking lamp", &presetIt->second.lamp);
+                ImGui::EndDisabled();
 
                 Im3d::Ray cursorRay(appData.m_cursorRayOrigin, appData.m_cursorRayDirection);
                 for (auto &lightIt : presetIt->second.lightMap) {
@@ -136,7 +219,7 @@ namespace RT64 {
                     Im3d::SetColor(lightColor);
 
                     float radius = Im3d::GetContext().pixelsToWorldSize(lightPos, appData.m_viewportSize.y * SphereScale);
-                    if (Im3d::Intersects(cursorRay, Im3d::Sphere(lightPos, radius))) {
+                    if (!spheresHidden && Im3d::Intersects(cursorRay, Im3d::Sphere(lightPos, radius))) {
                         Im3d::SetAlpha(SphereHighlightAlpha);
                         if (ImGui::IsMouseClicked(0)) {
                             selectedPresetName = presetIt->first;
@@ -152,7 +235,10 @@ namespace RT64 {
                         Im3d::SetAlpha(SphereAlpha);
                     }
 
-                    Im3d::DrawSphereFilled(lightPos, radius);
+                    if (!spheresHidden) {
+                        Im3d::DrawSphereFilled(lightPos, radius);
+                    }
+
                     Im3d::SetAlpha(1.0f);
 
                     // ImGui
@@ -225,7 +311,8 @@ namespace RT64 {
                     std::string newLightName = generateLightName("point_00");
                     lightMap[newLightName] = PresetLights::Light();
                     auto &desc = lightMap[newLightName].description;
-                    const float DistanceFromView = -150.0f;
+                    // RS64: in front of the camera (Im3d's view direction is forward); two terrain cells in map space.
+                    const float DistanceFromView = 1000.0f;
                     hlslpp::float3 viewPos = { appData.m_viewOrigin.x, appData.m_viewOrigin.y, appData.m_viewOrigin.z };
                     hlslpp::float3 viewDir = { appData.m_viewDirection.x, appData.m_viewDirection.y, appData.m_viewDirection.z };
                     desc.position = viewPos + viewDir * DistanceFromView;
@@ -274,7 +361,9 @@ namespace RT64 {
         Im3d::PopEnableSorting();
 
         // Bottom section.
-        inspectBottom(library, window);
+        PresetLights newPreset;
+        newPreset.level = currentLevel;
+        inspectBottom(library, window, newPreset);
     }
 
     void PresetLightsLibraryInspector::inspectSelection(PresetLightsLibrary &library) {
@@ -323,6 +412,21 @@ namespace RT64 {
 
         const int SphereDetail = 64;
         ImGui::DragFloat3("Position", &lightDesc.position.x);
+
+        // RS64: the game camera can't fly to a light, so bring the light in front of it (where New places one). A mesh light needs its part on
+        // screen (the view is then that part's model space).
+        const bool inView = presetIt->second.mesh.empty() || meshViewValid;
+        if (inView) {
+            ImGui::SameLine();
+        }
+
+        if (inView && ImGui::Button("Move to view")) {
+            const float DistanceFromView = 1000.0f;
+            const hlslpp::float3 viewPos = { appData.m_viewOrigin.x, appData.m_viewOrigin.y, appData.m_viewOrigin.z };
+            const hlslpp::float3 viewDir = { appData.m_viewDirection.x, appData.m_viewDirection.y, appData.m_viewDirection.z };
+            lightDesc.position = viewPos + viewDir * DistanceFromView;
+        }
+
         ImGui::DragFloat3("Direction", &lightDesc.direction.x);
         ImGui::DragFloat3("Diffuse color", &lightDesc.diffuseColor.x, 0.01f);
         ImGui::DragFloat("Attenuation radius", &lightDesc.attenuationRadius, 1.0f, 0.0f, FLT_MAX);
@@ -341,7 +445,7 @@ namespace RT64 {
         if (skipGizmos) {
             skipGizmos = false;
         }
-        else {
+        else if (inView) {
             Im3d::SetAlpha(1.0f);
             Im3d::GizmoTranslation("GizmoPosition", &lightDesc.position.x);
 

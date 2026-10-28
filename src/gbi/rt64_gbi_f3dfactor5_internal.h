@@ -122,6 +122,8 @@ namespace RT64 {
         void setFillColor_overridden(State *state, DisplayList **dl);
         void fillRect_logged(State *state, DisplayList **dl);  // fillRect_op02_aware stays in core (op_02-coupled)
         void texrectLLE_guarded(State *state, DisplayList **dl);
+        // RS64 light for a texture rectangle drawn as a 3D glow (the game's blinking lamps): centre and half width in native pixels.
+        void f5_lamp_light(State *state, float cx, float cy, float halfW);
         void texrectFlipLLE_guarded(State *state, DisplayList **dl);
         void loadTLUT_guarded(State *state, DisplayList **dl);
         void loadTile_guarded(State *state, DisplayList **dl);

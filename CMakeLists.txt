@@ -445,6 +445,7 @@ set (SOURCES
     "${PROJECT_SOURCE_DIR}/src/hle/rt64_rdp.cpp"
     "${PROJECT_SOURCE_DIR}/src/hle/rt64_rdp_tmem.cpp"
     "${PROJECT_SOURCE_DIR}/src/hle/rt64_rigid_body.cpp"
+    "${PROJECT_SOURCE_DIR}/src/hle/rt64_rs64_mcp.cpp"
     "${PROJECT_SOURCE_DIR}/src/hle/rt64_rsp.cpp"
     "${PROJECT_SOURCE_DIR}/src/hle/rt64_state.cpp"
     "${PROJECT_SOURCE_DIR}/src/hle/rt64_vi.cpp"

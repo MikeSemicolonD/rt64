@@ -26,6 +26,8 @@ namespace interop {
         float4 lightPosRadius[RS64_MAX_LIGHTS];
         float4 lightColor[RS64_MAX_LIGHTS];
         float4 lightParams[RS64_MAX_LIGHTS];
+        // xyz: the spot beam direction (view space); lightParams.zw hold its max / falloff cosines (RT64's PointLight convention).
+        float4 lightSpot[RS64_MAX_LIGHTS];
     };
 #ifdef HLSL_CPU
 };
