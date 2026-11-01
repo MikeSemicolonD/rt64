@@ -303,8 +303,6 @@ namespace RT64 {
                 std::vector<uint32_t> frames;
             };
             std::vector<Anim> anims;
-            // Water and shore cells, drawn again as the flat water mesh.
-            uint32_t waterCells = 0;
             // Per frame: each chunk's LOD (0xFF culled) then the per-LOD chunk lists (gChunks); lodBase/lodCount index the lists.
             std::unique_ptr<RenderBuffer> chunks;
             uint32_t chunksCapacity = 0;

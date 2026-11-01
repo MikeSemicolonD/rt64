@@ -3855,7 +3855,6 @@ namespace RT64 {
         g.set->setBuffer(g.set->gTexels, g.texels.get(), g.texelsBytes, RenderBufferStructuredView(sizeof(uint32_t)));
         g.version = m.version;
         const size_t waterCells = std::count(m.waterKind.begin(), m.waterKind.end(), uint8_t(1)), shoreCells = std::count(m.waterKind.begin(), m.waterKind.end(), uint8_t(2));
-        g.waterCells = uint32_t(waterCells + shoreCells);
         std::fprintf(stderr, "[static-terrain] gpu map %ux%u level %u version %llu: %u texture layers (%zu animated), %zu water and %zu shore cells\n", m.width, m.height,
             m.level, (unsigned long long)m.version, g.layers, g.anims.size(), waterCells, shoreCells);
     }
@@ -3940,8 +3939,9 @@ namespace RT64 {
             g.colors->unmap();
         }
 
-        // Chunk culling and LOD: a chunk is dropped when its box lies past one clip plane (with a wide side guard for the widescreen expansion);
-        // otherwise its LOD grows by one per doubling of view depth past ROGUESQ_F5_STATIC_TERRAIN_LOD_NEAR cells (0 = full detail everywhere).
+        // Chunk culling and LOD: a chunk is dropped when its box lies behind the camera or past a side plane (with a wide side guard for the widescreen
+        // expansion), never for distance: past the far plane the depth clamp hides it per pixel, so a distant chunk only drops to a coarser LOD.
+        // Its LOD grows by one per doubling of view depth past ROGUESQ_F5_STATIC_TERRAIN_LOD_NEAR cells (0 = full detail everywhere).
         static const float s_lodNear = [] {
             const char *v = std::getenv("ROGUESQ_F5_STATIC_TERRAIN_LOD_NEAR");
             return (v && *v) ? float(std::atof(v)) : 8.0f;
@@ -3974,16 +3974,15 @@ namespace RT64 {
                 const float z0 = (float(cz * RS64TerrainChunkCells) - rs64TerrainCB.originZ) * 512.0f + rs64TerrainCB.offsetZ;
                 const float span = float(RS64TerrainChunkCells) * 512.0f;
                 const float y0 = std::min(float(g.chunkMinH[k]), float(rs64TerrainFrame.waterLevel) * 16.0f) * hs, y1 = std::max(float(g.chunkMaxH[k]), float(rs64TerrainFrame.waterLevel) * 16.0f) * hs;
-                int outside[6] = {};
+                int outside[5] = {};
                 for (int c = 0; c < 8; ++c) {
                     const hlslpp::float4 p = hlslpp::mul(hlslpp::float4(x0 + ((c & 1) ? span : 0.0f), (c & 2) ? y1 : y0, z0 + ((c & 4) ? span : 0.0f), 1.0f), rs64TerrainMvp);
-                    const float px = p.x, py = p.y, pz = p.z, pw = p.w;
+                    const float px = p.x, py = p.y, pw = p.w;
                     outside[0] += (pw <= 0.0f);
                     outside[1] += (px > Guard * pw);
                     outside[2] += (px < -Guard * pw);
                     outside[3] += (py > Guard * pw);
                     outside[4] += (py < -Guard * pw);
-                    outside[5] += (pz > pw);
                 }
 
                 if (std::any_of(std::begin(outside), std::end(outside), [](int n) { return n == 8; })) {
@@ -4057,13 +4056,12 @@ namespace RT64 {
             worker->commandList->drawInstanced(quads * quads * 6, g.lodCount[l], 0, 0);
         }
 
-        if (g.waterCells > 0) {
-            cb.water = 1;
-            cb.waterMargin = uint32_t(rs64lights::TerrainWaterMargin);
-            worker->commandList->setPipeline((packs ? shaderLibrary->rs64TerrainWaterPacks : shaderLibrary->rs64TerrainWater).pipeline.get());
-            worker->commandList->setGraphicsPushConstants(0, &cb);
-            worker->commandList->drawInstanced((cb.mapWidth + 2 * cb.waterMargin) * (cb.mapHeight + 2 * cb.waterMargin) * 6, 1, 0, 0);
-        }
+        // Runs on every level: besides any water it carries the map's edge cells out past the edge, so a land-only map fogs out instead of ending in a void.
+        cb.water = 1;
+        cb.waterMargin = uint32_t(rs64lights::TerrainWaterMargin);
+        worker->commandList->setPipeline((packs ? shaderLibrary->rs64TerrainWaterPacks : shaderLibrary->rs64TerrainWater).pipeline.get());
+        worker->commandList->setGraphicsPushConstants(0, &cb);
+        worker->commandList->drawInstanced((cb.mapWidth + 2 * cb.waterMargin) * (cb.mapHeight + 2 * cb.waterMargin) * 6, 1, 0, 0);
     }
 
     void FramebufferRenderer::recordRS64TerrainBLAS(RenderWorker *worker) {
