@@ -1245,7 +1245,7 @@ namespace RT64 {
                     sun.fromModel = true;
                     wl.rs64PresetScene = PresetLights::Hangar;
                 }
-                // The briefing room's hologram and table-ring lights are light presets (mods/model-lights, level -3); the preview image's glow
+                // The briefing room's hologram and table-ring lights are light presets (the built-in src/video/default_lights.json, level -3); the preview image's glow
                 // follows the image, so it stays here.
                 if (rs64lights::config().enabled && (menu == rs64lights::MenuSceneMissionSelect)) {
                     auto& lights = wl.rs64Lights;

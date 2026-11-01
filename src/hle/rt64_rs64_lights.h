@@ -23,7 +23,7 @@ namespace rs64lights {
     // KindLampMark: not a light, where one of the game's blinking lamps (a 2D texture rectangle) is drawn this frame, for lamp presets.
     enum Kind : uint8_t { KindNone = 0, KindSprite = 1, KindLaser = 2, KindMesh = 3, KindLampMark = 4 };
 
-    // Default light ranks for the 32 slots, higher kept first; a light preset's "priority" overrides them (model-lights: engine exhausts 7,
+    // Default light ranks for the 32 slots, higher kept first; a light preset's "priority" overrides them (the built-in presets: engine exhausts 7,
     // the pickup 6, the torpedo 1, lasers 0).
     constexpr int PriorityLaser = 0;
     constexpr int PriorityLevel = 2;
@@ -1795,7 +1795,7 @@ namespace rs64lights {
     }
 
     // Where the briefing room's preview-image glow sits, in its fixed camera space (the hologram, the shared room origin), and its reach and
-    // falloff; the hologram's own light is the model-lights preset briefing_hologram at the same place.
+    // falloff; the hologram's own light is the built-in preset briefing_hologram at the same place.
     inline const float* menuHoloPos() {
         static const float v[3] = { 0.0f, 22.0f, 11068.0f };
         return v;
