@@ -189,9 +189,9 @@ float3 rs64CosineDir(float3 n, uint i, uint count, float rot) {
 
 // Sun/light visibility against drawn casters (0x01), static terrain (0x02) and cutouts (0x04, alpha-tested) in one traversal. Back faces are culled
 // for terrain only (the other instances disable culling): a receiver below the static surface sees its underside. instanceId: 0 drawn, 1 terrain, 2 cutout.
-bool rs64SunHit(RayDesc ray, uint cutoutCount, out float hitT, out uint instanceId) {
+bool rs64SunHitMasked(RayDesc ray, uint cutoutCount, uint mask, out float hitT, out uint instanceId) {
     RayQuery<RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH | RAY_FLAG_SKIP_PROCEDURAL_PRIMITIVES> q;
-    q.TraceRayInline(gScene, RAY_FLAG_CULL_BACK_FACING_TRIANGLES, (cutoutCount > 0) ? 0x07 : 0x03, ray);
+    q.TraceRayInline(gScene, RAY_FLAG_CULL_BACK_FACING_TRIANGLES, mask & ((cutoutCount > 0) ? 0x07u : 0x03u), ray);
     while (q.Proceed()) {
         if ((q.CandidateType() == CANDIDATE_NON_OPAQUE_TRIANGLE) && rs64CutoutBlocks(q.CandidatePrimitiveIndex(), q.CandidateTriangleBarycentrics(), cutoutCount)) {
             q.CommitNonOpaqueTriangleHit();
@@ -202,4 +202,25 @@ bool rs64SunHit(RayDesc ray, uint cutoutCount, out float hitT, out uint instance
     instanceId = hit ? q.CommittedInstanceID() : 0;
     gRs64HitInstance = instanceId;
     return hit;
+}
+
+bool rs64SunHit(RayDesc ray, uint cutoutCount, out float hitT, out uint instanceId) {
+    return rs64SunHitMasked(ray, cutoutCount, 0xFFu, hitT, instanceId);
+}
+
+// For a static terrain receiver: the terrain itself blocks only from terrainSkip along the ray. The coarse heightfield's own bumps a few metres off
+// shadowed it in saw-tooth spikes under a low sun; mountains across a valley and every other caster still shadow it.
+bool rs64SunHitTerrainReceiver(RayDesc ray, uint cutoutCount, float terrainSkip, out float hitT, out uint instanceId) {
+    float t0;
+    uint id0;
+    const bool other = rs64SunHitMasked(ray, cutoutCount, 0x05u, t0, id0);
+    RayDesc distant = ray;
+    distant.TMin = max(ray.TMin, terrainSkip);
+    float t1 = ray.TMax;
+    uint id1 = 0;
+    const bool terrain = (distant.TMin < distant.TMax) && rs64SunHitMasked(distant, cutoutCount, 0x02u, t1, id1);
+    hitT = other ? (terrain ? min(t0, t1) : t0) : t1;
+    instanceId = (other && (!terrain || (t0 <= t1))) ? id0 : id1;
+    gRs64HitInstance = instanceId;
+    return other || terrain;
 }

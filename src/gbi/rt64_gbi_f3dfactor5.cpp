@@ -143,9 +143,12 @@ namespace RT64 {
         static uint32_t s_regrid_cur = 0;
         // Interpolation id of the static terrain pass's anchor (the whole map); the 0x9 namespace is its alone.
         static constexpr uint32_t F5_TERRAIN_ANCHOR_ID = 0x90000001u;
-        // The anchor carries the terrain root's regrid generation, so it stops pairing on the same uncompensated snaps the root does.
-        static uint32_t f5_terrain_anchor_id(uint32_t gen) {
-            return F5_TERRAIN_ANCHOR_ID | ((gen & 0xFu) << 20);
+        // The anchor's generation: bumped when the map's placement in the anchor's frame (origin * 512 - offset) changes with no rebase to carry
+        // the previous transform over (a cut, a new root node, a snap before k is learned), so the map never blends across the jump.
+        static uint32_t s_anchor_gen = 0;
+        static uint64_t s_rebase_task = ~0ull;
+        static uint32_t f5_terrain_anchor_id() {
+            return F5_TERRAIN_ANCHOR_ID | ((s_anchor_gen & 0xFu) << 20);
         }
         // A root node whose shift L just dropped to 0, and the dropped L; taken by the id stamp of the same load.
         struct F5Rebase { uint32_t node = 0; float x = 0, z = 0; };
@@ -155,10 +158,12 @@ namespace RT64 {
         // Inverse of this frame's (compensated) terrain-root transform: maps camera space to a world-stable frame for matching particles.
         static hlslpp::float4x4 s_world_from_view;
         static uint64_t s_world_task = ~0ull;
+        // The camera for predicting world-fixed faces (f5_baked_face_id): this task's compensated root transform and the last task's inverse.
+        static hlslpp::float4x4 s_cam_view_from_world, s_cam_world_from_view_prev;
+        static uint64_t s_cam_task = ~0ull, s_cam_prev_task = ~0ull, s_cam_jump_task = ~0ull;
         static int32_t s_mv_off_x = 0, s_mv_off_z = 0;
         static float s_root_x = 0.0f, s_root_z = 0.0f;
         static bool s_root_valid = false;
-        static uint32_t s_root_gen = 0;
         // This frame's terrain root transform still has the previous grid although its node moved (f5_regrid_after_load).
         static bool s_root_lag = false;
         static uint64_t s_root_lag_task = ~0ull;
@@ -299,11 +304,27 @@ namespace RT64 {
             s_root_x = e.x;
             s_root_z = e.z;
             s_root_valid = true;
-            s_root_gen = e.gen;
             if ((e.k > 0.0f) || (e.gen != 0)) {
                 s_world_from_view = hlslpp::inverse(m);
                 s_world_task = state->displayListCounter;
             }
+
+            // The camera for predicting world-fixed faces, published from the first frame; a new root, a generation change or a re-center the
+            // compensation did not absorb breaks its continuity for one task.
+            static uint32_t s_camNode = 0, s_camGen = 0;
+            if (s_cam_task != state->displayListCounter) {
+                s_cam_world_from_view_prev = hlslpp::inverse(s_cam_view_from_world);
+                s_cam_prev_task = s_cam_task;
+                if ((it->first != s_camNode) || (e.gen != s_camGen) || (e.moved && !(e.k > 0.0f))) {
+                    s_cam_jump_task = state->displayListCounter;
+                }
+
+                s_camNode = it->first;
+                s_camGen = e.gen;
+            }
+
+            s_cam_view_from_world = m;
+            s_cam_task = state->displayListCounter;
         }
         // Sprites drawn per node id last frame. A node drawing many sprites is a particle system (smoke trail) whose puffs are baked per frame; tweening its transform slides them, so it gets no id.
         static std::unordered_map<uint32_t, uint32_t> s_sprites_cur, s_sprites_prev;
@@ -592,8 +613,10 @@ namespace RT64 {
             static std::unordered_map<uint32_t, uint32_t> s_ord;
             static std::unordered_map<uint64_t, size_t> s_prevBySlot;
             static uint64_t s_task = ~0ull;
+            static uint64_t s_prevTask = ~0ull;
             static uint32_t s_next = 1;
             if (state->displayListCounter != s_task) {
+                s_prevTask = s_task;
                 static const bool s_lgf = env_on("ROGUESQ_LOG_INTERP_PAIR", false);
                 if (s_lgf && !s_cur.empty()) {
                     std::map<uint32_t, int> perTex;
@@ -653,10 +676,27 @@ namespace RT64 {
             const uint32_t tex = state->rdp->texture.address & 0xFFFFFFu;
             const uint32_t ord = s_ord[tex]++;
             Face cur{ tex, (uint32_t)n, 0, ord, world, false, (float)p.x, (float)p.y, (float)p.z, 0, 0, 0, r, (float)pa.x, (float)pa.y, (float)pa.z, 0, 0, 0 };
+            // A glint on a structure moves with the camera alone: last frame's face carried through last frame's camera into this one lands where it is
+            // now. Its own velocity is zero right after a miss, so in a long camera sweep that prediction alone missed every frame (bursts of 10+).
+            // Not across a rebase, whose root transform drops its folded shift.
+            const uint64_t task = state->displayListCounter;
+            const bool camPred = !world && (s_cam_task == task) && (s_cam_prev_task == s_prevTask) && (s_cam_jump_task != task) && (s_rebase_task != task);
+            auto carry = [&](float x, float y, float z) {
+                return hlslpp::mul(hlslpp::mul(hlslpp::float4(x, y, z, 1.0f), s_cam_world_from_view_prev), s_cam_view_from_world);
+            };
             auto distTo = [&](const Face& f) {
                 const float dx = f.x + f.vx - cur.x, dy = f.y + f.vy - cur.y, dz = f.z + f.vz - cur.z;
                 const float ex = f.ax + f.avx - cur.ax, ey = f.ay + f.avy - cur.ay, ez = f.az + f.avz - cur.az;
-                return std::min(std::sqrt(dx * dx + dy * dy + dz * dz), std::sqrt(ex * ex + ey * ey + ez * ez));
+                float d = std::min(std::sqrt(dx * dx + dy * dy + dz * dz), std::sqrt(ex * ex + ey * ey + ez * ez));
+                if (camPred) {
+                    const hlslpp::float4 c = carry(f.x, f.y, f.z);
+                    const hlslpp::float4 ca = carry(f.ax, f.ay, f.az);
+                    const float cx2 = (float)c.x - cur.x, cy2 = (float)c.y - cur.y, cz2 = (float)c.z - cur.z;
+                    const float ax2 = (float)ca.x - cur.ax, ay2 = (float)ca.y - cur.ay, az2 = (float)ca.z - cur.az;
+                    d = std::min(d, std::min(std::sqrt(cx2 * cx2 + cy2 * cy2 + cz2 * cz2), std::sqrt(ax2 * ax2 + ay2 * ay2 + az2 * az2)));
+                }
+
+                return d;
             };
             constexpr float MatchRadius = 1.5f;
             constexpr float SlotRadius = 3.0f;
@@ -706,7 +746,7 @@ namespace RT64 {
                         if ((nd < 0.0f) || (d < nd)) { nd = d; nr = std::max(r, f.r); }
                     }
                     static int s_nl = 0;
-                    if ((++s_nl % 25) == 1) std::fprintf(stderr, "[baked-miss] tex=%06X n=%d world=%d sameTex=%d otherFrame=%d usedCands=%d nearest/r=%.2f r=%.1f prev=%zu\n", tex, n, (int)world, sameTex, otherFrame, used, (nd >= 0.0f) ? nd / nr : -1.0f, r, s_prev.size());
+                    if ((++s_nl % 25) == 1) std::fprintf(stderr, "[baked-miss] tex=%06X n=%d world=%d cam=%d sameTex=%d otherFrame=%d usedCands=%d nearest/r=%.2f r=%.1f prev=%zu\n", tex, n, (int)world, (int)camPred, sameTex, otherFrame, used, (nd >= 0.0f) ? nd / nr : -1.0f, r, s_prev.size());
                 }
             }
             if (s_cur.size() < 4096) s_cur.push_back(cur);
@@ -2403,6 +2443,7 @@ namespace RT64 {
             static int32_t s_ox = 0, s_oz = 0;
             static bool s_haveOrigin = false;
             static uint64_t s_originTask = ~0ull;
+            static bool s_lagOrigin = false;
             const uint8_t* ram = state->RDRAM;
             if (state->displayListCounter != s_originTask) {
                 s_originTask = state->displayListCounter;
@@ -2413,8 +2454,10 @@ namespace RT64 {
                 // On a frame whose root transform still has the previous grid (s_root_lag), the origin is the previous frame's node position.
                 static float s_prevRootX = 0.0f, s_prevRootZ = 0.0f;
                 static bool s_havePrevRoot = false;
+                s_lagOrigin = false;
                 if (s_root_valid) {
                     const bool lag = s_havePrevRoot && s_root_lag && (s_root_lag_task == state->displayListCounter);
+                    s_lagOrigin = lag;
                     s_ox = (int32_t)std::floor((lag ? s_prevRootX : s_root_x) * 0.5f);
                     s_oz = (int32_t)std::floor((lag ? s_prevRootZ : s_root_z) * 0.5f);
                     s_prevRootX = s_root_x;
@@ -2429,8 +2472,9 @@ namespace RT64 {
                 s_haveOrigin = true;
             }
             const int32_t rx = (int16_t)(rec[4].w0 >> 16), rz = (int16_t)(rec[4].w1 >> 16);
-            // A record of a unique tile gives the grid the root transform is in (records lag the node with it).
-            if (!flat && (rx % rs64lights::TerrainTileSpan == 0) && (rz % rs64lights::TerrainTileSpan == 0)) {
+            // A record of a unique tile gives the grid the root transform is in (records lag the node with it). Not on a lag frame: the origin and the
+            // anchor's offset are both kept in the previous grid there, and a tile's new-grid origin put the whole map a cell off for that frame.
+            if (!flat && !s_lagOrigin && (rx % rs64lights::TerrainTileSpan == 0) && (rz % rs64lights::TerrainTileSpan == 0)) {
                 const int64_t rel = (int64_t)rec[1].w0 - 5 - (int64_t)s_terrain_tab;
                 const int64_t t = rel / 0x1E;
                 if ((rel >= 0) && (rel % 0x1E == 0) && (t < (int64_t)m.tileCell.size()) && (m.tileCell[t] >= 0)) {
@@ -2635,8 +2679,16 @@ namespace RT64 {
                     tmp[k].z = (int16_t)z;
                     tmp[k].color.r = tmp[k].color.g = tmp[k].color.b = tmp[k].color.a = 0xFF;
                 }
+                static int32_t s_lastShiftX = INT32_MIN, s_lastShiftZ = INT32_MIN;
+                const int32_t shiftX = ox * rs64lights::TerrainTileSpan - s_mv_off_x, shiftZ = oz * rs64lights::TerrainTileSpan - s_mv_off_z;
+                if (((shiftX != s_lastShiftX) || (shiftZ != s_lastShiftZ)) && (s_rebase_task != state->displayListCounter)) {
+                    s_anchor_gen = (s_anchor_gen + 1) & 0xFu;
+                }
+
+                s_lastShiftX = shiftX;
+                s_lastShiftZ = shiftZ;
                 // The map's own interpolation id: under the terrain root's id it went unpaired whenever that id changed generation.
-                state->rsp->matrixId(f5_terrain_anchor_id(s_root_gen), /*push*/true, /*proj*/false, /*decompose*/true,
+                state->rsp->matrixId(f5_terrain_anchor_id(), /*push*/true, /*proj*/false, /*decompose*/true,
                     G_EX_COMPONENT_INTERPOLATE, G_EX_COMPONENT_INTERPOLATE, G_EX_COMPONENT_INTERPOLATE, G_EX_COMPONENT_INTERPOLATE, G_EX_COMPONENT_INTERPOLATE,
                     G_EX_COMPONENT_SKIP, G_EX_COMPONENT_SKIP, G_EX_COMPONENT_AUTO, G_EX_COMPONENT_AUTO,
                     G_EX_ORDER_LINEAR, G_EX_ASPECT_AUTO, G_EX_EDIT_NONE, /*idIsAddress*/false, /*editGroup*/false);
@@ -2906,7 +2958,8 @@ namespace RT64 {
                           if (stamp && (s_rebase.node == nodePtr)) {
                               auto& rebase = state->ext.workloadQueue->workloads[state->ext.workloadQueue->writeCursor].rs64Rebase;
                               rebase.push_back({ id, s_rebase.x, s_rebase.z });
-                              rebase.push_back({ f5_terrain_anchor_id(id >> 24), s_rebase.x, s_rebase.z });
+                              rebase.push_back({ f5_terrain_anchor_id(), s_rebase.x, s_rebase.z });
+                              s_rebase_task = state->displayListCounter;
                               s_rebase.node = 0;
                           }
                           // ROGUESQ_F5_TERRAIN_ID: terrain tiles are a scrolling pool â€” the node ptr is

@@ -129,7 +129,26 @@ struct RS64Receiver {
     bool water;
     // How much the drawn water covers the pixel: 1 on the water surface, fading across a shore as the water's own alpha does.
     float waterCover;
+    // How much terrain's own sun terminator applies: none under water, and fading out on cliffs.
+    float terminatorWeight;
+    // On static terrain, how far along a sun ray the terrain itself starts to block (rs64SunHitTerrainReceiver); 0 elsewhere.
+    float terrainSkip;
 };
+
+// The terrain's self-shadow skip, in terrain cells.
+static const float kTerrainSelfSkipCells = 1.0f;
+
+bool rs64ReceiverSunHit(RS64Receiver rc, RayDesc ray, out float hitT, out uint id) {
+    if (rc.terrainSkip > 0.0f) {
+        return rs64SunHitTerrainReceiver(ray, gShadows.cutoutDrawCount, rc.terrainSkip, hitT, id);
+    }
+
+    return rs64SunHit(ray, gShadows.cutoutDrawCount, hitT, id);
+}
+
+// A heightfield samples a cliff with a few stretched rows of cells: its smooth normal swings column by column, and with the sun skimming the face the
+// terminator drew long saw-tooth spikes down it. Cliffs keep the game's baked shading and cast shadows; the terminator fades in on slopes up to this.
+static const float2 kTerminatorSlope = float2(0.3f, 0.6f);
 
 // View position from depth, facet normal from its derivatives (ddx/ddy stay in uniform control flow), smooth heightfield normal on static terrain.
 RS64Receiver rs64Receiver(float2 px) {
@@ -148,6 +167,8 @@ RS64Receiver rs64Receiver(float2 px) {
     r.terrain = false;
     r.water = false;
     r.waterCover = 0.0f;
+    r.terminatorWeight = 0.0f;
+    r.terrainSkip = 0.0f;
     if (!r.sky) {
         float3 nT;
         r.terrain = (gShadows.softParams.w != 0.0f) && rs64TerrainNormal(r.p, r.dist, gShadows.terrainParams.x, nT);
@@ -162,6 +183,8 @@ RS64Receiver rs64Receiver(float2 px) {
             const float3 up = (dot(gRs64TerrainUp, nT) < 0.0f) ? -gRs64TerrainUp : gRs64TerrainUp;
             const float3 nS = normalize(lerp(nT, up, r.waterCover));
             r.n = (dot(nS, r.p) > 0.0f) ? -nS : nS;
+            r.terminatorWeight = (1.0f - r.waterCover) * smoothstep(kTerminatorSlope.x, kTerminatorSlope.y, abs(dot(nT, up)));
+            r.terrainSkip = kTerrainSelfSkipCells * gRs64TerrainCell;
         }
     }
     return r;
@@ -237,7 +260,15 @@ RS64TraceOut PSMain(in float4 pos : SV_Position, in float2 uv : TEXCOORD0) {
         }
         float t;
         uint id;
-        if (rs64SunHit(r, gShadows.cutoutDrawCount, t, id)) {
+        bool rayHit;
+        if (isSun) {
+            rayHit = rs64ReceiverSunHit(rc, r, t, id);
+        }
+        else {
+            rayHit = rs64SunHit(r, gShadows.cutoutDrawCount, t, id);
+        }
+
+        if (rayHit) {
             if (isSun) {
                 blocked++;
                 hitSum += t;
@@ -263,8 +294,7 @@ RS64TraceOut PSMain(in float4 pos : SV_Position, in float2 uv : TEXCOORD0) {
     float shadow = 0.0f;
     float radius = 0.0f;
     // Water keeps cast shadows but not the terminator: a flat sheet under a low sun would darken all over.
-    // A shore takes the terminator as much as its ground shows through the water.
-    const bool terminator = rc.terrain && (rc.waterCover < 1.0f) && (gShadows.softParams.w > 1.5f) && ((features & 1u) != 0u) && !deck;
+    const bool terminator = rc.terrain && (rc.terminatorWeight > 0.0f) && (gShadows.softParams.w > 1.5f) && ((features & 1u) != 0u) && !deck;
     if (sunCount > 0) {
         const float meanHitT = (blocked > 0) ? (hitSum / float(blocked)) : 0.0f;
         radius = (meanHitT > 0.0f) ? clamp(meanHitT * gShadows.softParams.x * gShadows.softParams.y / dist, 0.0f, gShadows.softParams.z) : 0.0f;
@@ -273,12 +303,12 @@ RS64TraceOut PSMain(in float4 pos : SV_Position, in float2 uv : TEXCOORD0) {
         const float grazeFade = saturate((ndl - 0.05f) / 0.25f);
         shadow = grazeFade * blockedFrac;
         if (terminator) {
-            shadow = lerp(1.0f - (1.0f - blockedFrac) * saturate(ndl / 0.25f), shadow, rc.waterCover);
+            shadow = lerp(shadow, 1.0f - (1.0f - blockedFrac) * saturate(ndl / 0.25f), rc.terminatorWeight);
         }
     }
     else if (terminator && (ndl <= 0.0f)) {
         // Terrain turned away from the sun is in its own shadow.
-        shadow = 1.0f - rc.waterCover;
+        shadow = rc.terminatorWeight;
     }
     if (aoCount > 0) {
         ao /= float(aoCount);
@@ -407,13 +437,13 @@ float4 PSMain(in float4 pos : SV_Position, in float2 uv : TEXCOORD0) : SV_TARGET
     }
     const float3 L = gShadows.sunDir.xyz;
     const float ndl = dot(rc.n, L);
-    // Water keeps cast shadows but not the terminator; a shore takes it as much as its ground shows through.
-    const bool terminator = rc.terrain && (rc.waterCover < 1.0f) && (gShadows.softParams.w > 1.5f);
+    // Water and cliffs keep cast shadows but not the terminator (RS64Receiver::terminatorWeight).
+    const bool terminator = rc.terrain && (rc.terminatorWeight > 0.0f) && (gShadows.softParams.w > 1.5f);
     // Terrain turned away from the sun is in its own shadow (debug: dark blue). Other faces keep their baked shading; tracing them only adds acne.
     if (ndl <= 0.0f) {
         if (terminator) {
             // Faded by the fog in front of it like the lit branch, or fogged-out islands and shore lips stayed fully dark.
-            const float fa = 1.0f - gShadows.strength * (1.0f - rc.waterCover) * (1.0f - rs64FogAlpha(rc.p));
+            const float fa = 1.0f - gShadows.strength * rc.terminatorWeight * (1.0f - rs64FogAlpha(rc.p));
             return debug ? float4(0.1f, 0.1f, 0.35f, 1.0f) : float4(fa, fa, fa, 1.0f);
         }
         return debug ? float4(0.5f, 0.5f, 0.5f, 1.0f) : float4(1.0f, 1.0f, 1.0f, 1.0f);
@@ -427,7 +457,7 @@ float4 PSMain(in float4 pos : SV_Position, in float2 uv : TEXCOORD0) : SV_TARGET
     ray.TMax = gShadows.sunTMax;
     float hitT;
     uint id;
-    bool hit = rs64SunHit(ray, gShadows.cutoutDrawCount, hitT, id);
+    bool hit = rs64ReceiverSunHit(rc, ray, hitT, id);
     bool casterHit = hit && (id != 1);
     // Debug 4 shows history hits in magenta (instance id 3).
     if (!hit && rs64HistoryBlocked(ray, hitT)) {
@@ -436,7 +466,7 @@ float4 PSMain(in float4 pos : SV_Position, in float2 uv : TEXCOORD0) : SV_TARGET
         gRs64HitInstance = 3;
     }
     const float castShadow = hit ? grazeFade : 0.0f;
-    const float shadow = terminator ? lerp(1.0f - (hit ? 0.0f : 1.0f) * saturate(ndl / 0.25f), castShadow, rc.waterCover) : castShadow;
+    const float shadow = terminator ? lerp(castShadow, 1.0f - (hit ? 0.0f : 1.0f) * saturate(ndl / 0.25f), rc.terminatorWeight) : castShadow;
     // Debug mode 2: hits closer than 2% of the view distance (surface self-hits) in red.
     if ((gShadows.debugMode == 2) && hit && (shadow > 0.0f) && (hitT < 0.02f * rc.dist)) {
         return float4(1.0f, 0.0f, 0.0f, 1.0f);

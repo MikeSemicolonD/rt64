@@ -27,6 +27,8 @@ static uint gRs64TerrainPrim = 0;
 static float gRs64TerrainY = 0.0f;
 // The map's vertical axis in camera space (a flat water surface's normal, either sign).
 static float3 gRs64TerrainUp = float3(0.0f, 1.0f, 0.0f);
+// One terrain cell (512 map units) in camera units, from the last hit's transform.
+static float gRs64TerrainCell = 0.0f;
 
 // Smooth heightfield normal (camera space) when the static terrain lies at this pixel's view distance (within window * dist); false for anything else.
 bool rs64TerrainNormal(float3 p, float dist, float window, out float3 n) {
@@ -51,6 +53,8 @@ bool rs64TerrainNormal(float3 p, float dist, float window, out float3 n) {
     const uint i2 = gTerrainIndices.Load((prim * 3 + 2) * 4);
     const float3 nm = rs64TerrainVertexNormal(i0) * (1.0f - bary.x - bary.y) + rs64TerrainVertexNormal(i1) * bary.x + rs64TerrainVertexNormal(i2) * bary.y;
     n = rs64CofactorNormal(q.CommittedObjectToWorld3x4(), nm);
-    gRs64TerrainUp = rs64CofactorNormal(q.CommittedObjectToWorld3x4(), float3(0.0f, 1.0f, 0.0f));
+    const float3x4 xf = q.CommittedObjectToWorld3x4();
+    gRs64TerrainUp = rs64CofactorNormal(xf, float3(0.0f, 1.0f, 0.0f));
+    gRs64TerrainCell = 512.0f * length(float3(xf[0].x, xf[1].x, xf[2].x));
     return true;
 }
