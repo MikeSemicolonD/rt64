@@ -6,7 +6,9 @@
 #include <unordered_set>
 #include "rt64_state.h"
 
+#ifdef RS64_MCP
 #include "rt64_rs64_mcp.h"
+#endif
 
 #include <cassert>
 #include <chrono>
@@ -2184,7 +2186,9 @@ namespace RT64 {
     }
     
     void State::updateScreen(const VI &newVI, bool fromEarlyPresent) {
+#ifdef RS64_MCP
         rs64mcp::drain(*this);
+#endif
 
         if (!fromEarlyPresent) {
             viTickCounter++;

@@ -445,7 +445,6 @@ set (SOURCES
     "${PROJECT_SOURCE_DIR}/src/hle/rt64_rdp.cpp"
     "${PROJECT_SOURCE_DIR}/src/hle/rt64_rdp_tmem.cpp"
     "${PROJECT_SOURCE_DIR}/src/hle/rt64_rigid_body.cpp"
-    "${PROJECT_SOURCE_DIR}/src/hle/rt64_rs64_mcp.cpp"
     "${PROJECT_SOURCE_DIR}/src/hle/rt64_rsp.cpp"
     "${PROJECT_SOURCE_DIR}/src/hle/rt64_state.cpp"
     "${PROJECT_SOURCE_DIR}/src/hle/rt64_vi.cpp"
@@ -499,6 +498,12 @@ set (SOURCES
     "${PROJECT_SOURCE_DIR}/src/contrib/implot/implot_items.cpp"
     "${PROJECT_SOURCE_DIR}/src/contrib/miniz/miniz.c"
 )
+
+# RS64: the MCP bridge's RT64 side, in the configs the game's RS64_MCP option picks.
+if (DEFINED RS64_MCP_GENEX)
+    list(APPEND SOURCES "$<${RS64_MCP_GENEX}:${PROJECT_SOURCE_DIR}/src/hle/rt64_rs64_mcp.cpp>")
+    set_source_files_properties("${PROJECT_SOURCE_DIR}/src/hle/rt64_state.cpp" PROPERTIES COMPILE_DEFINITIONS "$<${RS64_MCP_GENEX}:RS64_MCP>")
+endif()
 
 include_directories(
     "${SDL2_INCLUDE_DIRS}"
