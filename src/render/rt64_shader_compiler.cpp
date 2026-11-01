@@ -7,6 +7,8 @@
 
 #include "rt64_shader_compiler.h"
 
+#include <mutex>
+
 #include "common/rt64_common.h"
 
 namespace RT64 {
@@ -102,6 +104,10 @@ namespace RT64 {
     void ShaderCompiler::link(const std::wstring &entryName, const std::wstring &profile, IDxcBlob **libraryBlobs,
         const wchar_t **libraryBlobNames, uint32_t libraryBlobCount, IDxcBlob **shaderBlob) const 
     {
+        // dxcompiler 1.7.2308 crashed with several compile threads in Link at once.
+        static std::mutex linkMutex;
+        std::lock_guard<std::mutex> lock(linkMutex);
+
         IDxcLinker *dxcLinker = nullptr;
         HRESULT res = DxcCreateInstance(CLSID_DxcLinker, __uuidof(IDxcLinker), (void **)(&dxcLinker));
         if (FAILED(res)) {

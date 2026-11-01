@@ -1062,20 +1062,20 @@ namespace RT64 {
             pipelineDesc.pipelineLayout = rs64LightsShadowedDebug.pipelineLayout.get();
             rs64LightsShadowedDebug.pipeline = device->createGraphicsPipeline(pipelineDesc);
 
-            // Fog shafts: sun in-scatter added onto the game's fog.
+            // Fog shafts: the fog the sun doesn't reach, subtracted from the game's fog.
             rs64FogShafts.pipelineLayout = tracedLayout();
             rs64FogShaftsDebug.pipelineLayout = tracedLayout();
             std::unique_ptr<RenderShader> fogShader = device->createShader(CREATE_SHADER_INPUTS(RS64FogShaftsPSBlobDXIL, RS64FogShaftsPSBlobSPIRV, RS64FogShaftsPSBlobSPIRV, "PSMain", shaderFormat));
             pipelineDesc.pixelShader = fogShader.get();
-            RenderBlendDesc add = RenderBlendDesc::Copy();
-            add.blendEnabled = true;
-            add.srcBlend = RenderBlend::ONE;
-            add.dstBlend = RenderBlend::ONE;
-            add.blendOp = RenderBlendOperation::ADD;
-            add.srcBlendAlpha = RenderBlend::ZERO;
-            add.dstBlendAlpha = RenderBlend::ONE;
-            add.blendOpAlpha = RenderBlendOperation::ADD;
-            pipelineDesc.renderTargetBlend[0] = add;
+            RenderBlendDesc sub = RenderBlendDesc::Copy();
+            sub.blendEnabled = true;
+            sub.srcBlend = RenderBlend::ONE;
+            sub.dstBlend = RenderBlend::ONE;
+            sub.blendOp = RenderBlendOperation::REV_SUBTRACT;
+            sub.srcBlendAlpha = RenderBlend::ZERO;
+            sub.dstBlendAlpha = RenderBlend::ONE;
+            sub.blendOpAlpha = RenderBlendOperation::ADD;
+            pipelineDesc.renderTargetBlend[0] = sub;
             pipelineDesc.pipelineLayout = rs64FogShafts.pipelineLayout.get();
             rs64FogShafts.pipeline = device->createGraphicsPipeline(pipelineDesc);
             pipelineDesc.renderTargetBlend[0] = RenderBlendDesc::Copy();

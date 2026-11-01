@@ -47,6 +47,8 @@ namespace RT64 {
         // RS64: a mesh preset on one of the game's blinking lamps (a glw hardpoint): each light shines only while a lamp is drawn at its
         // spot on screen this frame, in that lamp's colour and fade, so it blinks and turns with it.
         bool lamp = false;
+        // RS64: rank for the 32 light slots, higher kept first; -1 = the light's type default (rs64lights::PriorityMesh etc.).
+        int priority = -1;
 
         // RS64: effect-sprite keys, '|'-separated ("spr:<texture name>"). A matching sprite's automatic light is replaced by this
         // preset's enabled lights at the sprite (radius = attenuation radius x the sprite's size, brightness following its fade); none = no light.

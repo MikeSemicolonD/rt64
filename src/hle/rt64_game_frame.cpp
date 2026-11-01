@@ -7,6 +7,7 @@
 
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 
 #include "rt64_game_frame.h"
 #include "rt64_workload_queue.h"
@@ -397,6 +398,8 @@ namespace RT64 {
         thread_local std::unordered_map<uint32_t, ModifiedBuffers> workloadsModified;
         workloadsModified.clear();
 
+        const bool cut = std::any_of(workloads.begin(), workloads.end(), [&](uint32_t w) { return workloadQueue.workloads[w].rs64Cut; });
+
         for (uint32_t w = 0; w < workloads.size(); w++) {
             if (w >= prevFrame.workloads.size()) {
                 continue;
@@ -438,7 +441,7 @@ namespace RT64 {
             auto curIt = curWorkload.transformIdMap.begin();
             auto prevIt = prevWorkload.transformIdMap.begin();
             bool modifiedVelocityBuffer = false;
-            while ((curIt != curWorkload.transformIdMap.end()) && (prevIt != prevWorkload.transformIdMap.end())) {
+            while (!cut && (curIt != curWorkload.transformIdMap.end()) && (prevIt != prevWorkload.transformIdMap.end())) {
                 if (curIt->first < prevIt->first) {
                     curIt++;
                 }
@@ -532,8 +535,11 @@ namespace RT64 {
             }
         };
 
-        matchScenes(perspectiveScenes, prevFrame.perspectiveScenes);
-        matchScenes(orthographicScenes, prevFrame.orthographicScenes);
+        if (!cut) {
+            matchScenes(perspectiveScenes, prevFrame.perspectiveScenes);
+            matchScenes(orthographicScenes, prevFrame.orthographicScenes);
+        }
+
         logPairing(*this, workloadQueue);
 
         if (!workloadsModified.empty()) {
@@ -888,9 +894,16 @@ namespace RT64 {
         }
 
         const hlslpp::float4x4 &curTransform = curWorkload.drawData.worldTransforms[curTransformIndex];
-        const hlslpp::float4x4 &prevTransform = prevWorkload.drawData.worldTransforms[prevTransformIndex];
+        const hlslpp::float4x4 &rawPrevTransform = prevWorkload.drawData.worldTransforms[prevTransformIndex];
+        const hlslpp::float4x4 prevTransform = curWorkload.rs64PrevInFrame(curTransformIndex, rawPrevTransform);
         const uint32_t curGroupIndex = curWorkload.drawData.worldTransformGroups[curTransformIndex];
         const TransformGroup &curGroup = curWorkload.drawData.transformGroups[curGroupIndex];
+
+        // The decomposed lerp blends from the carried-over decomposition of last frame's transform, so a rebased one has to replace it.
+        if ((prevWorkloadMap != nullptr) && curGroup.decompose && (std::memcmp(&prevTransform, &rawPrevTransform, sizeof(prevTransform)) != 0)) {
+            curTransformMap.rigidBody.transforms[curTransformMap.rigidBody.transformIndex] = DecomposedTransform(prevTransform);
+        }
+
         curTransformMap.rigidBody.updateLinear(prevTransform, curTransform, curGroup.positionInterpolation);
         curTransformMap.rigidBody.updateAngular(prevTransform, curTransform, curGroup.rotationInterpolation, curGroup.scaleInterpolation, curGroup.skewInterpolation);
         curTransformMap.rigidBody.updatePerspective(prevTransform, curTransform, curGroup.perspectiveInterpolation);

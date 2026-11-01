@@ -43,6 +43,16 @@ namespace RT64 {
             return { { "paused", state.debuggerInspector.paused } };
         }
 
+        // Frozen frame: redraw it as the in-between frame at this weight (0 = previous frame, 1 = this one), as the F1 inspector's slider does.
+        static json handleInterpWeight(State &state, const json &params) {
+            float &w = state.debuggerInspector.renderer.interpolationWeight;
+            if (params.contains("weight") && params["weight"].is_number()) {
+                w = std::clamp(params["weight"].get<float>(), 0.0f, 1.0f);
+            }
+
+            return { { "weight", w } };
+        }
+
         static json handleStatus(State &state, const json &) {
             const DebuggerInspector &inspector = state.debuggerInspector;
             return {
@@ -511,6 +521,40 @@ namespace RT64 {
             return { { "level", state.lightsLibraryInspector.currentLevel }, { "presets", presets } };
         }
 
+        // The lights the last light pass shone (camera space, after the 32-slot selection) and the sun the last shadow pass traced.
+        static json handleLightsActive(State &, const json &) {
+            static const char *const kKinds[] = { "none", "sprite", "laser", "mesh", "lamp_mark" };
+            const rs64lights::ActiveLights a = rs64lights::activeLights();
+            json lights = json::array();
+            for (const rs64lights::Resolved &r : a.lights) {
+                json l = {
+                    { "kind", (r.kind < 5) ? kKinds[r.kind] : "?" }, { "priority", r.priority }, { "pos", { r.pos[0], r.pos[1], r.pos[2] } },
+                    { "radius", r.radius }, { "color", { r.color[0], r.color[1], r.color[2] } }, { "intensity", r.intensity }, { "falloff", r.falloff },
+                    { "shadow_start", r.shadowStart }
+                };
+                if (r.engine) l["engine"] = true;
+                if (r.projectile) l["projectile"] = true;
+                if (r.lampGated) l["lamp_gated"] = true;
+                if (r.flicker > 0.0f) l["flicker"] = r.flicker;
+                if (r.spotMaxCos < 1.0f) {
+                    l["spot"] = { { "dir", { r.dir[0], r.dir[1], r.dir[2] } }, { "max_cos", r.spotMaxCos }, { "falloff_cos", r.spotFalloffCos } };
+                }
+                lights.push_back(l);
+            }
+
+            json sun = nullptr;
+            if (a.sunTraced) {
+                const rs64lights::Sun &s = a.sun;
+                sun = {
+                    { "valid", s.valid }, { "dir", { s.dir[0], s.dir[1], s.dir[2] } }, { "color", { s.color[0], s.color[1], s.color[2] } },
+                    { "from_model", s.fromModel }, { "floor_up", { s.skip[0], s.skip[1], s.skip[2] } }, { "level_world", s.levelWorld },
+                    { "strength", rs64lights::config().shadowStrength }
+                };
+            }
+
+            return { { "lights", lights }, { "candidates", a.candidates }, { "sun", sun } };
+        }
+
         static json handleLightsSet(State &state, const json &params) {
             const std::string name = nameParam(params);
             if (!params.contains("preset") || !params["preset"].is_object()) {
@@ -854,6 +898,7 @@ namespace RT64 {
             static const std::map<std::string, Handler> table = {
                 { "rt64_pause", handlePause },
                 { "rt64_status", handleStatus },
+                { "interp_weight", handleInterpWeight },
                 { "frame_summary", handleFrameSummary },
                 { "list_draws", handleListDraws },
                 { "get_draw", handleGetDraw },
@@ -864,6 +909,7 @@ namespace RT64 {
                 { "free_cam", handleFreeCam },
                 { "get_camera", handleGetCamera },
                 { "lights_list", handleLightsList },
+                { "lights_active", handleLightsActive },
                 { "lights_set", handleLightsSet },
                 { "lights_remove", handleLightsRemove },
                 { "lights_save", handleLightsSave },

@@ -1264,6 +1264,15 @@ namespace RT64 {
                 auto &fWorldIndices = workload.drawData.worldIndices;
                 auto &fPosScreen = workload.drawData.posScreen;
                 auto &fTcFloats = workload.drawData.tcFloats;
+
+                // While RT shadows are on, a triangle wholly outside the view (behind the camera, off to a side) is kept for the shadow casters only. It is never
+                // drawn: unclipped, its behind-the-camera vertices smear across the screen edge (interpolated frames rebuild them from screen space). ROGUESQ_RT_SHADOWS_OFFSCREEN=0 drops it.
+                static const bool s_castOffscreen = rs64lights::envFloat("ROGUESQ_RT_SHADOWS_OFFSCREEN", 1.0f) != 0.0f;
+                if ((polyN < 3) && s_castOffscreen && (farCount == 0) && !isDomeTri && rs64lights::config().shadows.load(std::memory_order_relaxed)) {
+                    const interop::OtherMode &om = otherModeStack[otherModeStackSize - 1];
+                    workload.rs64CastOnly.push_back({ { globalIndices[0], globalIndices[1], globalIndices[2] }, om.L, om.H, fWorldIndices[globalIndices[0]], workload.drawData.viewProjIndices[globalIndices[0]] });
+                    return;
+                }
                 const bool usesCulling = !s_nocull && !doubleSided && (geometryMode & cullTestMask);
                 const FixedRect &scissorRect = state->rdp->scissorRectStack[state->rdp->scissorStackSize - 1];
                 for (int f = 1; f + 1 < polyN; f++) {

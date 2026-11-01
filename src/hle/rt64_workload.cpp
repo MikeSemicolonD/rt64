@@ -38,6 +38,9 @@ namespace RT64 {
         rs64NoCast.clear();
         rs64NoCastCutout.clear();
         rs64Craft.clear();
+        rs64CastOnly.clear();
+        rs64Rebase.clear();
+        rs64Cut = false;
         rs64CallTex.clear();
         rs64Terrain.mixed = false;
         rs64Terrain.exact = false;

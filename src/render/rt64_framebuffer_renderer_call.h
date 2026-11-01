@@ -25,6 +25,8 @@ namespace RT64 {
 
         // The RS64 whole-map terrain pass draws here (the GBI's zero-area anchor call); never merged with neighbouring draws.
         bool rs64TerrainAnchor = false;
+        // The game draws its terrain without a depth compare (only writing depth), which stands in for a depth clear: the pass clears depth first.
+        bool rs64TerrainClearDepth = false;
 
         union {
             struct {

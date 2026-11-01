@@ -58,10 +58,12 @@ TemporalOut PSMain(in float4 pos : SV_Position, in float2 uv : TEXCOORD0) {
         const int2 q = clamp(q0 + o2, lo, hi);
         const float w = (o2.x ? t.x : 1.0f - t.x) * (o2.y ? t.y : 1.0f - t.y);
         const float4 h = gHistMask.Load(int3(q, 0));
+        const float4 hi4 = gHistIndirect.Load(int3(q, 0));
         const float dHist = (h.b >= 60000.0f) ? 1.0e30f : (h.b * 64.0f);
-        if ((w > 0.0f) && (abs(dHist - dPrev) <= (gBlur.temporal.y * dPrev))) {
+        // A water texel's history is its reflection; the shore sits at the same distance, so the depth test alone lets it smear onto the bank.
+        if ((w > 0.0f) && (hi4.a >= 0.0f) && (abs(dHist - dPrev) <= (gBlur.temporal.y * dPrev))) {
             ao += w * h.a;
-            ind += w * gHistIndirect.Load(int3(q, 0)).rgb;
+            ind += w * hi4.rgb;
             wsum += w;
         }
     }
@@ -71,6 +73,9 @@ TemporalOut PSMain(in float4 pos : SV_Position, in float2 uv : TEXCOORD0) {
 
     const float a = gBlur.temporal.z;
     o.mask.a = lerp(ao / wsum, o.mask.a, a);
-    o.indirect.rgb = lerp(ind / wsum, o.indirect.rgb, a);
+    // Water's indirect light is its reflection (alpha carries -F), which moves with the view: accumulated, it trails behind.
+    if (o.indirect.a >= 0.0f) {
+        o.indirect.rgb = lerp(ind / wsum, o.indirect.rgb, a);
+    }
     return o;
 }

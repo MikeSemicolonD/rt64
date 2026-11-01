@@ -2243,6 +2243,7 @@ namespace RT64 {
                 renderIndices.highlightColor = call.debuggerDesc.highlightColor;
                 renderIndicesVector.push_back(renderIndices);
                 instanceDrawCall.rs64TerrainAnchor = (p.curWorkload != nullptr) && (call.callDesc.callIndex == p.curWorkload->rs64TerrainPass.anchorCall) && proj.usesViewport();
+                instanceDrawCall.rs64TerrainClearDepth = instanceDrawCall.rs64TerrainAnchor && !call.callDesc.otherMode.zCmp();
                 if (instanceDrawCall.rs64TerrainAnchor) {
                     const rs64lights::TerrainPassFrame &tp = p.curWorkload->rs64TerrainPass;
                     const uint32_t v = drawData.faceIndices[call.meshDesc.faceIndicesStart];
@@ -2644,6 +2645,34 @@ namespace RT64 {
             rs64lights::gatherCasterIndices(drawData.faceIndices.data(), drawData.faceIndices.size(), rs64Shadow.ranges.data(), rs64Shadow.ranges.size(), rs64Shadow.indices);
             rs64Shadow.craftIndices.clear();
             rs64lights::gatherCasterIndices(drawData.faceIndices.data(), drawData.faceIndices.size(), rs64Shadow.craftRanges.data(), rs64Shadow.craftRanges.size(), rs64Shadow.craftIndices);
+
+            // Triangles kept only for casting (wholly outside the view): classed like a drawn call; opaque ones in the main view cast (terrain casts from its own map).
+            for (const rs64lights::CastOnlyTri &t : p.curWorkload->rs64CastOnly) {
+                interop::OtherMode om;
+                om.L = t.otherModeL;
+                om.H = t.otherModeH;
+                rs64lights::CasterMode cm;
+                cm.zUpd = om.zUpd();
+                cm.primDepth = (om.zSource() == G_ZS_PRIM);
+                cm.xlu = ((om.L & ZMODE_MASK) == ZMODE_XLU);
+                cm.fillOrCopy = (om.cycleType() == G_CYC_FILL) || (om.cycleType() == G_CYC_COPY);
+                cm.alphaCompare = (om.alphaCompare() != 0);
+                cm.cvgXAlpha = ((om.L & (CVG_X_ALPHA | ALPHA_CVG_SEL)) == (CVG_X_ALPHA | ALPHA_CVG_SEL));
+                cm.triangles = 1;
+                const auto &noCast = p.curWorkload->rs64NoCast;
+                const auto &glow = p.curWorkload->rs64NoCastCutout;
+                const auto &craftTi = p.curWorkload->rs64Craft;
+                const bool denied = std::find(noCast.begin(), noCast.end(), t.transform) != noCast.end();
+                const bool glowCard = std::find(glow.begin(), glow.end(), t.transform) != glow.end();
+                const bool terrain = rs64Shadow.terrainActive && rs64lights::isTerrainTransform(tf, t.transform);
+                if (terrain || (rs64lights::casterAfterDeny(rs64lights::casterClass(cm), denied, glowCard, lightsCfg.shadowCutout) != rs64lights::CasterOpaque) || !rs64SameView(drawData, t.view, mainTi))
+                {
+                    continue;
+                }
+
+                auto &dst = (std::find(craftTi.begin(), craftTi.end(), t.transform) != craftTi.end()) ? rs64Shadow.craftIndices : rs64Shadow.indices;
+                dst.insert(dst.end(), t.idx, t.idx + 3);
+            }
             rs64Shadow.cutoutIndices.clear();
             rs64Shadow.cutoutTable.clear();
             rs64lights::buildCutoutScene(drawData.faceIndices.data(), drawData.faceIndices.size(), rs64Shadow.cutoutRanges.data(), rs64Shadow.cutoutRanges.size(), rs64Shadow.cutoutIndices, rs64Shadow.cutoutTable);
@@ -2891,6 +2920,8 @@ namespace RT64 {
                 r.shadowStart = c.shadowStart * s;
             }
             r.lampGated = c.lampGated;
+            r.projectile = c.projectile;
+            r.priority = c.priority;
             resolved.push_back(r);
         }
 
@@ -3014,6 +3045,7 @@ namespace RT64 {
             r.falloff = l.attenuationExponent;
             r.shadowStart = l.shadowOffset * mapScale;
             r.kind = rs64lights::KindMesh;
+            r.priority = rs64lights::PriorityLevel;
             const float d[3] = { l.direction.x, l.direction.y, l.direction.z };
             for (int j = 0; j < 3; ++j) {
                 r.dir[j] = originKnown ? (mapToCamera[j][0] * d[0] + mapToCamera[j][1] * d[1] + mapToCamera[j][2] * d[2]) : d[j];
@@ -3031,15 +3063,30 @@ namespace RT64 {
         }
 
         resolved.resize(rs64lights::dedupeLights(resolved.data(), resolved.size(), 1.0f));
+        resolved.resize(rs64lights::dropFarLights(resolved.data(), resolved.size(), rs64lights::config().minLightReach));
         rs64lights::Resolved chosen[rs64lights::MaxLights];
-        const size_t count = rs64lights::selectLights(resolved.data(), resolved.size(), chosen, rs64lights::MaxLights);
+        const size_t count = rs64lights::selectLights(resolved.data(), resolved.size(), chosen, rs64lights::MaxLights, rs64lights::config().cutFade, size_t(rs64lights::config().maxProjectileLights));
+        rs64lights::publishActiveLights(chosen, count, resolved.size());
         if (count == 0) {
             return false;
         }
         if (rs64lights::config().log) {
             static uint32_t s_n = 0;
             if ((++s_n % 90) == 1) {
-                std::fprintf(stderr, "[rt-lights] chosen %zu of %zu:", count, resolved.size());
+                const auto isProjectile = [](const rs64lights::Resolved &r) { return r.projectile; };
+                std::fprintf(stderr, "[rt-lights] chosen %zu of %zu (lasers %zu of %zu; by priority", count, resolved.size(), size_t(std::count_if(chosen, chosen + count, isProjectile)),
+                    size_t(std::count_if(resolved.begin(), resolved.end(), isProjectile)));
+                std::map<int, std::pair<int, int>, std::greater<int>> byPriority;
+                for (const rs64lights::Resolved &r : resolved) {
+                    byPriority[r.priority].second++;
+                }
+                for (size_t i = 0; i < count; ++i) {
+                    byPriority[chosen[i].priority].first++;
+                }
+                for (const auto &[pr, n] : byPriority) {
+                    std::fprintf(stderr, " %d:%d/%d", pr, n.first, n.second);
+                }
+                std::fprintf(stderr, "):");
                 for (size_t i = 0; i < count && i < 6; ++i) {
                     std::fprintf(stderr, " (%.0f,%.0f,%.0f r=%.0f i=%.2f)", chosen[i].pos[0], chosen[i].pos[1], chosen[i].pos[2], chosen[i].radius, chosen[i].intensity);
                 }
@@ -3090,6 +3137,7 @@ namespace RT64 {
             return false;
         }
 
+        rs64lights::publishSun(sun);
         const rs64lights::Config &cfg = rs64lights::config();
         interop::RS64ShadowsCB cb = {};
         memcpy(&cb.viewFromScreen, &inv, sizeof(inv));
@@ -3099,6 +3147,7 @@ namespace RT64 {
         cb.strength = cfg.shadowStrength;
         cb.tMin = cfg.shadowTMin;
         cb.tMax = cfg.shadowTMax;
+        cb.sunTMax = sun.fromModel ? std::min(cfg.shadowTMax, cfg.hangarShadowRange) : cfg.shadowTMax;
         cb.normalBias = cfg.shadowNormalBias;
         cb.terrainTMinScale = cfg.shadowTerrainTMin;
         cb.receiverSkip = { sun.skip[0], sun.skip[1], sun.skip[2], sun.skip[3] };
@@ -3978,7 +4027,8 @@ namespace RT64 {
                 for (int c = 0; c < 8; ++c) {
                     const hlslpp::float4 p = hlslpp::mul(hlslpp::float4(x0 + ((c & 1) ? span : 0.0f), (c & 2) ? y1 : y0, z0 + ((c & 4) ? span : 0.0f), 1.0f), rs64TerrainMvp);
                     const float px = p.x, py = p.y, pw = p.w;
-                    outside[0] += (pw <= 0.0f);
+                    // A chunk up to a span behind the camera plane stays: interpolated frames draw this list with a blended camera that can see it.
+                    outside[0] += (pw <= -span);
                     outside[1] += (px > Guard * pw);
                     outside[2] += (px < -Guard * pw);
                     outside[3] += (py > Guard * pw);
@@ -4023,6 +4073,24 @@ namespace RT64 {
     // with its scissor and screen mapping.
     void FramebufferRenderer::recordRS64Terrain(RenderWorker *worker, const Framebuffer &framebuffer, const InstanceDrawCall &anchor) {
         const RS64TerrainGPU &g = rs64TerrainGpu;
+        // ROGUESQ_F5_STATIC_TERRAIN_CHECK: a pass that draws no land (the map vanishes for that frame) says why.
+        static const bool s_check = [] {
+            const char *v = std::getenv("ROGUESQ_F5_STATIC_TERRAIN_CHECK");
+            return (v != nullptr) && (v[0] == '1');
+        }();
+        if (s_check) {
+            uint32_t land = 0;
+            for (uint32_t l = 0; l < RS64TerrainGPU::MaxLods; ++l) {
+                land += g.lodCount[l];
+            }
+
+            if (!rs64TerrainMap || (g.version != (rs64TerrainMap ? rs64TerrainMap->version : 0)) || (g.set == nullptr) || (g.chunks == nullptr) || anchor.triangles.scissor.isEmpty() || (land == 0)) {
+                std::fprintf(stderr, "[static-terrain] no land drawn: map=%d version gpu=%llu map=%llu set=%d chunks=%d scissorEmpty=%d landChunks=%u origin=%d,%d offset=%.0f,%.0f\n",
+                    (int)(rs64TerrainMap != nullptr), (unsigned long long)g.version, (unsigned long long)(rs64TerrainMap ? rs64TerrainMap->version : 0), (int)(g.set != nullptr),
+                    (int)(g.chunks != nullptr), (int)anchor.triangles.scissor.isEmpty(), land, rs64TerrainCB.originX, rs64TerrainCB.originZ, rs64TerrainCB.offsetX, rs64TerrainCB.offsetZ);
+            }
+        }
+
         if (!rs64TerrainMap || (g.version != rs64TerrainMap->version) || (g.set == nullptr) || (g.chunks == nullptr) || anchor.triangles.scissor.isEmpty()) {
             return;
         }
@@ -4038,6 +4106,12 @@ namespace RT64 {
         worker->commandList->setGraphicsDescriptorSet(g.set->get(), 0);
         if (packs) {
             worker->commandList->setGraphicsDescriptorSet(descTextureSet->get(), 1);
+        }
+
+        // Without this the map was depth-tested against earlier frames' depth: where the ground lay farther than before (a camera rising or
+        // looking down) it failed, and old frames showed through.
+        if (anchor.rs64TerrainClearDepth) {
+            worker->commandList->clearDepth(true, 1.0f, &anchor.triangles.scissor, 1);
         }
 
         worker->commandList->setViewports(framebuffer.viewport);

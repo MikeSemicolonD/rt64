@@ -30,7 +30,8 @@ namespace interop {
         float4x4 screenFromView;
         float4 historyCam[4];
         uint historyMask;
-        uint historyPad0;
+        // Sun shadow rays' reach (tMax, or less in the hangar, where only the ship's own parts should shade it).
+        float sunTMax;
         uint historyPad1;
         uint historyPad2;
         // AO (rays, range fraction of view distance, strength, min blur px), GI (rays, range fraction, strength, min blur px),

@@ -234,6 +234,29 @@ namespace RT64 {
         std::vector<uint32_t> rs64NoCastCutout;
         // Flying craft transforms (rs64lights::movingCraft): they cast every frame but stay out of the history snapshots.
         std::vector<uint32_t> rs64Craft;
+        // Triangles the RSP clipper dropped as wholly outside the view, kept for the shadow casters while RT shadows are on.
+        std::vector<rs64lights::CastOnlyTri> rs64CastOnly;
+        // Transform ids whose local frame was rebased this frame (the terrain root dropping its accumulated regrid shift): the previous frame's
+        // transform is moved by (x, 0, z) local units before blending, so the id keeps interpolating instead of snapping.
+        struct Rebase { uint32_t matrixId; float x; float z; };
+        std::vector<Rebase> rs64Rebase;
+        // A camera cut: nothing in this workload pairs with the previous frame, so in-between frames show the new shot.
+        bool rs64Cut = false;
+
+        // The previous frame's transform for current transform t, in this frame's local frame (rs64Rebase).
+        hlslpp::float4x4 rs64PrevInFrame(uint32_t t, const hlslpp::float4x4 &prev) const {
+            if (rs64Rebase.empty() || (t >= drawData.worldTransformGroups.size())) {
+                return prev;
+            }
+            const uint32_t id = drawData.transformGroups[drawData.worldTransformGroups[t]].matrixId;
+            for (const Rebase &r : rs64Rebase) {
+                if (r.matrixId == id) {
+                    const hlslpp::float4x4 shift(1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, r.x, 0, r.z, 1);
+                    return hlslpp::mul(shift, prev);
+                }
+            }
+            return prev;
+        }
         // Per game call (callIndex): render-tile TMEM average rgb, w = 1 when valid. Recorded only for GI / reflections hit colours.
         std::vector<hlslpp::float4> rs64CallTex;
         uint32_t fbPairCount;

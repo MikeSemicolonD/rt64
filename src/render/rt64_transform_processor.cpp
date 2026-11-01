@@ -40,7 +40,7 @@ namespace RT64 {
                 for (size_t t = 0; t < drawData.worldTransforms.size(); t++) {
                     const GameFrameMap::TransformMap &transformMap = workloadMap.transforms[t];
                     if (transformMap.mapped) {
-                        const hlslpp::float4x4 &prevTransform = prevDrawData.worldTransforms[workloadMap.transforms[t].prevTransformIndex];
+                        const hlslpp::float4x4 prevTransform = workload.rs64PrevInFrame(uint32_t(t), prevDrawData.worldTransforms[workloadMap.transforms[t].prevTransformIndex]);
                         const hlslpp::float4x4 &curTransform = drawData.worldTransforms[t];
                         prevMatrix = transformMap.rigidBody.lerp(p.prevFrameWeight, prevTransform, curTransform, true);
                         curMatrix = transformMap.rigidBody.lerp(p.curFrameWeight, prevTransform, curTransform, true);

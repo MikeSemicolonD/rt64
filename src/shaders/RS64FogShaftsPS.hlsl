@@ -72,5 +72,6 @@ float4 PSMain(in float4 pos : SV_Position, in float2 uv : TEXCOORD0) : SV_TARGET
         const float m = lit / fEnd;
         return float4(m, m, m, 1.0f);
     }
-    return float4(gFog.strength * gFog.fogColor.rgb * lit, 0.0f);
+    // The game's fog already assumes lit air; the pass subtracts the share the sun doesn't reach, so shafts are shadowed fog, not extra glow.
+    return float4(gFog.strength * gFog.fogColor.rgb * max(fEnd - lit, 0.0f), 0.0f);
 }

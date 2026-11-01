@@ -75,6 +75,7 @@ namespace RT64 {
         mesh = jsonObj.value("mesh", std::string());
         cameraUnits = jsonObj.value("cameraUnits", false);
         lamp = jsonObj.value("lamp", false);
+        priority = jsonObj.value("priority", -1);
         sprite = jsonObj.value("sprite", std::string());
 
         return true;
@@ -107,6 +108,10 @@ namespace RT64 {
 
         if (lamp) {
             jsonObj["lamp"] = true;
+        }
+
+        if (priority >= 0) {
+            jsonObj["priority"] = priority;
         }
 
         if (!sprite.empty()) {
@@ -202,6 +207,7 @@ namespace RT64 {
                 ImGui::Checkbox("Radius in camera units", &presetIt->second.cameraUnits);
                 ImGui::Checkbox("Follows the game's blinking lamp", &presetIt->second.lamp);
                 ImGui::EndDisabled();
+                ImGui::SliderInt("Priority (-1 = by type)", &presetIt->second.priority, -1, 9);
 
                 Im3d::Ray cursorRay(appData.m_cursorRayOrigin, appData.m_cursorRayDirection);
                 for (auto &lightIt : presetIt->second.lightMap) {

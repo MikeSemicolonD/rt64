@@ -34,6 +34,7 @@
 #include "hle/rt64_rs64_cable.h"
 #include "hle/rt64_rs64_lights.h"
 #include "hle/rt64_rs64_crosshair.h"
+#include "hle/rt64_rs64_mcp.h"
 
 #include "rt64_gbi_f3dex.h"
 #include "rt64_gbi_f3d.h"
@@ -129,7 +130,7 @@ namespace RT64 {
             return s;
         }
         // The terrain root re-centers in whole grid cells (node+0x40/+0x48, integral) while its tiles shift the opposite way.
-        // ROGUESQ_F5_REGRID_COMP folds the accumulated shift L into every vertex under the root (+L) and its transform (-L) so the transform stays continuous; without it (or before k is learned, or on rebase) the id changes instead.
+        // ROGUESQ_F5_REGRID_COMP folds the accumulated shift L into every vertex under the root (+L) and its transform (-L) so the transform stays continuous; without it (or before k is learned) the id changes instead.
         struct F5Regrid {
             float x = 0, z = 0, dx = 0, dz = 0, k = 0;
             uint32_t gen = 0;
@@ -140,12 +141,24 @@ namespace RT64 {
         };
         static std::unordered_map<uint32_t, F5Regrid> s_regrid;
         static uint32_t s_regrid_cur = 0;
+        // Interpolation id of the static terrain pass's anchor (the whole map); the 0x9 namespace is its alone.
+        static constexpr uint32_t F5_TERRAIN_ANCHOR_ID = 0x90000001u;
+        // The anchor carries the terrain root's regrid generation, so it stops pairing on the same uncompensated snaps the root does.
+        static uint32_t f5_terrain_anchor_id(uint32_t gen) {
+            return F5_TERRAIN_ANCHOR_ID | ((gen & 0xFu) << 20);
+        }
+        // A root node whose shift L just dropped to 0, and the dropped L; taken by the id stamp of the same load.
+        struct F5Rebase { uint32_t node = 0; float x = 0, z = 0; };
+        static F5Rebase s_rebase;
+        // A root node whose re-center jumped farther than flight moves in a frame (a camera cut); its id stamp marks the workload (Workload::rs64Cut).
+        static uint32_t s_cut_node = 0;
         // Inverse of this frame's (compensated) terrain-root transform: maps camera space to a world-stable frame for matching particles.
         static hlslpp::float4x4 s_world_from_view;
         static uint64_t s_world_task = ~0ull;
         static int32_t s_mv_off_x = 0, s_mv_off_z = 0;
         static float s_root_x = 0.0f, s_root_z = 0.0f;
         static bool s_root_valid = false;
+        static uint32_t s_root_gen = 0;
         // This frame's terrain root transform still has the previous grid although its node moved (f5_regrid_after_load).
         static bool s_root_lag = false;
         static uint64_t s_root_lag_task = ~0ull;
@@ -161,7 +174,16 @@ namespace RT64 {
             a.u = rd_be_u32(ram, node + 0x40u);
             b.u = rd_be_u32(ram, node + 0x48u);
             if ((a.f != std::floor(a.f)) || (b.f != std::floor(b.f)) || !std::isfinite(a.f) || !std::isfinite(b.f)) return 0;
-            if (s_regrid.size() > 1024) s_regrid.clear();
+            // Every stamped node lands here, so the table fills; keep the roots that learned k, or the terrain root relearns it and bumps its id
+            // (a terrain snap) on every grid re-center meanwhile.
+            if (s_regrid.size() > 1024) {
+                for (auto it = s_regrid.begin(); it != s_regrid.end();) {
+                    it = (it->second.k > 0.0f) ? std::next(it) : s_regrid.erase(it);
+                }
+                if (s_regrid.size() > 1024) {
+                    s_regrid.clear();
+                }
+            }
             auto ins = s_regrid.try_emplace(node);
             F5Regrid& e = ins.first->second;
             s_regrid_cur = node;
@@ -177,12 +199,29 @@ namespace RT64 {
                 e.x = a.f;
                 e.z = b.f;
                 e.moved = true;
-                if (f5_regrid_comp_enabled() && (e.k > 0.0f)) {
+                // Flight re-centers one cell (2 root units) at a time; 3+ cells at once is a camera cut, which must not blend the two shots.
+                if ((std::fabs(e.dx) > 4.0f) || (std::fabs(e.dz) > 4.0f)) {
+                    e.lx = e.lz = 0;
+                    e.gen = (e.gen + 1) & 0xFu;
+                    e.moved = false;
+                    e.haveT = false;
+                    s_cut_node = node;
+                }
+                else if (f5_regrid_comp_enabled() && (e.k > 0.0f)) {
                     e.lx += (int32_t)std::lround(e.dx * e.k);
                     e.lz += (int32_t)std::lround(e.dz * e.k);
+                    // L must fit the records' int16 vertices, so it drops back to 0 past 16 cells. The id stays: the stamp records the dropped
+                    // shift for RT64 to move the previous transform by (Workload::rs64Rebase), or the terrain snapped ahead and back for a frame.
                     if ((std::abs(e.lx) > 8192) || (std::abs(e.lz) > 8192)) {
+                        static const bool s_rebaseInterp = env_on("ROGUESQ_F5_REBASE_INTERP", true);
+                        if (s_rebaseInterp) {
+                            s_rebase = { node, (float)e.lx, (float)e.lz };
+                        }
+                        else {
+                            e.gen = (e.gen + 1) & 0xFu;
+                        }
+
                         e.lx = e.lz = 0;
-                        e.gen = (e.gen + 1) & 0xFu;
                     }
                 }
                 else {
@@ -260,6 +299,7 @@ namespace RT64 {
             s_root_x = e.x;
             s_root_z = e.z;
             s_root_valid = true;
+            s_root_gen = e.gen;
             if ((e.k > 0.0f) || (e.gen != 0)) {
                 s_world_from_view = hlslpp::inverse(m);
                 s_world_task = state->displayListCounter;
@@ -570,7 +610,10 @@ namespace RT64 {
                 for (size_t i = 0; i < s_prev.size(); ++i) s_prevBySlot[((uint64_t)s_prev[i].tex << 32) | s_prev[i].ord] = i;
             }
             const hlslpp::float4x4 &model = state->rsp->modelMatrixStack[state->rsp->modelMatrixStackSize - 1];
-            const bool world = (s_world_task == state->displayListCounter);
+            // Tracked in camera space: through the terrain-root world frame 13% of frames lost every searchlight glint (the root transform jumps), which drew
+            // them unblended and jittered in place; camera space misses 0.7%. ROGUESQ_F5_BAKED_WORLD=1 restores the world frame for A/B.
+            static const bool s_worldOn = env_on("ROGUESQ_F5_BAKED_WORLD", false);
+            const bool world = s_worldOn && (s_world_task == state->displayListCounter);
             float cx = 0, cy = 0, cz = 0;
             for (int k = 0; k < n; ++k) {
                 cx += v[k].x;
@@ -985,6 +1028,9 @@ namespace RT64 {
             std::vector<uint8_t> noCast;
             // Flying craft (rs64lights::movingCraft): kept out of shadow history.
             std::vector<uint8_t> craft;
+            // Per mesh: its meshdef, and whether its chunk heads currently fail the ownership check (f5_mesh_registry).
+            std::vector<uint32_t> md;
+            std::vector<uint8_t> stale;
             uint64_t sig = 0;
             uint64_t task = ~0ull;
         };
@@ -1019,6 +1065,8 @@ namespace RT64 {
             p.names.clear();
             p.noCast.clear();
             p.craft.clear();
+            p.md.clear();
+            p.stale.clear();
             for (uint32_t b = 0; b < 25; ++b) {
                 uint32_t idx = rd_be_u16(ram, 0x801394B0u + b * 2);
                 for (int hops = 0; (idx != 0xFFFFu) && (hops < 1024); ++hops) {
@@ -1048,6 +1096,8 @@ namespace RT64 {
                                 p.names.emplace_back(key);
                                 p.noCast.push_back((rs64lights::laserBolt(key) || rs64lights::emissiveSurface(key)) ? 1 : (rs64lights::cutoutDenied(key) ? 2 : 0));
                                 p.craft.push_back(rs64lights::movingCraft(key) ? 1 : 0);
+                                p.md.push_back(md);
+                                p.stale.push_back(0);
                                 p.md1Mesh.emplace(md, meshIdx);
                                 for (uint32_t off : { 0x3Cu, 0x40u }) {
                                     uint32_t c = rd_be_u32(ram, md + off);
@@ -1095,6 +1145,16 @@ namespace RT64 {
                 if (s_lg) {
                     std::fprintf(stderr, "[mesh-id] HOB table changed: %zu meshes, %zu DL chunks mapped\n", r.names.size(), r.chunkMesh.size());
                 }
+            }
+            // A real chain head has back-link 0 (+0x3C) or links into the mesh's own chain (+0x40). Meshes the game builds on the fly (r_pow, debris1)
+            // keep head pointers into DL memory other models reuse, so their registered chunks are someone else's; checked each frame, as memory moves on.
+            for (size_t i = 0; i < r.md.size(); ++i) {
+                const uint32_t a = rd_be_u32(ram, r.md[i] + 0x3C);
+                const uint32_t b = rd_be_u32(ram, r.md[i] + 0x40);
+                const uint32_t backA = f5_vaddr_ok(a, 8) ? rd_be_u32(ram, a + 4) : 0u;
+                const uint32_t backB = f5_vaddr_ok(b, 8) ? rd_be_u32(ram, b + 4) : 0u;
+                const auto own = r.chunkMesh.find(backB & 0x00FFFFFFu);
+                r.stale[i] = (backA != 0) || ((backB != 0) && ((own == r.chunkMesh.end()) || (own->second != i)));
             }
             return r;
         }
@@ -1392,6 +1452,8 @@ namespace RT64 {
         static std::string s_pending_mesh;
         // The task that armed it: an armed part with no vertex load in that task must not fire in the next one, under its first transform.
         static uint64_t s_pending_mesh_task = ~0ull;
+        // How the pending name was found, for pause_when_drawn's report: a scene node, or a call into a registered chunk (its address).
+        static std::string s_pending_mesh_src;
         static void f5_push_light(State* state, const rs64lights::Candidate& c) {
             auto& lights = state->ext.workloadQueue->workloads[state->ext.workloadQueue->writeCursor].rs64Lights;
             if (lights.size() < 512) {
@@ -1455,8 +1517,21 @@ namespace RT64 {
             }
             return std::string();
         }
+        // The bound sprite frame's brightness (rs64lights::spriteEmission): colour from the render tile, coverage from the next tile when the combiner samples it (the mask).
+        static float f5_sprite_emission(State* state) {
+            const auto toTile = [](const LoadTile& t) {
+                return rs64lights::TmemTile{ t.fmt, t.siz, t.tmem, t.line, t.palette, uint32_t(((t.lrs - t.uls) >> 2) + 1), uint32_t(((t.lrt - t.ult) >> 2) + 1), t.shifts, t.shiftt };
+            };
+            const uint32_t tile = state->rsp->textureState.tile & 7u;
+            const auto& cc = state->rdp->colorCombinerStack[state->rdp->colorCombinerStackSize - 1];
+            const bool masked = cc.usesTexture(state->rdp->otherMode, 1, false);
+            const rs64lights::TmemTile color = toTile(state->rdp->tiles[tile]);
+            const rs64lights::TmemTile mask = toTile(state->rdp->tiles[(tile + 1) & 7u]);
+
+            return rs64lights::spriteEmission(reinterpret_cast<const uint8_t*>(state->rdp->TMEM), color, masked ? &mask : nullptr);
+        }
         // Light presets keyed by this sprite: their lights at the sprite (at: its placement), radius x its camera size (capped as the automatic light's), brightness x its PRIM
-        // alpha so they fade with it. Records the key for the Lights tab's picker. True when a preset matched (its lights, or none, replace
+        // alpha x at.intensity (the frame's brightness weight) so they fade with it. Records the key for the Lights tab's picker. True when a preset matched (its lights, or none, replace
         // the automatic sprite light).
         static bool f5_push_sprite_presets(State* state, const std::string& key, uint32_t prim, float cameraSize, const rs64lights::Candidate& at) {
             if (key.empty()) {
@@ -1469,7 +1544,7 @@ namespace RT64 {
             if (rs64lights::config().log) {
                 static std::set<std::string> s_logged;
                 if ((s_logged.size() < 512) && s_logged.insert(key).second) {
-                    std::fprintf(stderr, "[rt-lights] sprite %s prim=%08X\n", key.c_str(), prim);
+                    std::fprintf(stderr, "[rt-lights] sprite %s prim=%08X weight=%.2f\n", key.c_str(), prim, at.intensity);
                 }
             }
             bool matched = false;
@@ -1489,10 +1564,11 @@ namespace RT64 {
                     c.color[1] = d.diffuseColor.y;
                     c.color[2] = d.diffuseColor.z;
                     c.radius = std::min(cameraSize * d.attenuationRadius, rs64lights::config().spriteRadiusMax);
-                    c.intensity = float(prim & 0xFFu) / 255.0f;
+                    c.intensity = at.intensity * float(prim & 0xFFu) / 255.0f;
                     c.falloff = d.attenuationExponent;
                     c.shadowStart = cameraSize;
                     c.kind = rs64lights::KindSprite;
+                    c.priority = (preset.priority >= 0) ? preset.priority : rs64lights::PrioritySprite;
                     c.flicker = d.flickerIntensity;
                     const std::string id = it.first + '/' + lightIt.first;
                     c.seed = uint32_t(rs64lights::fnv1a64(reinterpret_cast<const uint8_t*>(id.data()), id.size()));
@@ -1519,6 +1595,24 @@ namespace RT64 {
             mark.intensity = float(prim.w);
             // The workload being parsed gets its id when it is advanced (State::advanceWorkload): the next one.
             rs64lights::addLampMark(state->workloadId + 1, mark);
+        }
+        // pause_when_drawn: reports the key when one of the vertices just loaded into slots [first, first + n) is inside the view.
+        static void f5_report_drawn(State* state, const std::string& key, uint32_t first, uint32_t n) {
+            if (key.empty() || !rs64mcp::drawWatchArmed()) {
+                return;
+            }
+            const auto& pt = state->ext.workloadQueue->workloads[state->ext.workloadQueue->writeCursor].drawData.posTransformed;
+            for (uint32_t k = 0; k < n; ++k) {
+                const uint32_t gi = state->rsp->indices[first + k];
+                if (gi >= pt.size()) {
+                    continue;
+                }
+                const float x = (float)pt[gi][0], y = (float)pt[gi][1], w = (float)pt[gi][3];
+                if ((w > 0.0f) && (std::fabs(x) <= w) && (std::fabs(y) <= w)) {
+                    rs64mcp::drawWatchSeen(key);
+                    return;
+                }
+            }
         }
         // F1 Lights-tab presets attached to this part's mesh key: their lights in the part's model space, once per part per transform. Lists the key for the tab's Mesh picker.
         static void f5_push_mesh_presets(State* state, const std::string& key) {
@@ -1566,6 +1660,8 @@ namespace RT64 {
                     c.kind = rs64lights::KindMesh;
                     c.modelUnits = !preset.cameraUnits;
                     c.lampGated = preset.lamp;
+                    c.projectile = rs64lights::laserBolt(key.c_str());
+                    c.priority = (preset.priority >= 0) ? preset.priority : (c.projectile ? rs64lights::PriorityLaser : rs64lights::PriorityMesh);
                     c.dir[0] = d.direction.x;
                     c.dir[1] = d.direction.y;
                     c.dir[2] = d.direction.z;
@@ -1832,12 +1928,13 @@ namespace RT64 {
         // A call or branch into a registered mesh chunk arms its no-cast mark, and its mesh key for light presets unless the part's own modelview load
         // (op_01) named one: a chunk address can belong to another model in the hangar, which put engine lights on the wrong transform.
         static void f5_arm_mesh_emitters(State* state, uint32_t target) {
-            if (!rs64lights::emitterLookupEnabled(rs64lights::config())) {
+            if (!rs64lights::emitterLookupEnabled(rs64lights::config()) && !rs64mcp::drawWatchArmed()) {
                 return;
             }
             F5MeshRegistry& reg = f5_mesh_registry(state);
             const auto it = reg.chunkMesh.find(target & 0x00FFFFFFu);
-            if (it == reg.chunkMesh.end()) {
+            // A stale mesh's registered chunks belong to whatever reused that memory (a collected pickup's light stuck to the player's craft).
+            if ((it == reg.chunkMesh.end()) || reg.stale[it->second]) {
                 return;
             }
             s_pending_nocast = reg.noCast[it->second];
@@ -1845,6 +1942,7 @@ namespace RT64 {
             if (s_pending_mesh.empty()) {
                 s_pending_mesh = reg.names[it->second];
                 s_pending_mesh_task = state->displayListCounter;
+                s_pending_mesh_src = "chunk " + std::to_string(target & 0x00FFFFFFu);
             }
         }
 
@@ -2493,7 +2591,8 @@ namespace RT64 {
             f5_terrain_origin(state, rec, flat, *s_terrain_map, camPtr, ox, oz);
             // The game lights its records with every level and runtime light (lava glow, explosions); hand those colours to the pass for this cell.
             size_t cell = 0;
-            if (f5_terrain_record_cell(state->RDRAM, rec, flat, *s_terrain_map, ox, oz, cell) == F5RecordOk) {
+            const F5RecordCell recCell = f5_terrain_record_cell(state->RDRAM, rec, flat, *s_terrain_map, ox, oz, cell);
+            if (recCell == F5RecordOk) {
                 float C[25][4];
                 f5_static_record_colors(state, rec, &s_terrain_map->colors[cell * 75], flat, C);
                 rs64lights::TerrainCellColors& hc = pass.harvest.emplace_back();
@@ -2507,9 +2606,27 @@ namespace RT64 {
             if (pass.anchorCall == UINT32_MAX) {
                 state->flush();
                 const uint32_t calls = wl.gameCallCount;
-                const int32_t x = (int16_t)(rec[4].w0 >> 16) + s_mv_off_x, z = (int16_t)(rec[4].w1 >> 16) + s_mv_off_z;
-                const int32_t y = std::clamp((int32_t)(int16_t)rec[4].w0 << 4, -32768, 32767);
+                int32_t x = (int16_t)(rec[4].w0 >> 16) + s_mv_off_x, z = (int16_t)(rec[4].w1 >> 16) + s_mv_off_z;
+                int32_t y = std::clamp((int32_t)(int16_t)rec[4].w0 << 4, -32768, 32767);
                 f5_ensure_viewport(state);
+                // At the record's corner the anchor was often off screen and clipped (no call), and the record fell back to the game's own terrain draw,
+                // over the map. The screen centre at mid depth, in this record's model space, is always in view; the corner only if that leaves int16.
+                const hlslpp::float4x4 anchorProj = state->rsp->viewProjMatrixStack[state->rsp->projectionMatrixStackSize - 1];
+                const auto &anchorVp = state->rsp->viewportStack[state->rsp->viewportStackSize - 1];
+                const hlslpp::float4x4& anchorModel = state->rsp->modelMatrixStack[state->rsp->modelMatrixStackSize - 1];
+                if (std::fabs((float)anchorVp.scale.z) > 1e-6f) {
+                    const float nz = (0.5f - (float)anchorVp.translate.z) / (float)anchorVp.scale.z;
+                    const hlslpp::float4 c = hlslpp::mul(hlslpp::float4(0.0f, 0.0f, nz, 1.0f), hlslpp::inverse(anchorProj));
+                    if (std::fabs((float)c.w) > 1e-12f) {
+                        const hlslpp::float4 p = hlslpp::mul(hlslpp::float4((float)c.x / (float)c.w, (float)c.y / (float)c.w, (float)c.z / (float)c.w, 1.0f), hlslpp::inverse(anchorModel));
+                        const float px = std::round((float)p.x), py = std::round((float)p.y), pz = std::round((float)p.z);
+                        if (std::isfinite(px) && std::isfinite(py) && std::isfinite(pz) && (std::fabs(px) < 32767.0f) && (std::fabs(py) < 32767.0f) && (std::fabs(pz) < 32767.0f)) {
+                            x = (int32_t)px;
+                            y = (int32_t)py;
+                            z = (int32_t)pz;
+                        }
+                    }
+                }
                 RSP::Vertex* tmp = reinterpret_cast<RSP::Vertex*>(state->fromRDRAM(F5_VTX_SCRATCH + F5_FACE_SLOT * sizeof(RSP::Vertex)));
                 for (int k = 0; k < 3; ++k) {
                     tmp[k] = {};
@@ -2518,10 +2635,23 @@ namespace RT64 {
                     tmp[k].z = (int16_t)z;
                     tmp[k].color.r = tmp[k].color.g = tmp[k].color.b = tmp[k].color.a = 0xFF;
                 }
+                // The map's own interpolation id: under the terrain root's id it went unpaired whenever that id changed generation.
+                state->rsp->matrixId(f5_terrain_anchor_id(s_root_gen), /*push*/true, /*proj*/false, /*decompose*/true,
+                    G_EX_COMPONENT_INTERPOLATE, G_EX_COMPONENT_INTERPOLATE, G_EX_COMPONENT_INTERPOLATE, G_EX_COMPONENT_INTERPOLATE, G_EX_COMPONENT_INTERPOLATE,
+                    G_EX_COMPONENT_SKIP, G_EX_COMPONENT_SKIP, G_EX_COMPONENT_AUTO, G_EX_COMPONENT_AUTO,
+                    G_EX_ORDER_LINEAR, G_EX_ASPECT_AUTO, G_EX_EDIT_NONE, /*idIsAddress*/false, /*editGroup*/false);
+                state->rsp->modelViewProjChanged = true;
                 state->rsp->setVertex(0x80000000u | (F5_VTX_SCRATCH + F5_FACE_SLOT * sizeof(RSP::Vertex)), 3, F5_FACE_SLOT);
                 state->rsp->drawIndexedTri(F5_FACE_SLOT, F5_FACE_SLOT + 1, F5_FACE_SLOT + 2);
                 state->flush();
+                state->rsp->popMatrixId(1, false);
+                state->rsp->modelViewProjChanged = true;
                 if (wl.gameCallCount != calls + 1) {
+                    // ROGUESQ_F5_STATIC_TERRAIN_CHECK: the anchor merged into another call, so this record falls back to the game's own terrain draw.
+                    static const bool s_checkMiss = env_on("ROGUESQ_F5_STATIC_TERRAIN_CHECK", false);
+                    if (s_checkMiss) {
+                        std::fprintf(stderr, "[static-terrain] anchor not its own call (calls %u -> %u) task %llu\n", calls, wl.gameCallCount, (unsigned long long)state->displayListCounter);
+                    }
                     return false;
                 }
                 pass.anchorCall = wl.gameCallCount - 1;
@@ -2695,19 +2825,25 @@ namespace RT64 {
             f5_ensure_viewport(state);
 
             // Meshes the game builds every frame (no prebuilt chunks, e.g. the r_pow pickup) are identified by their scene node at the modelview load.
-            if (!proj && rs64lights::emitterLookupEnabled(rs64lights::config())) {
+            if (!proj && (rs64lights::emitterLookupEnabled(rs64lights::config()) || rs64mcp::drawWatchArmed())) {
                 const uint32_t node = f5_lookup_node_id(w1);
                 const uint32_t item = (node >= 0x80000000u) ? rd_be_u32(ram, node + 0x10) : 0u;
                 const uint32_t md = f5_vaddr_ok(item, 0x10) ? rd_be_u32(ram, item + 8) : 0u;
-                if (md != 0) {
-                    F5MeshRegistry& reg = f5_mesh_registry(state);
-                    const auto mi = reg.md1Mesh.find(md);
-                    if (mi != reg.md1Mesh.end()) {
-                        s_pending_craft = (reg.craft[mi->second] != 0);
-                        s_pending_nocast = reg.noCast[mi->second];
-                        s_pending_mesh = reg.names[mi->second];
-                        s_pending_mesh_task = state->displayListCounter;
-                    }
+                F5MeshRegistry& reg = f5_mesh_registry(state);
+                const auto mi = (md != 0) ? reg.md1Mesh.find(md) : reg.md1Mesh.end();
+                if (mi != reg.md1Mesh.end()) {
+                    s_pending_craft = (reg.craft[mi->second] != 0);
+                    s_pending_nocast = reg.noCast[mi->second];
+                    s_pending_mesh = reg.names[mi->second];
+                    s_pending_mesh_task = state->displayListCounter;
+                    s_pending_mesh_src = "node";
+                }
+                else if (node >= 0x80000000u) {
+                    // Another scene node's object starts here: drop a name left by a node that loaded its modelview but drew nothing (a collected
+                    // r_pow pickup), or it lands on this object's vertices (the pickup light stuck to the player).
+                    s_pending_craft = false;
+                    s_pending_nocast = 0;
+                    s_pending_mesh.clear();
                 }
             }
 
@@ -2757,6 +2893,22 @@ namespace RT64 {
                               stamp = (dr >= 0x80000000u) && (it != s_draw_hist[buf].end()) && (it->second == 1);
                           }
                           if (stamp) id = 0x20000000u | (nodePtr & 0x00FFFFFFu) | (f5_node_regrid_generation(state->RDRAM, nodePtr) << 24);
+                          if (stamp && (s_cut_node == nodePtr)) {
+                              state->ext.workloadQueue->workloads[state->ext.workloadQueue->writeCursor].rs64Cut = true;
+                              static const bool s_logCut = env_on("ROGUESQ_F5_STATIC_TERRAIN_CHECK", false);
+                              if (s_logCut) {
+                                  std::fprintf(stderr, "[cut] id %08X task %llu\n", id, (unsigned long long)state->displayListCounter);
+                              }
+
+                              s_cut_node = 0;
+                          }
+
+                          if (stamp && (s_rebase.node == nodePtr)) {
+                              auto& rebase = state->ext.workloadQueue->workloads[state->ext.workloadQueue->writeCursor].rs64Rebase;
+                              rebase.push_back({ id, s_rebase.x, s_rebase.z });
+                              rebase.push_back({ f5_terrain_anchor_id(id >> 24), s_rebase.x, s_rebase.z });
+                              s_rebase.node = 0;
+                          }
                           // ROGUESQ_F5_TERRAIN_ID: terrain tiles are a scrolling pool â€” the node ptr is
                           // the reused SLOT, which makes RT64 interpolate a slot through the world-cell
                           // change at a grid re-center (the periodic terrain hitch). Instead, id a
@@ -2919,6 +3071,9 @@ namespace RT64 {
             f5_mesh_vertex_dump(state, out, n);
             if (!s_cull_skip) {
                 state->rsp->setVertex(0x80000000u | F5_VTX_SCRATCH, n, 0);
+                if (s_pending_mesh_task == state->displayListCounter) {
+                    f5_report_drawn(state, s_pending_mesh.empty() ? s_pending_mesh : (s_pending_mesh + " (" + s_pending_mesh_src + ")"), 0, n);
+                }
                 if (!s_pending_mesh.empty() && (s_pending_mesh_task == state->displayListCounter) && rs64lights::config().enabled) {
                     f5_push_mesh_presets(state, s_pending_mesh);
                 }
@@ -3134,6 +3289,9 @@ namespace RT64 {
                     }
                     state->rsp->drawIndexedTri(F5_FACE_SLOT, F5_FACE_SLOT + 3, F5_FACE_SLOT + 2);
                     state->rsp->drawIndexedTri(F5_FACE_SLOT, F5_FACE_SLOT + 1, F5_FACE_SLOT + 3);
+                    if (rs64mcp::drawWatchArmed()) {
+                        f5_report_drawn(state, f5_sprite_key(state), F5_FACE_SLOT, 4);
+                    }
                     if (rs64lights::config().enabled) {
                         const float modelScale = std::sqrt((float)savedModel[0][0] * (float)savedModel[0][0] + (float)savedModel[0][1] * (float)savedModel[0][1] + (float)savedModel[0][2] * (float)savedModel[0][2]);
                         // Where the sprite's light sits; a light preset keyed by its texture replaces the automatic light.
@@ -3144,12 +3302,17 @@ namespace RT64 {
                             at.local[1] = (float)c.y;
                             at.local[2] = (float)c.z;
                         }
+                        // Explosions draw every flipbook frame at white PRIM, so the light follows the frame's own brightness: it fades as the fireball burns out.
+                        const float emitWeight = rs64lights::spriteEmitWeight(f5_sprite_emission(state), rs64lights::config().spriteEmitRef);
+                        at.intensity = emitWeight;
                         const std::string spriteKey = f5_sprite_key(state);
                         const bool presetLit = f5_push_sprite_presets(state, spriteKey, w1, spriteSize * modelScale, at);
                         rs64lights::Candidate lc;
                         if (!presetLit && rs64lights::spriteLight(w1, spriteSize * modelScale, rs64lights::config().spriteRadius, rs64lights::config().spriteRadiusMax, lc)) {
                             lc.transformIndex = at.transformIndex;
                             std::copy(at.local, at.local + 3, lc.local);
+                            lc.intensity *= emitWeight;
+                            lc.priority = rs64lights::PrioritySprite;
                             f5_push_light(state, lc);
                         }
                         else if (!presetLit && rs64lights::config().log) {

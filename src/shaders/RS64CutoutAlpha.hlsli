@@ -122,9 +122,10 @@ bool rs64TerrainCellColor(uint prim, out float3 rgb) {
     return true;
 }
 
-// Whether a static terrain hit at map-space height y lies at or under the drawn water (heights grow downward), so the pixel shows water.
-bool rs64UnderWater(float y) {
-    return (gTerrainColors.Load(4) > 0) && (y >= asfloat(gTerrainColors.Load(12)) - 1.0f);
+// How much of the drawn water covers a static terrain hit at map-space height y (heights grow downward): its shore fade over the lift, as
+// waterShoreAlpha in RS64Terrain.hlsli; 0 for ground above the drawn surface.
+float rs64WaterCover(float y, float lift) {
+    return (gTerrainColors.Load(4) > 0) ? smoothstep(0.0f, lift, y - asfloat(gTerrainColors.Load(12))) : 0.0f;
 }
 
 // Mirrors rs64lights::hitColorFor; rgb = hit colour, a = 1 when emissive. hitParams: x hit count, y emissive count, z terrain colour, w caster average

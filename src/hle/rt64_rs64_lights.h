@@ -23,6 +23,13 @@ namespace rs64lights {
     // KindLampMark: not a light, where one of the game's blinking lamps (a 2D texture rectangle) is drawn this frame, for lamp presets.
     enum Kind : uint8_t { KindNone = 0, KindSprite = 1, KindLaser = 2, KindMesh = 3, KindLampMark = 4 };
 
+    // Default light ranks for the 32 slots, higher kept first; a light preset's "priority" overrides them (model-lights: engine exhausts 7,
+    // the pickup 6, the torpedo 1, lasers 0).
+    constexpr int PriorityLaser = 0;
+    constexpr int PriorityLevel = 2;
+    constexpr int PriorityMesh = 3;
+    constexpr int PrioritySprite = 5;
+
     struct Candidate {
         uint32_t transformIndex = 0;
         uint32_t viewIndex = 0;
@@ -49,6 +56,10 @@ namespace rs64lights {
         float screenHalf = 0.0f;
         // A lamp preset's light: kept only while a lamp mark covers its spot on screen, taking the mark's colour and fade.
         bool lampGated = false;
+        // A laser bolt's light (laserBolt mesh key): capped in selectLights.
+        bool projectile = false;
+        // Rank for the light slots, as Resolved.
+        int priority = PriorityMesh;
     };
 
     struct Resolved {
@@ -68,6 +79,10 @@ namespace rs64lights {
         float flicker = 0.0f;
         uint32_t seed = 0;
         bool lampGated = false;
+        // A laser bolt's light: at most a few slots (selectLights).
+        bool projectile = false;
+        // Rank for the light slots (Priority*), higher kept first.
+        int priority = 0;
     };
 
     // Flicker gain at time t (seconds): 1 - flicker x smooth value noise at 12 steps a second, each light on its own sequence (seed).
@@ -451,19 +466,79 @@ namespace rs64lights {
         return out;
     }
 
-    // Nearest light edge to the camera (origin) first; zero-intensity lights are dropped.
-    inline size_t selectLights(const Resolved* in, size_t n, Resolved* out, size_t maxOut) {
-        std::vector<std::pair<float, size_t>> order;
-        order.reserve(n);
+    // Drops lights whose reach is under minReach of their distance from the camera (a distant ship's 50-unit exhaust lights a few pixels), so they
+    // don't take slots from nearer lights. Returns the count.
+    inline size_t dropFarLights(Resolved* lights, size_t n, float minReach) {
+        size_t out = 0;
+        for (size_t i = 0; i < n; ++i) {
+            const Resolved& r = lights[i];
+            const float d2 = r.pos[0] * r.pos[0] + r.pos[1] * r.pos[1] + r.pos[2] * r.pos[2];
+            if ((r.radius * r.radius) >= (minReach * minReach * d2)) {
+                lights[out++] = r;
+            }
+        }
+        return out;
+    }
+
+    // First-pass share of the light slots for each default priority, so one busy kind (a battle's explosions) can't leave the others dark; other
+    // priorities have none and only fill what is left.
+    inline size_t priorityShare(int priority) {
+        switch (priority) {
+            case 7: return 12;
+            case 6: return 4;
+            case 5: return 10;
+            case 3: return 6;
+            case 2: return 4;
+            case 1: return 2;
+            case 0: return 4;
+            default: return 0;
+        }
+    }
+
+    // In pools by priority (higher first; within one priority, projectiles last), nearest light edge to the camera (origin) first; zero-intensity
+    // lights are dropped. Each pool first takes up to its share (priorityShare), then the slots left go to the pools' remaining lights in priority
+    // order. Projectile lights (laser bolts, fired in pairs by every ship) take at most maxProjectiles slots in all. Within each pool, when lights
+    // are left out, the chosen ones fade out as their edge distance nears the first one left out (over a quarter of their radius), so a light
+    // swapping across the cut is dark: no pop.
+    inline size_t selectLights(const Resolved* in, size_t n, Resolved* out, size_t maxOut, bool cutFade = true, size_t maxProjectiles = SIZE_MAX) {
+        std::map<int, std::vector<std::pair<float, size_t>>, std::greater<int>> pools;
         for (size_t i = 0; i < n; ++i) {
             if (!(in[i].intensity > 0.0f) || !(in[i].radius > 0.0f)) continue;
             const float d = std::sqrt(in[i].pos[0] * in[i].pos[0] + in[i].pos[1] * in[i].pos[1] + in[i].pos[2] * in[i].pos[2]);
-            order.emplace_back(d - in[i].radius, i);
+            pools[in[i].priority * 2 + (in[i].projectile ? 0 : 1)].emplace_back(d - in[i].radius, i);
         }
-        const size_t count = std::min(order.size(), maxOut);
-        std::partial_sort(order.begin(), order.begin() + count, order.end());
-        for (size_t i = 0; i < count; ++i) {
-            out[i] = in[order[i].second];
+
+        // How many each pool takes: its share first, then the slots left in priority order.
+        std::map<int, size_t, std::greater<int>> takes;
+        size_t used = 0;
+        size_t projectiles = 0;
+        for (int pass = 0; pass < 2; ++pass) {
+            for (auto& [key, o] : pools) {
+                const bool projectile = (key & 1) == 0;
+                size_t& take = takes[key];
+                size_t want = (pass == 0) ? std::min(o.size(), priorityShare(key >> 1)) : (o.size() - take);
+                want = std::min(want, maxOut - used);
+                if (projectile) {
+                    want = std::min(want, maxProjectiles - std::min(projectiles, maxProjectiles));
+                    projectiles += want;
+                }
+                take += want;
+                used += want;
+            }
+        }
+
+        size_t count = 0;
+        for (auto& [key, o] : pools) {
+            const size_t take = takes[key];
+            const bool cut = cutFade && (o.size() > take);
+            std::partial_sort(o.begin(), o.begin() + (cut ? take + 1 : take), o.end());
+            for (size_t i = 0; i < take; ++i) {
+                Resolved& r = out[count++];
+                r = in[o[i].second];
+                if (cut) {
+                    r.intensity *= std::clamp((o[take].first - o[i].first) / (0.25f * r.radius), 0.0f, 1.0f);
+                }
+            }
         }
         return count;
     }
@@ -627,6 +702,15 @@ namespace rs64lights {
     }
 
     enum CasterClass : uint8_t { CasterNone = 0, CasterOpaque = 1, CasterCutout = 2 };
+
+    // A triangle wholly outside the view that only casts (never drawn): its vertices, the other mode it was submitted under, its transform and view.
+    struct CastOnlyTri {
+        uint32_t idx[3];
+        uint32_t otherModeL;
+        uint32_t otherModeH;
+        uint32_t transform;
+        uint32_t view;
+    };
 
     struct CasterMode {
         bool zUpd = false;
@@ -1148,14 +1232,17 @@ namespace rs64lights {
         }
     }
 
-    // Area-weighted vertex normals (+y up), welded across tile seams by integer (x, z) so the shadow pass sees a smooth heightfield instead of facets.
+    // Area-weighted vertex normals (+y up), welded across tile seams by integer (x, y, z) so the shadow pass sees a smooth heightfield instead of facets.
+    // The height is in the key: the water surface shares the ground's grid, and welding a slope to the flat water under it tilted the slope's normal up
+    // (a lit diamond in a self-shadowed hillside).
     inline void buildTerrainNormals(const std::vector<float>& pos, const std::vector<uint32_t>& idx, std::vector<float>& out) {
         const size_t verts = pos.size() / 3;
         std::unordered_map<uint64_t, uint32_t> weld;
         weld.reserve(verts);
         std::vector<uint32_t> slot(verts);
         for (size_t v = 0; v < verts; ++v) {
-            const uint64_t key = (uint64_t(uint32_t(int32_t(pos[v * 3]))) << 32) | uint32_t(int32_t(pos[v * 3 + 2]));
+            const int32_t c[3] = { int32_t(pos[v * 3]), int32_t(pos[v * 3 + 1]), int32_t(pos[v * 3 + 2]) };
+            const uint64_t key = fnv1a64(reinterpret_cast<const uint8_t*>(c), sizeof(c));
             slot[v] = weld.emplace(key, uint32_t(weld.size())).first->second;
         }
         std::vector<float> acc(weld.size() * 3, 0.0f);
@@ -1299,6 +1386,41 @@ namespace rs64lights {
         return presetViewShared(slot);
     }
 
+    // What the last light pass drew (camera space) and the sun the last shadow pass traced, for the MCP's lights_active.
+    struct ActiveLights {
+        std::vector<Resolved> lights;
+        size_t candidates = 0;
+        Sun sun;
+        bool sunTraced = false;
+    };
+
+    inline std::mutex& activeLightsMutex() {
+        static std::mutex m;
+        return m;
+    }
+
+    inline ActiveLights& activeLightsShared() {
+        static ActiveLights a;
+        return a;
+    }
+
+    inline void publishActiveLights(const Resolved* chosen, size_t count, size_t candidates) {
+        std::lock_guard<std::mutex> lock(activeLightsMutex());
+        activeLightsShared().lights.assign(chosen, chosen + count);
+        activeLightsShared().candidates = candidates;
+    }
+
+    inline void publishSun(const Sun& sun) {
+        std::lock_guard<std::mutex> lock(activeLightsMutex());
+        activeLightsShared().sun = sun;
+        activeLightsShared().sunTraced = true;
+    }
+
+    inline ActiveLights activeLights() {
+        std::lock_guard<std::mutex> lock(activeLightsMutex());
+        return activeLightsShared();
+    }
+
     // The view the inspector's frame uses, picked before Im3d's frame and read when its draw lists are drawn (both on RT64's state thread).
     inline PresetView& inspectorView() {
         static PresetView v;
@@ -1413,6 +1535,16 @@ namespace rs64lights {
         float reflStrength;
         // A level sun lower than this (degrees) is lifted to it: a near-horizon sun throws long shadows and the terminator blackens gentle slopes.
         float sunMinElevationDeg;
+        // Sprite frame brightness (spriteEmission) that lights at full strength; dimmer frames scale their light down. 0 = off.
+        float spriteEmitRef;
+        // selectLights fades lights near the 32-light cut (A/B switch).
+        bool cutFade;
+        // Laser bolt lights get at most this many of the slots other lights leave.
+        int maxProjectileLights;
+        // Hangar sun shadows count only blockers this close (game units): the ship's own parts, not the hangar's walls.
+        float hangarShadowRange;
+        // dropFarLights' radius / distance floor.
+        float minLightReach;
     };
 
     // ROGUESQ_RT_LIGHTS=1 enables the pass; the rest are tuning and debug knobs.
@@ -1473,6 +1605,11 @@ namespace rs64lights {
             envFloat("ROGUESQ_RT_REFL_RANGE", 0.1f),
             envFloat("ROGUESQ_RT_REFL_STRENGTH", 3.0f),
             std::clamp(envFloat("ROGUESQ_RT_SUN_MIN_ELEVATION", 25.0f), 0.0f, 89.0f),
+            std::max(envFloat("ROGUESQ_RT_LIGHTS_SPRITE_EMIT_REF", 0.12f), 0.0f),
+            envFloat("ROGUESQ_RT_LIGHTS_CUT_FADE", 1.0f) != 0.0f,
+            std::clamp((int)envFloat("ROGUESQ_RT_LIGHTS_PROJECTILE_MAX", 8.0f), 0, (int)MaxLights),
+            envFloat("ROGUESQ_RT_SHADOWS_HANGAR_RANGE", 500.0f),
+            std::max(envFloat("ROGUESQ_RT_LIGHTS_MIN_REACH", 0.01f), 0.0f),
         };
         return c;
     }
@@ -1724,60 +1861,140 @@ namespace rs64lights {
         return b - std::floor(b);
     }
 
-    // Alpha-weighted average colour of a tile in TMEM (4 KB, N64 byte order; odd-row word swaps only permute texels). fmt/siz are G_IM_FMT/G_IM_SIZ;
-    // CI uses the RGBA16 TLUT in upper TMEM (8-byte entries). RGBA32 and YUV are not handled. coverage = mean alpha; false when nothing is visible.
+    // One texel of a tile in TMEM (4 KB, N64 byte order; odd-row word swaps only permute texels) as RGBA 0-1. fmt/siz are G_IM_FMT/G_IM_SIZ;
+    // CI uses the RGBA16 TLUT in upper TMEM (8-byte entries). RGBA32, YUV and 4/8-bit RGBA are not handled (false).
+    inline bool tmemTexel(const uint8_t* tmem, uint8_t fmt, uint8_t siz, uint32_t tmemWord, uint32_t lineWords, uint8_t palette, uint32_t x, uint32_t y, float c[4]) {
+        if ((siz > 2) || (fmt == 1) || ((fmt == 0) && (siz != 2))) {
+            return false;
+        }
+
+        auto rgba16 = [](uint16_t v, float o[4]) {
+            o[0] = float((v >> 11) & 0x1F) / 31.0f;
+            o[1] = float((v >> 6) & 0x1F) / 31.0f;
+            o[2] = float((v >> 1) & 0x1F) / 31.0f;
+            o[3] = float(v & 1);
+        };
+        const uint32_t bits = 4u << siz;
+        const uint32_t bitOff = x * bits;
+        const uint32_t byte = ((tmemWord + y * lineWords) * 8 + bitOff / 8) & 0xFFF;
+        uint32_t v = 0;
+        if (bits == 4) {
+            v = (bitOff & 4) ? (tmem[byte] & 0xF) : (tmem[byte] >> 4);
+        }
+        else if (bits == 8) {
+            v = tmem[byte];
+        }
+        else {
+            v = (uint32_t(tmem[byte]) << 8) | tmem[(byte + 1) & 0xFFF];
+        }
+
+        if (fmt == 2) {
+            const uint32_t idx = (bits == 4) ? ((uint32_t(palette) << 4) | v) : (v & 0xFF);
+            const uint32_t e = (0x800 + idx * 8) & 0xFFF;
+            rgba16(uint16_t((uint32_t(tmem[e]) << 8) | tmem[(e + 1) & 0xFFF]), c);
+        }
+        else if (fmt == 0) {
+            rgba16(uint16_t(v), c);
+        }
+        else if (fmt == 3) {
+            const float i = (bits == 4) ? float(v >> 1) / 7.0f : (bits == 8) ? float(v >> 4) / 15.0f : float(v >> 8) / 255.0f;
+            const float a = (bits == 4) ? float(v & 1) : (bits == 8) ? float(v & 0xF) / 15.0f : float(v & 0xFF) / 255.0f;
+            c[0] = c[1] = c[2] = i;
+            c[3] = a;
+        }
+        else {
+            const float i = (bits == 4) ? float(v) / 15.0f : (bits == 8) ? float(v) / 255.0f : float(v >> 8) / 255.0f;
+            c[0] = c[1] = c[2] = c[3] = i;
+        }
+        return true;
+    }
+
+    // A tile's place in TMEM, its size in texels and its texcoord shifts (G_TX_SHIFT: 1-10 divide by 2^n, 11-15 multiply by 2^(16-n)); a mask tile
+    // is sampled at the colour tile's texel through its own shift.
+    struct TmemTile {
+        uint8_t fmt;
+        uint8_t siz;
+        uint32_t tmemWord;
+        uint32_t lineWords;
+        uint8_t palette;
+        uint32_t width;
+        uint32_t height;
+        uint8_t shiftS = 0;
+        uint8_t shiftT = 0;
+    };
+
+    inline uint32_t tileShift(uint32_t c, uint8_t shift) {
+        return (shift == 0) ? c : (shift <= 10) ? (c >> shift) : (c << (16 - shift));
+    }
+
+    // Mean visible brightness of a sprite frame: luminance of the colour tile x the coverage, which comes from the mask tile when the sprite
+    // has one (the game's sprites: colour TEXEL0, alpha TEXEL1 = an I4/I8 mask sampled through its tile shift, half size) and from the colour tile's own alpha
+    // otherwise. Up to 8x8 samples. Negative when the tile can't be read. A burnt-out explosion frame reads ~0; a full fireball ~0.15.
+    inline float spriteEmission(const uint8_t* tmem, const TmemTile& color, const TmemTile* mask) {
+        const uint32_t w = color.width;
+        const uint32_t h = color.height;
+        const uint32_t mw = mask ? mask->width : 0;
+        const uint32_t mh = mask ? mask->height : 0;
+        if ((w == 0) || (h == 0) || (w > 1024) || (h > 1024) || (mask && ((mw == 0) || (mh == 0) || (mw > 1024) || (mh > 1024))))
+        {
+            return -1.0f;
+        }
+
+        const uint32_t stepX = std::max<uint32_t>(1, w / 8);
+        const uint32_t stepY = std::max<uint32_t>(1, h / 8);
+        double sum = 0.0;
+        uint32_t n = 0;
+        for (uint32_t y = 0; y < h; y += stepY) {
+            for (uint32_t x = 0; x < w; x += stepX) {
+                float c[4] = {};
+                if (!tmemTexel(tmem, color.fmt, color.siz, color.tmemWord, color.lineWords, color.palette, x, y, c)) {
+                    return -1.0f;
+                }
+
+                float a = c[3];
+                if (mask) {
+                    float m[4] = {};
+                    const uint32_t mx = std::min(tileShift(x, mask->shiftS), mw - 1);
+                    const uint32_t my = std::min(tileShift(y, mask->shiftT), mh - 1);
+                    if (!tmemTexel(tmem, mask->fmt, mask->siz, mask->tmemWord, mask->lineWords, mask->palette, mx, my, m)) {
+                        return -1.0f;
+                    }
+
+                    a = m[3];
+                }
+
+                sum += (0.2126f * c[0] + 0.7152f * c[1] + 0.0722f * c[2]) * a;
+                ++n;
+            }
+        }
+        return (n > 0) ? float(sum / n) : -1.0f;
+    }
+
+    // A sprite light's strength for a frame of this brightness: full at ref and above. Unreadable frames (< 0) and ref 0 keep full strength.
+    inline float spriteEmitWeight(float emission, float ref) {
+        if ((emission < 0.0f) || !(ref > 0.0f)) {
+            return 1.0f;
+        }
+
+        return std::min(emission / ref, 1.0f);
+    }
+
+    // Alpha-weighted average colour of a tile in TMEM (see tmemTexel). coverage = mean alpha; false when nothing is visible.
     inline bool tmemAverage(const uint8_t* tmem, uint8_t fmt, uint8_t siz, uint32_t tmemWord, uint32_t lineWords, uint32_t width, uint32_t height, uint8_t palette, float out[3], float& coverage) {
         if ((siz > 2) || (fmt == 1) || (width == 0) || (height == 0)) {
             return false;
         }
-        auto rgba16 = [](uint16_t v, float c[4]) {
-            c[0] = float((v >> 11) & 0x1F) / 31.0f;
-            c[1] = float((v >> 6) & 0x1F) / 31.0f;
-            c[2] = float((v >> 1) & 0x1F) / 31.0f;
-            c[3] = float(v & 1);
-        };
         // At most 8x8 samples: it runs per draw call while recording.
         const uint32_t stepX = std::max<uint32_t>(1, width / 8);
         const uint32_t stepY = std::max<uint32_t>(1, height / 8);
-        const uint32_t bits = 4u << siz;
         double sum[3] = {};
         double alpha = 0.0;
         uint32_t n = 0;
         for (uint32_t y = 0; y < height; y += stepY) {
             for (uint32_t x = 0; x < width; x += stepX) {
-                const uint32_t bitOff = x * bits;
-                const uint32_t byte = ((tmemWord + y * lineWords) * 8 + bitOff / 8) & 0xFFF;
-                uint32_t v = 0;
-                if (bits == 4) {
-                    v = (bitOff & 4) ? (tmem[byte] & 0xF) : (tmem[byte] >> 4);
-                }
-                else if (bits == 8) {
-                    v = tmem[byte];
-                }
-                else {
-                    v = (uint32_t(tmem[byte]) << 8) | tmem[(byte + 1) & 0xFFF];
-                }
                 float c[4] = {};
-                if (fmt == 2) {
-                    const uint32_t idx = (bits == 4) ? ((uint32_t(palette) << 4) | v) : (v & 0xFF);
-                    const uint32_t e = (0x800 + idx * 8) & 0xFFF;
-                    rgba16(uint16_t((uint32_t(tmem[e]) << 8) | tmem[(e + 1) & 0xFFF]), c);
-                }
-                else if (fmt == 0) {
-                    if (bits != 16) {
-                        return false;
-                    }
-                    rgba16(uint16_t(v), c);
-                }
-                else if (fmt == 3) {
-                    const float i = (bits == 4) ? float(v >> 1) / 7.0f : (bits == 8) ? float(v >> 4) / 15.0f : float(v >> 8) / 255.0f;
-                    const float a = (bits == 4) ? float(v & 1) : (bits == 8) ? float(v & 0xF) / 15.0f : float(v & 0xFF) / 255.0f;
-                    c[0] = c[1] = c[2] = i;
-                    c[3] = a;
-                }
-                else {
-                    const float i = (bits == 4) ? float(v) / 15.0f : (bits == 8) ? float(v) / 255.0f : float(v >> 8) / 255.0f;
-                    c[0] = c[1] = c[2] = c[3] = i;
+                if (!tmemTexel(tmem, fmt, siz, tmemWord, lineWords, palette, x, y, c)) {
+                    return false;
                 }
                 sum[0] += c[0] * c[3];
                 sum[1] += c[1] * c[3];
