@@ -330,6 +330,8 @@ namespace RT64 {
         static std::unordered_map<uint32_t, uint32_t> s_sprites_cur, s_sprites_prev;
         static uint32_t s_mv_candidate_id = 0;
         static uint32_t s_mv_last_w1 = 0;
+        // DL address of the face command being drawn, for faces the game tagged at emission (buildOrientedFaceGeometry hook).
+        static uint32_t s_face_cmd_dl = 0;
         // Particles tracked across frames: each sprite takes the id of the previous-frame sprite nearest its predicted position, so pairing survives fast camera motion.
         struct F5WorldSprite { float x, y, z, r, vx, vy, vz; uint32_t node; float lx, ly, lz, lr, lvx, lvy, lvz; uint32_t ord, id; bool used; };
         static std::vector<F5WorldSprite> s_wsprites_cur, s_wsprites_prev;
@@ -371,8 +373,10 @@ namespace RT64 {
                 const float dist = std::sqrt(dx * dx + dy * dy + dz * dz);
                 const bool shrank = half < 0.7f * e.half;
                 const bool restart = (tex < e.tex) && ((e.tex - tex) < 0x20000u) && ((dist > 1.5f * std::max(half, 1.0f)) || shrank);
-                const bool respawn = half < 0.5f * e.half;
                 const bool noVelocity = (e.vx == 0.0f) && (e.vy == 0.0f) && (e.vz == 0.0f);
+                // A shrinking spark that lands where its motion predicts is the same particle (Sullust lava bursts halve in size every frame).
+                const bool onPath = !noVelocity && (dist <= 0.5f * std::sqrt(e.vx * e.vx + e.vy * e.vy + e.vz * e.vz));
+                const bool respawn = (half < 0.5f * e.half) && !onPath;
                 const bool jump = dist > (noVelocity ? 12.0f : 4.0f) * std::max(half, 1.0f);
                 if (gap || restart || respawn || jump) {
                     e.gen++;
@@ -864,6 +868,70 @@ namespace RT64 {
         static uint32_t f5_lookup_sprite_face(uint32_t phys) {
             const uint32_t i = (phys >> 3) & (F5_SPRITE_MAP_SIZE - 1);
             return (s_sprite_map_addr[i] == phys) ? s_sprite_map_face[i] : 0u;
+        }
+
+        // The same lookup, clearing the entry so a later command at a reused DL address is not tagged with this face.
+        static uint32_t f5_take_mapped_face(uint32_t phys) {
+            const uint32_t i = (phys >> 3) & (F5_SPRITE_MAP_SIZE - 1);
+            if (s_sprite_map_addr[i] != phys) {
+                return 0u;
+            }
+
+            s_sprite_map_addr[i] = 0;
+            return s_sprite_map_face[i];
+        }
+
+        // Id for a camera-facing quad from the face record the game built it from (buildOrientedFaceGeometry hook). The record holds the particle's world position at +8,
+        // so it tracks through camera turns; a new generation when the face was not drawn last frame or lands far from its predicted spot (the pool slot was reused). 0 = no record, or one drawn twice this frame.
+        static uint32_t f5_oriented_face_id(State* state, uint32_t face) {
+            static const bool s_on = env_on("ROGUESQ_F5_ORIENTED_FACE_ID", true);
+            if (!s_on || (face < 0x80000000u))
+            {
+                return 0;
+            }
+
+            struct Entry { uint64_t task; uint32_t gen; float x, y, z, vx, vy, vz; };
+            static std::unordered_map<uint32_t, Entry> s_faces;
+            const uint64_t task = state->displayListCounter;
+            const float x = (float)rd_be_s16(state->RDRAM, face + 0x8), y = (float)rd_be_s16(state->RDRAM, face + 0xA), z = (float)rd_be_s16(state->RDRAM, face + 0xC);
+
+            // Face records come from fixed pools, but drop the ones not drawn lately if something keeps adding new ones.
+            if (s_faces.size() > 8192) {
+                for (auto it = s_faces.begin(); it != s_faces.end();) {
+                    it = (it->second.task + 2 < task) ? s_faces.erase(it) : std::next(it);
+                }
+            }
+
+            auto ins = s_faces.try_emplace(face, Entry{ task, 0, x, y, z, 0, 0, 0 });
+            Entry& e = ins.first->second;
+            if (!ins.second && (e.task == task))
+            {
+                return 0;
+            }
+
+            bool newGen = ins.second;
+            if (!ins.second) {
+                const float dx = x - (e.x + e.vx), dy = y - (e.y + e.vy), dz = z - (e.z + e.vz);
+                const float speed = std::sqrt(e.vx * e.vx + e.vy * e.vy + e.vz * e.vz);
+
+                // Live particles land within a few units of the prediction; a reused slot jumps hundreds to thousands (Sullust lava, explosion fire).
+                constexpr float MinRespawnJump = 160.0f;
+                const bool gap = (e.task + 1 != task);
+                const bool jump = std::sqrt(dx * dx + dy * dy + dz * dz) > std::max(MinRespawnJump, 4.0f * speed);
+                if (gap || jump) {
+                    e.gen++;
+                    newGen = true;
+                }
+            }
+
+            e.vx = newGen ? 0.0f : (x - e.x);
+            e.vy = newGen ? 0.0f : (y - e.y);
+            e.vz = newGen ? 0.0f : (z - e.z);
+            e.task = task;
+            e.x = x;
+            e.y = y;
+            e.z = z;
+            return 0xA0000000u | (((face * 0x9E3779B1u) ^ (e.gen * 0xC2B2AE35u)) & 0x0FFFFFFFu);
         }
         // Look up the id a hook stored for this ring address; 0 if none.
         static uint32_t f5_lookup_node_id(uint32_t w1) {
@@ -3423,8 +3491,8 @@ namespace RT64 {
             const rs64xhair::TexSize tex{ (uint32_t)((t.lrs - t.uls) >> 2) + 1u, (uint32_t)((t.lrt - t.ult) >> 2) + 1u };
             const auto &sc = state->rdp->scissorRectStack[state->rdp->scissorStackSize - 1];
             const rs64xhair::Rect clip{ sc.ulx / 4.0f, sc.uly / 4.0f, sc.lrx / 4.0f, sc.lry / 4.0f };
-            rs64xhair::Element els[2];
-            for (int i = 0; i < 2; i++) {
+            rs64xhair::Element els[rs64xhair::kElementCount];
+            for (int i = 0; i < rs64xhair::kElementCount; i++) {
                 const uint32_t b = rs64xhair::kHudBase + rs64xhair::kElementOffsets[i];
                 union { uint32_t u; float f; } x, y;
                 x.u = rd_be_u32(state->RDRAM, b + rs64xhair::kPosOffset);
@@ -3504,7 +3572,7 @@ namespace RT64 {
             modelTop = hlslpp::float4x4(scale, 0, 0, 0, 0, scale, 0, 0, 0, 0, scale, 0, centre[0], centre[1], centre[2], 1);
             state->rsp->modelViewProjChanged = true;
             state->rsp->setVertex(0x80000000u | (F5_VTX_SCRATCH + F5_FACE_SLOT * sizeof(RSP::Vertex)), 4, F5_FACE_SLOT);
-            f5_hud_probe_slot(state, ring ? "xhair-quad-in" : "xhair-quad-out", F5_FACE_SLOT, 4);
+            f5_hud_probe_slot(state, (ring == 2) ? "xhair-quad-bomb" : ring ? "xhair-quad-in" : "xhair-quad-out", F5_FACE_SLOT, 4);
             state->rsp->drawIndexedTri(F5_FACE_SLOT, F5_FACE_SLOT + 2, F5_FACE_SLOT + 3);
             state->rsp->drawIndexedTri(F5_FACE_SLOT, F5_FACE_SLOT + 3, F5_FACE_SLOT + 1);
             modelTop = savedModel;
@@ -3649,8 +3717,14 @@ namespace RT64 {
                     const uint32_t mvOff = s_mv_last_w1 & 0x00FFFFFFu;
                     const bool inRing = f5_ring_buffer(mvOff) >= 0;
                     const auto &curGrp = state->rsp->extended.modelMatrixIdStack[state->rsp->extended.modelMatrixIdStackSize - 1];
+                    const uint32_t taggedFace = f5_take_mapped_face(s_face_cmd_dl);
                     if ((s_mv_candidate_id == 0) && !inRing && (s_mv_last_w1 != 0) && (curGrp.matrixId == G_EX_ID_AUTO)) {
-                        const uint32_t id = f5_baked_face_id(state, tmp, n);
+                        // Faces the game tagged at emission carry their particle's identity; the rest are tracked by position.
+                        uint32_t id = f5_oriented_face_id(state, taggedFace);
+                        if (id == 0) {
+                            id = f5_baked_face_id(state, tmp, n);
+                        }
+
                         if (id != 0) {
                             state->rsp->matrixId(id, /*push*/true, /*proj*/false, /*decompose*/true,
                                 G_EX_COMPONENT_INTERPOLATE, G_EX_COMPONENT_INTERPOLATE, G_EX_COMPONENT_INTERPOLATE, G_EX_COMPONENT_INTERPOLATE, G_EX_COMPONENT_INTERPOLATE,
@@ -3804,6 +3878,7 @@ namespace RT64 {
         // 0xBF: triangle. 16 bytes (cmd, indices*4 + flags); `w0&2` adds 8 bytes = per-face UVs
         // (words 3..5 of the 24-byte form).
         void op_bf_tri(State* state, DisplayList** dl) {
+            s_face_cmd_dl = (uint32_t)(reinterpret_cast<const uint8_t*>(*dl) - state->RDRAM);
             const uint32_t w0 = (*dl)->w0, w1 = (*dl)->w1;
             const bool textured = (w0 & 0x2) != 0;
             const uint32_t idx[3] = { ((w1 >> 16) & 0xFF) / 5u, ((w1 >> 8) & 0xFF) / 5u, (w1 & 0xFF) / 5u };
@@ -3822,6 +3897,7 @@ namespace RT64 {
         // 0xB4: oriented quad, 32 bytes: indices*5 (w1), indices*4, flags, 4 UVs. Chunk-tail filler
         // (byte ramps) means the walk left the list: return.
         void op_b4_quad(State* state, DisplayList** dl) {
+            s_face_cmd_dl = (uint32_t)(reinterpret_cast<const uint8_t*>(*dl) - state->RDRAM);
             const uint32_t w0 = (*dl)->w0, w1 = (*dl)->w1;
             static bool s_guard = !env_on("ROGUESQ_F5_NOFILLERGUARD", false);
             if (s_guard && (f5_is_byte_ramp(w0) || f5_is_byte_ramp(w1))) {
@@ -3848,6 +3924,7 @@ namespace RT64 {
 
         // 0x13: quad variant with the 0xBF framing (4 indices in w1; `w0&2` = UV block).
         void op_13_quad(State* state, DisplayList** dl) {
+            s_face_cmd_dl = (uint32_t)(reinterpret_cast<const uint8_t*>(*dl) - state->RDRAM);
             const uint32_t w0 = (*dl)->w0, w1 = (*dl)->w1;
             // Ucode order: bytes 1,2,3 then byte 0; colors/UVs follow it, tris (0,1,2) (0,2,3).
             const uint32_t idx[4] = { ((w1 >> 16) & 0xFF) / 5u, ((w1 >> 8) & 0xFF) / 5u, (w1 & 0xFF) / 5u, (w1 >> 24) / 5u };

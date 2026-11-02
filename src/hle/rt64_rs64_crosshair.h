@@ -6,7 +6,9 @@
 // Rogue Squadron's crosshair rings are texrects placed from the HUD struct (D_8010CA30); matching a texrect to its ring element lets it draw as an interpolated quad.
 namespace rs64xhair {
     constexpr uint32_t kHudBase = 0x8010CA30u;
-    constexpr uint32_t kElementOffsets[2] = { 0x28u, 0x58u };
+    // Outer ring, inner ring, Y-wing bomb sight.
+    constexpr int kElementCount = 3;
+    constexpr uint32_t kElementOffsets[kElementCount] = { 0x28u, 0x58u, 0x88u };
     constexpr uint32_t kFlagsOffset = 0x14u;
     constexpr uint32_t kPosOffset = 0x18u;
     // A ring's texrect upper-left is the element position plus this origin.
@@ -40,11 +42,13 @@ namespace rs64xhair {
         return axisMatches(r.ulx, r.lrx, ex, ex + w, clip.ulx, clip.lrx) && axisMatches(r.uly, r.lry, ey, ey + h, clip.uly, clip.lry);
     }
 
-    // Index of the ring element (0 outer, 1 inner) this texrect draws, or -1.
-    inline int ringOf(const Element els[2], const Rect &r, TexSize tex, int32_t dsdx, int32_t dtdy, const Rect &clip) {
+    // Index of the element (0 outer, 1 inner, 2 bomb sight) this texrect draws, or -1.
+    inline int ringOf(const Element els[kElementCount], const Rect &r, TexSize tex, int32_t dsdx, int32_t dtdy, const Rect &clip) {
         const float w = drawnSize(tex.w, dsdx), h = drawnSize(tex.h, dtdy);
-        for (int i = 0; i < 2; i++) {
-            if (matches(els[i], r, w, h, clip)) {
+        // The bomb sight is a 20x20 image in a 32x20 tile and is drawn tile-height wide.
+        const float wSquare = drawnSize(tex.h, dsdx);
+        for (int i = 0; i < kElementCount; i++) {
+            if (matches(els[i], r, w, h, clip) || matches(els[i], r, wSquare, h, clip)) {
                 return i;
             }
         }
