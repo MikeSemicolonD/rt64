@@ -6,7 +6,7 @@
 
 #include "shared/rt64_hlsl.h"
 
-#define RS64_MAX_LIGHTS 32
+#define RS64_MAX_LIGHTS 64
 
 #ifdef HLSL_CPU
 namespace interop {

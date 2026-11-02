@@ -18,7 +18,7 @@
 
 // Dynamic point lights for the F5 profile: candidates recorded at draw time, resolved per displayed frame.
 namespace rs64lights {
-    constexpr uint32_t MaxLights = 32;
+    constexpr uint32_t MaxLights = 64;
 
     // KindLampMark: not a light, where one of the game's blinking lamps (a 2D texture rectangle) is drawn this frame, for lamp presets.
     enum Kind : uint8_t { KindNone = 0, KindSprite = 1, KindLaser = 2, KindMesh = 3, KindLampMark = 4 };
@@ -1537,7 +1537,7 @@ namespace rs64lights {
         float sunMinElevationDeg;
         // Sprite frame brightness (spriteEmission) that lights at full strength; dimmer frames scale their light down. 0 = off.
         float spriteEmitRef;
-        // selectLights fades lights near the 32-light cut (A/B switch).
+        // selectLights fades lights near the light-count cut (A/B switch).
         bool cutFade;
         // Laser bolt lights get at most this many of the slots other lights leave.
         int maxProjectileLights;
