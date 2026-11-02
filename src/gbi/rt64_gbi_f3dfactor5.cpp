@@ -1207,15 +1207,6 @@ namespace RT64 {
                                 p.md.push_back(md);
                                 p.stale.push_back(0);
                                 p.md1Mesh.emplace(md, meshIdx);
-                                for (uint32_t off : { 0x3Cu, 0x40u }) {
-                                    uint32_t c = rd_be_u32(ram, md + off);
-                                    for (int k = 0; (k < 64) && f5_vaddr_ok(c, 0x108); ++k) {
-                                        p.chunkMesh.emplace(c & 0x00FFFFFFu, meshIdx);
-                                        const uint32_t nx = rd_be_u32(ram, c);
-                                        if (!f5_vaddr_ok(nx, 0x108) || (rd_be_u32(ram, nx + 4) != (0x80000000u | (c & 0x00FFFFFFu)))) break;
-                                        c = nx;
-                                    }
-                                }
                             }
                         }
                     }
@@ -1246,13 +1237,29 @@ namespace RT64 {
                 const uint32_t a = (i < 50) ? (0x1394B0u + i) : (0x139020u + i - 50);
                 sig = (sig ^ ram[a ^ 3]) * 1099511628211ull;
             }
-            if (sig != r.sig) {
+            const bool rebuilt = (sig != r.sig);
+            if (rebuilt) {
                 r.sig = sig;
                 f5_mesh_registry_rebuild(ram, r);
-                static const bool s_lg = env_on("ROGUESQ_LOG_MESH_ID", false);
-                if (s_lg) {
-                    std::fprintf(stderr, "[mesh-id] HOB table changed: %zu meshes, %zu DL chunks mapped\n", r.names.size(), r.chunkMesh.size());
+            }
+
+            // DL chunk memory is recycled without the HOB table changing, so chains are walked from the current heads every task (a hangar prop in a chunk the Y-wing had owned took its exhaust lights).
+            r.chunkMesh.clear();
+            for (uint32_t i = 0; i < (uint32_t)r.md.size(); ++i) {
+                for (uint32_t off : { 0x3Cu, 0x40u }) {
+                    uint32_t c = rd_be_u32(ram, r.md[i] + off);
+                    for (int k = 0; (k < 64) && f5_vaddr_ok(c, 0x108); ++k) {
+                        r.chunkMesh.emplace(c & 0x00FFFFFFu, i);
+                        const uint32_t nx = rd_be_u32(ram, c);
+                        if (!f5_vaddr_ok(nx, 0x108) || (rd_be_u32(ram, nx + 4) != (0x80000000u | (c & 0x00FFFFFFu)))) break;
+                        c = nx;
+                    }
                 }
+            }
+
+            static const bool s_lg = env_on("ROGUESQ_LOG_MESH_ID", false);
+            if (rebuilt && s_lg) {
+                std::fprintf(stderr, "[mesh-id] HOB table changed: %zu meshes, %zu DL chunks mapped\n", r.names.size(), r.chunkMesh.size());
             }
             // A real chain head has back-link 0 (+0x3C) or links into the mesh's own chain (+0x40). Meshes the game builds on the fly (r_pow, debris1)
             // keep head pointers into DL memory other models reuse, so their registered chunks are someone else's; checked each frame, as memory moves on.
