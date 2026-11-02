@@ -340,6 +340,17 @@ RS64TraceOut PSMain(in float4 pos : SV_Position, in float2 uv : TEXCOORD0) {
         uint id;
         uint prim;
         if (!rs64ClosestHit(r, gShadows.cutoutDrawCount, t, id, prim)) {
+            // Water whose ray hits nothing reflects the sky (the dome is not traced): horizon to zenith by the ray's elevation off the flat surface,
+            // fogged as the view fogs the water there.
+            if (isRefl && waterRefl && (gShadows.skyZenith.w > 0.0f)) {
+                const float3 sky = lerp(gShadows.skyHorizon.rgb, gShadows.skyZenith.rgb, smoothstep(0.05f, 0.6f, saturate(dot(r.Direction, n))));
+                waterR = lerp(sky, gShadows.fogColor.rgb, rs64FogAlpha(p));
+                waterF = saturate(rs64Schlick(saturate(dot(-v, n)), 0.02f) * kWaterReflStrength) * rs64WaterShoreAlpha(p) * gShadows.skyZenith.w;
+                if (gShadows.debugMode == 9) {
+                    refl += sky;
+                }
+            }
+
             continue;
         }
         const float4 hc = rs64HitColor(id, prim, gShadows.hitParams);
@@ -386,7 +397,7 @@ RS64TraceOut PSMain(in float4 pos : SV_Position, in float2 uv : TEXCOORD0) {
     }
     // A fogged surface shows the fog's colour, so its shadow, AO and bounce light fade with the fog in front of it.
     const float clear = 1.0f - rs64FogAlpha(p);
-    shadow *= clear;
+    shadow *= clear * lerp(1.0f, gShadows.skyHorizon.w, rc.waterCover);
     ao *= clear;
     gi *= clear;
 

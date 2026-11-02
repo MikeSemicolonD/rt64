@@ -241,6 +241,11 @@ namespace RT64 {
             std::vector<uint32_t> rangeCalls;
             std::vector<rs64lights::IndexRange> emissiveRanges;
             std::vector<uint32_t> emissiveCalls;
+            // The sky dome's draws this frame and the colours a missed water reflection ray takes from them (horizon, zenith; w = 1 when valid).
+            std::vector<rs64lights::IndexRange> skyRanges;
+            std::vector<uint32_t> skyCalls;
+            hlslpp::float4 skyHorizon = hlslpp::float4(0.0f, 0.0f, 0.0f, 0.0f);
+            hlslpp::float4 skyZenith = hlslpp::float4(0.0f, 0.0f, 0.0f, 0.0f);
             std::vector<uint32_t> emissiveIndices;
             std::vector<rs64lights::HitColorEntry> hitTable, emissiveTable;
             uint32_t terrainColor = 0;

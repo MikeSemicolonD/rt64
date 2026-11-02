@@ -1712,6 +1712,8 @@ namespace RT64 {
         rs64Shadow.rangeCalls.clear();
         rs64Shadow.emissiveRanges.clear();
         rs64Shadow.emissiveCalls.clear();
+        rs64Shadow.skyRanges.clear();
+        rs64Shadow.skyCalls.clear();
         rs64Shadow.craftRanges.clear();
         // Gathered per frame with this frame's vertex buffer: a frame that builds no scene must not reuse them (the buffer may have been reallocated).
         rs64Shadow.indices.clear();
@@ -2633,6 +2635,13 @@ namespace RT64 {
                     if (hitColors && drawnTerrain) {
                         terrainCalls.push_back({ { call.meshDesc.faceIndicesStart, call.callDesc.triangleCount }, call.callDesc.callIndex });
                     }
+                    // The sky dome: the only cull=BOTH geometry pinned to a flat depth (isDomeTri in rt64_rsp.cpp).
+                    const uint32_t cullBoth = call.callDesc.cullBothMask;
+                    if (hitColors && cm.primDepth && (cullBoth != 0) && ((call.callDesc.geometryMode & cullBoth) == cullBoth) && !cm.fillOrCopy) {
+                        rs64Shadow.skyRanges.push_back({ call.meshDesc.faceIndicesStart, call.callDesc.triangleCount });
+                        rs64Shadow.skyCalls.push_back(call.callDesc.callIndex);
+                    }
+
                     if (hitColors && (emissive || glowCard) && !cm.fillOrCopy) {
                         rs64Shadow.emissiveRanges.push_back({ call.meshDesc.faceIndicesStart, call.callDesc.triangleCount });
                         rs64Shadow.emissiveCalls.push_back(call.callDesc.callIndex);
@@ -3188,6 +3197,9 @@ namespace RT64 {
         cb.waterPrim = rs64Shadow.terrainWaterPrim;
         cb.fogParams = { fog.mul, fog.offset, fog.valid ? 1.0f : 0.0f, 0.0f };
         cb.fogColor = { fog.color[0], fog.color[1], fog.color[2], 0.0f };
+        const hlslpp::float4 &skyH = rs64Shadow.skyHorizon, &skyZ = rs64Shadow.skyZenith;
+        cb.skyHorizon = { (float)skyH.x, (float)skyH.y, (float)skyH.z, cfg.waterShadow };
+        cb.skyZenith = { (float)skyZ.x, (float)skyZ.y, (float)skyZ.z, ((float)skyZ.w > 0.0f) ? cfg.reflSky : 0.0f };
         cb.featureMask |= (soft && (cb.waterPrim > 0)) ? 16u : 0u;
         cb.terrainParams = { cfg.terrainNormalWindow, 0.0f, 0.0f, 0.0f };
         rs64lights::Mat4 sfv;
@@ -3435,6 +3447,37 @@ namespace RT64 {
         double emissiveSum[3] = {};
         buildTable(s.ranges, s.rangeCalls, false, s.hitTable, casterSum);
         buildTable(s.emissiveRanges, s.emissiveCalls, true, s.emissiveTable, emissiveSum);
+
+        // The dome is world-aligned in its model space with up along -Y (heights grow downward), so a triangle's elevation needs no transform.
+        thread_local std::vector<rs64lights::SkySample> skySamples;
+        skySamples.clear();
+        for (size_t r = 0; (r < s.skyRanges.size()) && (r < s.skyCalls.size()); ++r) {
+            rs64lights::SkySample sample;
+            drawColor(s.skyRanges[r], s.skyCalls[r], sample.rgb);
+            for (uint32_t t = 0; t < s.skyRanges[r].triangleCount; ++t) {
+                float c[3] = {};
+                bool ok = true;
+                for (uint32_t k = 0; (k < 3) && ok; ++k) {
+                    const size_t f = size_t(s.skyRanges[r].start) + t * 3 + k;
+                    const size_t v = (f < fi.size()) ? fi[f] : SIZE_MAX;
+                    ok = (v != SIZE_MAX) && (v * 3 + 2 < pos.size());
+                    for (int j = 0; (j < 3) && ok; ++j) {
+                        c[j] += pos[v * 3 + j];
+                    }
+                }
+
+                const float len = std::sqrt(c[0] * c[0] + c[1] * c[1] + c[2] * c[2]);
+                if (ok && (len > 0.0f)) {
+                    sample.elevation = -c[1] / len;
+                    skySamples.push_back(sample);
+                }
+            }
+        }
+
+        float skyH[3] = {}, skyZ[3] = {};
+        const bool sky = rs64lights::skyBands(skySamples.data(), skySamples.size(), skyH, skyZ);
+        s.skyHorizon = hlslpp::float4(skyH[0], skyH[1], skyH[2], sky ? 1.0f : 0.0f);
+        s.skyZenith = hlslpp::float4(skyZ[0], skyZ[1], skyZ[2], sky ? 1.0f : 0.0f);
         s.emissiveIndices.clear();
         rs64lights::gatherCasterIndices(fi.data(), fi.size(), s.emissiveRanges.data(), s.emissiveRanges.size(), s.emissiveIndices);
         const double n = double(std::max<size_t>(s.hitTable.size(), 1));

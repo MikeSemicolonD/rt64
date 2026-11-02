@@ -823,9 +823,11 @@ namespace rs64lights {
 
     // HMP terrain (descriptor 0x80136DC0): W*H cells, each a 512-unit tile of 5x5 s8 heights (y = h << 4, base 0).
     constexpr int32_t TerrainTileSpan = 512;
-    // The traced water surface's depth under the water level, heightmap units: at the level, just under the drawn water (lifted 2 record units), so
-    // a pixel's terrain lookup finds it. Heights grow downward: water is where the ground is at or above the level (selectGridCellTileVariant 0x80046030).
-    constexpr int32_t TerrainWaterDip = 0;
+    // The drawn water surface's lift over the water level (record units; heights grow downward), as kWaterLift in RS64Terrain.hlsli; the water fades
+    // out over it as a shore rises. Water is where the ground is at or above the level (selectGridCellTileVariant 0x80046030).
+    constexpr float TerrainWaterLift = 16.0f;
+    // How far under the drawn water the traced water sits: a pixel's terrain lookup (a few % of its distance) must reach it from a camera skimming the sea.
+    constexpr float TerrainWaterTraceGap = 1.0f;
 
     // Inputs of the game's terrain vertex lighting: descriptor 0x80136DC0 ambient (+0x3C), cell scale (+0x10) and sun (light object at +0x48).
     struct TerrainShade {
@@ -1055,9 +1057,9 @@ namespace rs64lights {
             }
         }
 
-        // Water and shore cells also get a flat surface just under the drawn water (flat at the level), so traced rays meet water instead of the
-        // seabed without the water surface shadowing itself.
-        const float y = float((m.waterLevel + TerrainWaterDip) << 4) * m.heightScale;
+        // Water and shore cells also get a flat surface just under the drawn water, so traced rays meet water instead of the seabed without the
+        // water surface shadowing itself.
+        const float y = (float(m.waterLevel * 16) - TerrainWaterLift + TerrainWaterTraceGap) * m.heightScale;
         forEachTerrainWaterCell(m, [&](int32_t col, int32_t row, size_t) {
             const uint32_t a = uint32_t(pos.size() / 3);
             // The outer ring reaches TerrainWaterFarCells further, as the drawn water does.
@@ -1071,10 +1073,6 @@ namespace rs64lights {
             idx.insert(idx.end(), tri, tri + 6);
         });
     }
-
-    // The drawn water surface's lift over the water level (record units; heights grow downward), as kWaterLift in RS64Terrain.hlsli; the water fades
-    // out over it as a shore rises.
-    constexpr float TerrainWaterLift = 16.0f;
 
     // Hit colours for buildTerrainMesh's triangles, in its cell order: header (triangles per ground cell, first water triangle or 0, ground cells, the
     // drawn water surface's map-space y as float bits), then one rgba8 per ground cell and per water quad: the cell's texture average (texAvg, rgb8 per
@@ -1533,6 +1531,10 @@ namespace rs64lights {
         float reflRoughnessDeg;
         float reflRange;
         float reflStrength;
+        // Strength of the sky a water reflection ray sees when it hits nothing (0 = water keeps its drawn colour there).
+        float reflSky;
+        // Cast shadow strength on water (1 = as on ground): what the water reflects stays lit in a shadow.
+        float waterShadow;
         // A level sun lower than this (degrees) is lifted to it: a near-horizon sun throws long shadows and the terminator blackens gentle slopes.
         float sunMinElevationDeg;
         // Sprite frame brightness (spriteEmission) that lights at full strength; dimmer frames scale their light down. 0 = off.
@@ -1604,6 +1606,8 @@ namespace rs64lights {
             envFloat("ROGUESQ_RT_REFL_ROUGHNESS", 20.0f),
             envFloat("ROGUESQ_RT_REFL_RANGE", 0.1f),
             envFloat("ROGUESQ_RT_REFL_STRENGTH", 3.0f),
+            std::max(envFloat("ROGUESQ_RT_REFL_SKY", 1.0f), 0.0f),
+            std::clamp(envFloat("ROGUESQ_RT_WATER_SHADOW", 0.5f), 0.0f, 1.0f),
             std::clamp(envFloat("ROGUESQ_RT_SUN_MIN_ELEVATION", 25.0f), 0.0f, 89.0f),
             std::max(envFloat("ROGUESQ_RT_LIGHTS_SPRITE_EMIT_REF", 0.12f), 0.0f),
             envFloat("ROGUESQ_RT_LIGHTS_CUT_FADE", 1.0f) != 0.0f,
@@ -2136,6 +2140,43 @@ namespace rs64lights {
             float c = ((tex != nullptr) ? tex[k] : vtx[k]) * (usePrim ? prim[k] : 1.0f);
             out[k] = std::isfinite(c) ? std::clamp(c, 0.0f, 1.0f) : 0.0f;
         }
+    }
+
+    // One sky dome triangle for skyBands: its draw's average colour and the sine of its centroid's elevation above the horizon.
+    struct SkySample {
+        float rgb[3];
+        float elevation;
+    };
+
+    // The sky a missed water reflection sees, from the dome's triangles: the average near the horizon (below ~15 degrees) and overhead (above ~45 degrees).
+    // A band with no triangles takes the whole dome's average. False when there is no dome.
+    inline bool skyBands(const SkySample* samples, size_t count, float horizon[3], float zenith[3]) {
+        constexpr float HorizonMax = 0.26f;
+        constexpr float ZenithMin = 0.7f;
+        double low[3] = {}, high[3] = {}, total[3] = {};
+        uint32_t nLow = 0, nHigh = 0;
+        for (size_t i = 0; i < count; ++i) {
+            const SkySample& s = samples[i];
+            for (int k = 0; k < 3; ++k) {
+                total[k] += s.rgb[k];
+                low[k] += (s.elevation < HorizonMax) ? s.rgb[k] : 0.0;
+                high[k] += (s.elevation > ZenithMin) ? s.rgb[k] : 0.0;
+            }
+            nLow += (s.elevation < HorizonMax) ? 1 : 0;
+            nHigh += (s.elevation > ZenithMin) ? 1 : 0;
+        }
+
+        if (count == 0) {
+            return false;
+        }
+
+        for (int k = 0; k < 3; ++k) {
+            const float avg = float(total[k] / double(count));
+            horizon[k] = (nLow > 0) ? float(low[k] / double(nLow)) : avg;
+            zenith[k] = (nHigh > 0) ? float(high[k] / double(nHigh)) : avg;
+        }
+
+        return true;
     }
 
     // Shadow-pass composite, blend dst * src + dst * srcA = dst * dark * (1 + indirect): a = darkening from sun shadow and AO, rgb = dark x indirect clamped to 1
