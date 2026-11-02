@@ -20,6 +20,9 @@ namespace rs64xhair {
     struct Rect { float ulx, uly, lrx, lry; };
     struct TexSize { uint32_t w, h; };
 
+    // Tile size of each element's texture; the elements stay flagged outside the flight HUD (the results-screen iris).
+    constexpr TexSize kElementTex[kElementCount] = { { 32, 32 }, { 16, 16 }, { 32, 20 } };
+
     // On-screen length of a texture span drawn at a 5.10 step.
     inline float drawnSize(uint32_t texels, int32_t step) {
         return (step > 0) ? (float)texels * 1024.0f / (float)step : 0.0f;
@@ -48,6 +51,11 @@ namespace rs64xhair {
         // The bomb sight is a 20x20 image in a 32x20 tile and is drawn tile-height wide.
         const float wSquare = drawnSize(tex.h, dsdx);
         for (int i = 0; i < kElementCount; i++) {
+            if ((tex.w != kElementTex[i].w) || (tex.h != kElementTex[i].h))
+            {
+                continue;
+            }
+
             if (matches(els[i], r, w, h, clip) || matches(els[i], r, wSquare, h, clip)) {
                 return i;
             }

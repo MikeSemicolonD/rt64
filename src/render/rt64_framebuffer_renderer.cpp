@@ -2408,13 +2408,25 @@ namespace RT64 {
                             const FixedRect &sc = fbPair.scissorRect;
                             const FixedRect &rc = call.callDesc.rect;
                             const bool edgePanel = regularOrigins && !sc.isNull() && (rc.uly <= sc.uly + 4) && (rc.lry + 4 >= sc.lry) && ((rc.ulx <= sc.ulx + 4) || (rc.lrx + 4 >= sc.lrx));
+                            FixedRect drawRect = rc;
                             if (tileCopiesUsed || coversScissorWidth || edgePanel) {
                                 invRatioScale = 1.0f;
+
+                                // The results wipe ends half a native pixel short of the left edge; stretched, that left a strip of the scene.
+                                if (!sc.isNull() && (coversScissorWidth || edgePanel)) {
+                                    if (drawRect.ulx <= sc.ulx + 4) {
+                                        drawRect.ulx = sc.ulx;
+                                    }
+
+                                    if (drawRect.lrx + 4 >= sc.lrx) {
+                                        drawRect.lrx = sc.lrx;
+                                    }
+                                }
                             }
                             else {
                                 horizontalMisalignment = p.horizontalMisalignment;
                             }
-                            RenderViewport viewportRect = convertViewportRect(call.callDesc.rect, p.resolutionScale, p.fbWidth, invRatioScale, extOriginPercentage, horizontalMisalignment, call.callDesc.rectLeftOrigin, call.callDesc.rectRightOrigin);
+                            RenderViewport viewportRect = convertViewportRect(drawRect, p.resolutionScale, p.fbWidth, invRatioScale, extOriginPercentage, horizontalMisalignment, call.callDesc.rectLeftOrigin, call.callDesc.rectRightOrigin);
 
                             triangles.screenScale = { viewportRect.width / framebuffer.viewport.width, viewportRect.height / framebuffer.viewport.height };
                             triangles.screenOffset.x = halfPixelOffset.x + ((viewportRect.x + viewportRect.width / 2.0f) - halfViewportSize.x) / halfViewportSize.x;
