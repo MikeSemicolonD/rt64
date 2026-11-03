@@ -1190,6 +1190,10 @@ namespace RT64 {
         {
             constexpr float kNearW = 1e-4f;
             constexpr float kGuard = 2.0f;   // clip only when a vertex leaves this NDC band (GPU guard band is larger)
+            // The x band follows the widescreen widening, or an ultrawide view (32:9 is ~2.5x) cuts the sky dome inside the screen.
+            const hlslpp::float2 resScale = state->ext.sharedQueueResources->resolutionScale;
+            const float widen = (float(resScale.y) > 0.0f) ? float(resScale.x) / float(resScale.y) : 1.0f;
+            const float guardX = std::max(kGuard, 1.25f * widen);
             const bool degenerate = (globalIndices[0] == globalIndices[1]) || (globalIndices[1] == globalIndices[2]) || (globalIndices[0] == globalIndices[2]);
             static int s_clip = -1;
             if (s_clip < 0) { const char* e = std::getenv("ROGUESQ_F5_NO_NEAR_CLIP"); s_clip = (e && e[0] == '1') ? 0 : 1; }
@@ -1206,7 +1210,7 @@ namespace RT64 {
                     if (pw <= kNearW) { extreme = true; anyNear = true; }
                     const float apx = px < 0.0f ? -px : px;
                     const float apy = py < 0.0f ? -py : py;
-                    if (apx > kGuard * pw || apy > kGuard * pw) extreme = true;
+                    if (apx > guardX * pw || apy > kGuard * pw) extreme = true;
                 }
             }
             if (farCount == 3) return;
@@ -1224,12 +1228,12 @@ namespace RT64 {
 
             if (extreme) {
                 // Signed distance to near and the guard-band lateral planes; clipping at |x| = w cut the sky at the 4:3 edge once widescreen widens the view.
-                auto planeDist = [](const hlslpp::float4 &p, int plane) -> float {
+                auto planeDist = [guardX](const hlslpp::float4 &p, int plane) -> float {
                     const float x = p.x, y = p.y, z = p.z, w = p.w;
                     switch (plane) {
                         case 0:  return w - kNearW;
-                        case 1:  return kGuard * w + x;
-                        case 2:  return kGuard * w - x;
+                        case 1:  return guardX * w + x;
+                        case 2:  return guardX * w - x;
                         case 3:  return kGuard * w + y;
                         case 4:  return kGuard * w - y;
                         default: return w - z;
