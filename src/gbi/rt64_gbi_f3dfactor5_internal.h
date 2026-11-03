@@ -121,6 +121,8 @@ namespace RT64 {
         void setCombine_logged(State *state, DisplayList **dl);
         void fillRect_logged(State *state, DisplayList **dl);  // fillRect_op02_aware stays in core (op_02-coupled)
         void texrectLLE_guarded(State *state, DisplayList **dl);
+        // RS64 HUD marker (rs64hud::kMarkerOpcode): the screen side the next texrects of this 2D element anchor to.
+        void op_60_hud_side(State *state, DisplayList **dl);
         // RS64 light for a texture rectangle drawn as a 3D glow (the game's blinking lamps): centre and half width in native pixels.
         void f5_lamp_light(State *state, float cx, float cy, float halfW);
         void texrectFlipLLE_guarded(State *state, DisplayList **dl);

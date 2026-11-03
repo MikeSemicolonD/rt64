@@ -34,6 +34,7 @@
 #include "hle/rt64_rs64_cable.h"
 #include "hle/rt64_rs64_lights.h"
 #include "hle/rt64_rs64_crosshair.h"
+#include "hle/rt64_rs64_hud.h"
 #include "hle/rt64_rs64_mcp.h"
 
 #include "rt64_gbi_f3dex.h"
@@ -3786,6 +3787,7 @@ namespace RT64 {
             gbi->map[0x03] = &op_03_f5;
             gbi->map[0x04] = &op_04_vertex;
             gbi->map[0x14] = &op_consume16;    // 16-byte state command (not a vertex batch)
+            gbi->map[rs64hud::kMarkerOpcode] = &op_60_hud_side;
             gbi->map[0x13] = &op_13_quad;
             gbi->map[0xBF] = &op_bf_tri;
             gbi->map[0xB4] = &op_b4_quad;

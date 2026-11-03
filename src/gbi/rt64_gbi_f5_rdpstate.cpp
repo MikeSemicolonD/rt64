@@ -19,6 +19,7 @@
 
 #include "hle/rt64_state.h"
 #include "hle/rt64_rdp.h"
+#include "hle/rt64_rs64_hud.h"
 #include "hle/rt64_rs64_lights.h"
 
 #include "rt64_gbi_f3d.h"
@@ -378,6 +379,51 @@ namespace RT64 {
             dlh_tick();
         }
 
+        // The side the last RS64 HUD marker named, valid only in the task it was read in.
+        static rs64hud::Side s_hud_side = rs64hud::None;
+        static uint64_t s_hud_task = 0;
+
+        void op_60_hud_side(State *state, DisplayList **dl) {
+            s_hud_side = rs64hud::Side((*dl)->w0 & 0xFFu);
+            s_hud_task = state->displayListCounter;        }
+
+        // Draws one texrect of an edge-anchored HUD element with its side as the rect and scissor origins; both edges share it, so the rect moves without stretching.
+        template <class Draw>
+        static void with_hud_side(State *state, Draw draw) {
+            const rs64hud::Side side = (s_hud_task == state->displayListCounter) ? s_hud_side : rs64hud::None;            if (side == rs64hud::None) {
+                draw();
+                return;
+            }
+
+            RDP &rdp = *state->rdp;
+            const uint16_t origin = (side == rs64hud::Left) ? G_EX_ORIGIN_LEFT : G_EX_ORIGIN_RIGHT;
+            ExtendedAlignment align;
+            align.leftOrigin = origin;
+            align.rightOrigin = origin;
+
+            // RDP::drawRect reads right-origin coordinates relative to the right edge; the game's are absolute.
+            if (side == rs64hud::Right) {
+                align.leftOffset = -int32_t(rdp.colorImage.width) * 4;
+                align.rightOffset = align.leftOffset;
+            }
+
+            const ExtendedAlignment savedRect = rdp.extended.global.rect;
+            const int top = rdp.scissorStackSize - 1;
+            const uint16_t savedLeft = rdp.extended.scissorLeftOriginStack[top];
+            const uint16_t savedRight = rdp.extended.scissorRightOriginStack[top];
+            rdp.setRectAlign(align);
+            rdp.extended.scissorLeftOriginStack[top] = origin;
+            rdp.extended.scissorRightOriginStack[top] = origin;
+            state->updateDrawStatusAttribute(DrawAttribute::Scissor);
+
+            draw();
+
+            rdp.setRectAlign(savedRect);
+            rdp.extended.scissorLeftOriginStack[top] = savedLeft;
+            rdp.extended.scissorRightOriginStack[top] = savedRight;
+            state->updateDrawStatusAttribute(DrawAttribute::Scissor);
+        }
+
         void texrectLLE_guarded(State *state, DisplayList **dl) {
             // Track per-color-buffer draw ACTIVITY with exponential decay → publish the
             // most-active buffer as g_most_drawn_fb. This is the buffer the game is
@@ -567,7 +613,7 @@ namespace RT64 {
                 (*dl)++;
                 return;
             }
-            GBI_RDP::texrectLLE(state, dl);
+            with_hud_side(state, [&] { GBI_RDP::texrectLLE(state, dl); });
             // The ucode consumes all 16 bytes. Left in the stream, the S/T/DsDx/DtDy word runs as a command whenever S >= 0x100 (e.g. 0x0D = SETOTHERMODE_H forcing copy mode: the white flash on the game-over fade).
             (*dl)++;
         }
@@ -578,7 +624,7 @@ namespace RT64 {
                 return;
             }
             dlh_followup(*dl);
-            GBI_RDP::texrectFlipLLE(state, dl);
+            with_hud_side(state, [&] { GBI_RDP::texrectFlipLLE(state, dl); });
             (*dl)++;
         }
 

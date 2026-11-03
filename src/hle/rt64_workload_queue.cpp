@@ -11,8 +11,11 @@
 #include "common/rt64_thread.h"
 
 #include "rt64_present_queue.h"
+#include "rt64_rs64_hud.h"
 
 #define ENABLE_HIGH_RESOLUTION_RENDERER 1
+
+std::atomic<float> g_rs64_hud_placement{ 0.0f };
 
 namespace RT64 {
     // WorkloadQueue
@@ -184,7 +187,8 @@ namespace RT64 {
             break;
         case UserConfiguration::AspectRatio::Original:
         default:
-            workloadConfig.extAspectPercentage = 0.0f;
+            // Only the RS64 HUD markers use extended origins, so the default mode follows the HUD placement setting.
+            workloadConfig.extAspectPercentage = std::clamp(g_rs64_hud_placement.load(std::memory_order_relaxed), 0.0f, 1.0f);
             break;
         }
 
