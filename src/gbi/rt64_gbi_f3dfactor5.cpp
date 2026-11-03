@@ -982,6 +982,28 @@ namespace RT64 {
         static constexpr uint32_t F5_VP_SCRATCH  = 0x00A01000u;
         static constexpr uint32_t F5_FACE_SLOT   = 200;           // temp slots for per-face UVs
 
+        // Camera-space translations the game's N64 matrices can't hold (|t| >= 128), written by the convertMat3x4ToN64Mtx hook: 16 bytes per
+        // slot by matrix address (address, x, y, z floats). The game packs t * 2^24, so the matrix holds t * 256, clamped to +-127 * 256.
+        static constexpr uint32_t F5_FAR_MTX_TABLE = 0x00A4C000u;
+        static constexpr uint32_t F5_FAR_MTX_SLOTS = 0x1000u;
+
+        // A slot applies only while the loaded modelview still holds its clamped translation: other matrix builders reuse the address and never clear it.
+        static bool f5_far_modelview(const uint8_t* ram, uint32_t addr, hlslpp::float4x4& m) {
+            const uint32_t slot = F5_FAR_MTX_TABLE + ((addr >> 6) & (F5_FAR_MTX_SLOTS - 1)) * 16;
+            if (rd_be_u32(ram, slot) != (0x80000000u | addr)) return false;
+            m = reinterpret_cast<const FixedMatrix*>(ram + addr)->toMatrix4x4();
+            float t[3];
+            for (int i = 0; i < 3; ++i) {
+                const uint32_t bits = rd_be_u32(ram, slot + 4 + 4 * i);
+                std::memcpy(&t[i], &bits, sizeof(float));
+                if (std::fabs((float)m[3][i] - std::clamp(t[i], -127.0f, 127.0f) * 256.0f) > 0.01f) return false;
+            }
+            for (int i = 0; i < 3; ++i) {
+                m[3][i] = t[i] * 256.0f;
+            }
+            return true;
+        }
+
         struct F5Vp { int16_t vscale[4]; int16_t vtrans[4]; };   // RT64 reads halfword-swapped words
         static uint32_t s_chunk_base[F5_MAX_DEPTH];   // RDRAM offset of the chunk each level executes
         static uint64_t s_chunk_counter = ~0ull;
@@ -1936,10 +1958,10 @@ namespace RT64 {
                 return;
             }
             // Per-task budgets: a stale call into recycled chunks otherwise storms the parser with thousands of
-            // garbage faces (hw goldens: < 400 chunk entries, < 700 faces per task). Ending the task drops the
-            // rest of one frame instead of stalling for half a second.
-            static const uint32_t s_entry_cap = [](){ const char* e = std::getenv("ROGUESQ_F5_ENTRY_CAP"); return (e && *e) ? (uint32_t)std::atoi(e) : 2048u; }();
-            static const uint32_t s_face_cap = [](){ const char* e = std::getenv("ROGUESQ_F5_FACE_CAP"); return (e && *e) ? (uint32_t)std::atoi(e) : 4096u; }();
+            // garbage faces. Ending the task drops the rest of one frame (HUD included), so the caps sit well above
+            // a long draw distance with distant stand-ins (Rescue on Kessel at 8x passes 4096 faces).
+            static const uint32_t s_entry_cap = [](){ const char* e = std::getenv("ROGUESQ_F5_ENTRY_CAP"); return (e && *e) ? (uint32_t)std::atoi(e) : 16384u; }();
+            static const uint32_t s_face_cap = [](){ const char* e = std::getenv("ROGUESQ_F5_FACE_CAP"); return (e && *e) ? (uint32_t)std::atoi(e) : 65536u; }();
             if (s_task_entries > s_entry_cap || s_task_faces > s_face_cap) {
                 s_task_budget_trip = 1;
                 static int s_n = 0;
@@ -3011,7 +3033,13 @@ namespace RT64 {
                   }
             }
 
-            state->rsp->matrix(w1, proj ? 0x03 : 0x02);   // F3D constants: PROJECTION=1, LOAD=2
+            hlslpp::float4x4 farMv;
+            if (!proj && f5_far_modelview(ram, addr, farMv)) {
+                state->rsp->matrixCommon(farMv, w1, 0x02);
+            }
+            else {
+                state->rsp->matrix(w1, proj ? 0x03 : 0x02);   // F3D constants: PROJECTION=1, LOAD=2
+            }
             if (!proj) {
                 f5_regrid_after_load(state);
             }
