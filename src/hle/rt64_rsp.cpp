@@ -1101,17 +1101,10 @@ namespace RT64 {
         // nothing". The skybox dome is submitted this way and viewed from the inside; both faces must
         // draw (no CPU backface test here, no GPU cull in rt64_state) so every presented region is
         // covered by real dome pixels. Dropping it via the F3DEX cull-both early-out left the sky black.
-        // ROGUESQ_F5_CULLBOTH_DRAW=0 restores the old drop-everything behavior for A/B.
         // (Superseded when f5Cull: the ucode's cull test only honors 0x2000 and ignores 0x1000, so
-        // both bits = back-face cull; the double-sided path stays as the ROGUESQ_F5_CULL=0 fallback.)
-        static int s_cullbothdraw = -1; if (s_cullbothdraw < 0) { const char* e = std::getenv("ROGUESQ_F5_CULLBOTH_DRAW"); s_cullbothdraw = (e && e[0] == '0') ? 0 : 1; }
-        const bool doubleSided = !f5Cull && s_cullbothdraw && (geometryMode & cullBothMask) == cullBothMask;
-        if (!f5Cull && !s_cullbothdraw && (geometryMode & cullBothMask) == cullBothMask) {
-            return;
-        }
+        // both bits = back-face cull; the double-sided path applies to other ucodes.)
+        const bool doubleSided = !f5Cull && (geometryMode & cullBothMask) == cullBothMask;
         const uint32_t cullTestMask = f5Cull ? (cullBothMask & ~cullFrontMask) : cullBothMask;
-        // ROGUESQ_SKY_NOCULL=1: A/B — disable ALL per-tri backface culling.
-        static int s_nocull = -1; if (s_nocull < 0) { const char* e = std::getenv("ROGUESQ_SKY_NOCULL"); s_nocull = (e && e[0] == '1') ? 1 : 0; }
 
         state->rdp->checkFramebufferPair();
         
@@ -1277,7 +1270,7 @@ namespace RT64 {
                     workload.rs64CastOnly.push_back({ { globalIndices[0], globalIndices[1], globalIndices[2] }, om.L, om.H, fWorldIndices[globalIndices[0]], workload.drawData.viewProjIndices[globalIndices[0]] });
                     return;
                 }
-                const bool usesCulling = !s_nocull && !doubleSided && (geometryMode & cullTestMask);
+                const bool usesCulling = !doubleSided && (geometryMode & cullTestMask);
                 const FixedRect &scissorRect = state->rdp->scissorRectStack[state->rdp->scissorStackSize - 1];
                 for (int f = 1; f + 1 < polyN; f++) {
                     const uint32_t gg[3] = { poly[0], poly[f], poly[f + 1] };
@@ -1343,7 +1336,7 @@ namespace RT64 {
         const bool nearCrossing = (w0 <= 0.0f) || (w1 <= 0.0f) || (w2 <= 0.0f);
 
         bool visibleTri = true;
-        const bool usesCulling = !s_nocull && !doubleSided && (geometryMode & cullTestMask);
+        const bool usesCulling = !doubleSided && (geometryMode & cullTestMask);
         if (usesCulling && !nearCrossing) {
             const hlslpp::float3 U = posScreen[globalIndices[1]] - posScreen[globalIndices[0]];
             const hlslpp::float3 V = posScreen[globalIndices[2]] - posScreen[globalIndices[0]];
@@ -1513,17 +1506,8 @@ namespace RT64 {
 
     void RSP::setGBI(GBI *gbi) {
         NoN = gbi->flags.NoN;
-        // ROGUESQ_F5_NON=1: force NoN (near-plane clip OFF, far-plane manual clamp) for the Factor 5
-        // ucode. F5 uniquely ships NoN=false, so depthClipEnabled=true turns on a GPU hard near-plane
-        // clip that discards large geometry as it approaches the camera ("culled/worse up close").
-        // Opt-in A/B while validating; off = current behavior.
         if (gbi->ucode == GBIUCode::F3DFACTOR5) {
-            static int s_f5non = -1;
-            if (s_f5non < 0) { const char* e = std::getenv("ROGUESQ_F5_NON"); s_f5non = (e && e[0] && e[0] != '0') ? 1 : 0; }
-            if (s_f5non) NoN = true;
-            static int s_f5cull = -1;
-            if (s_f5cull < 0) { const char* e = std::getenv("ROGUESQ_F5_CULL"); s_f5cull = (e && e[0] == '0') ? 0 : 1; }
-            f5Cull = s_f5cull != 0;
+            f5Cull = true;
         } else {
             f5Cull = false;
         }

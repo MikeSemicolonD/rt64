@@ -15,28 +15,11 @@
 #include "xxHash/xxh3.h"
 
 namespace RT64 {
-    // Factor 5 interpolation tuning (RogueSquadron64Recomp). DEFAULT OFF: dropping triangleCount
-    // from the pairing key lets different meshes collide and lerp into each other (mispair = smear,
-    // confirmed worse live and pre-warned in project memory). ROGUESQ_INTERP_HASH_TRIS=1 re-enables
-    // the experiment (hash ignores triangleCount + the distance filter below).
-    static bool f5InterpIgnoreTris() {
-        static const bool v = [](){ const char *e = std::getenv("ROGUESQ_INTERP_HASH_TRIS"); return e && e[0] == '1'; }();
-        return v;
-    }
-    static float f5InterpMaxScreen() {
-        static const float v = [](){ const char *e = std::getenv("ROGUESQ_INTERP_MAX_SCREEN"); float f = (e && e[0]) ? (float)atof(e) : 0.35f; return f > 0.0f ? f : 0.35f; }();
-        return v;
-    }
     // Auto-matched (id-less) transforms further apart than this on screen (NDC) are not paired: a newly spawned particle would otherwise smear from a leftover one. ROGUESQ_INTERP_AUTO_MAX_SCREEN=0 disables.
     static bool f5AutoMatchTooFar(float screenSpaceDifference) {
         static const float v = [](){ const char *e = std::getenv("ROGUESQ_INTERP_AUTO_MAX_SCREEN"); return (e && e[0]) ? (float)atof(e) : 0.2f; }();
         return (v > 0.0f) && (screenSpaceDifference > v);
     }
-    static float f5InterpMaxPosFrac() {
-        static const float v = [](){ const char *e = std::getenv("ROGUESQ_INTERP_MAX_POS"); float f = (e && e[0]) ? (float)atof(e) : 0.25f; return f > 0.0f ? f : 0.25f; }();
-        return v;
-    }
-
     static uint32_t s_pairJumpRejects = 0;
     // Paired transforms with vertex interpolation on: [0] vertex counts matched (velocity computed), [1] counts differed (no vertex interpolation this frame).
     static uint32_t s_vtxInterpStats[2] = {};
@@ -755,17 +738,6 @@ namespace RT64 {
 
             TransformMatchResult matchResult = computeTransformMatch(curTransform, firstCurViewProj, prevTransform, firstPrevViewProj, prevRigidBody);
             if (matchResult.valid && !f5AutoMatchTooFar(matchResult.screenSpaceDifference)) {
-                // With triangleCount out of the key the candidate set widens; reject pairs that are
-                // too far apart so a wrong match pops (correct) instead of warping (a smear the user
-                // hated). Position gate is relative to the object's camera-space distance (F5 world
-                // transform is camera-space, so [3].xyz is the camera-relative position).
-                if (f5InterpIgnoreTris()) {
-                    const float camDist = hlslpp::length(curTransform[3].xyz);
-                    if (matchResult.screenSpaceDifference > f5InterpMaxScreen() ||
-                        matchResult.positionDifference > f5InterpMaxPosFrac() * camDist) {
-                        continue;
-                    }
-                }
                 matchCandidates.emplace_back(indices.first, indices.second, matchResult.computeDifference());
             }
         }
@@ -1030,7 +1002,7 @@ namespace RT64 {
         // F5 draws churn triangleCount per frame (CPU near/lateral clip appends verts, game-side
         // face culling), which breaks pairing for continuing objects. Drop it from the key so the
         // same object pairs across frames; the distance filter below prevents mis-pairing.
-        key.triangleCount = f5InterpIgnoreTris() ? 0u : call.callDesc.triangleCount;
+        key.triangleCount = call.callDesc.triangleCount;
         key.matrixIdHash = matrixIdHash;
         return XXH3_64bits(&key, sizeof(CallMatchKey));
     }

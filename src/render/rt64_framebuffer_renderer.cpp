@@ -406,9 +406,7 @@ namespace RT64 {
         // the old block at a higher CBV_SRV_UAV heap offset → the 64K view heap climbed to
         // exhaustion and getCPUHandleAt asserted (the cinematic descriptor-heap crash).
         // A fixed-capacity set is created once and reused (setTexture updates entries in
-        // place). Opt out to the legacy growth with ROGUESQ_FBTEX_FIXED_CAP=0.
-        static int s_fixed_cap = -1;
-        if (s_fixed_cap < 0) { const char *e = std::getenv("ROGUESQ_FBTEX_FIXED_CAP"); s_fixed_cap = (e && e[0] == '0') ? 0 : 1; }
+        // place).
         // Slot mode needs the bindless set only for the ray passes; drivers without descriptor indexing can't allocate it.
         const RenderDeviceCapabilities &caps = worker->device->getCapabilities();
         const bool needsBindlessSet = !textureSlots || caps.raytracing || caps.rayQuery;
@@ -419,8 +417,8 @@ namespace RT64 {
                 ? legacyCap : (uint32_t)FramebufferRendererDescriptorTextureSet::UpperRange;
             static int s_dd = -1;
             if (s_dd == -1) { const char *e = std::getenv("ROGUESQ_DESC_DIAG"); s_dd = (e && e[0] && e[0] != '0') ? 0 : -2; }
-            if (s_dd >= 0 && s_dd < 200) { ++s_dd; fprintf(stderr, "[desc-texset] rebuild textureCacheSize=%u cap=%u\n", textureCacheSize, s_fixed_cap ? fixedCap : legacyCap); fflush(stderr); }
-            descTextureSet = std::make_unique<FramebufferRendererDescriptorTextureSet>(worker->device, s_fixed_cap ? fixedCap : legacyCap);
+            if (s_dd >= 0 && s_dd < 200) { ++s_dd; fprintf(stderr, "[desc-texset] rebuild textureCacheSize=%u cap=%u\n", textureCacheSize, fixedCap); fflush(stderr); }
+            descTextureSet = std::make_unique<FramebufferRendererDescriptorTextureSet>(worker->device, fixedCap);
         }
 
         if (createSet || (descriptorTextureReplacementMapEnabled != textureCacheReplacementMapEnabled)) {
@@ -707,71 +705,10 @@ namespace RT64 {
             switchToGraphicsPipeline();
         }
         
-        // ROGUESQ_LOG_PIPELINE (stage 2.5) — count rasterScene submissions
-        // and total instances reaching this for-loop. If instance count is
-        // way lower than [pipe-stage 2-pushDrawCall] (added on the queue
-        // side), drawCalls are being pushed to rasterScenes that never get
-        // submitRasterScene'd.
-        {
-            static const bool log_pipe = []{
-                const char *e = std::getenv("ROGUESQ_LOG_PIPELINE");
-                return e && *e && *e != '0';
-            }();
-            if (log_pipe) {
-                static std::atomic<int> n_call{0};
-                static std::atomic<uint64_t> n_inst{0};
-                int n = ++n_call;
-                n_inst.fetch_add(rasterScene.instanceIndices.size(),
-                                 std::memory_order_relaxed);
-                if (n <= 5 || (n % 200) == 0) {
-                    std::fprintf(stderr,
-                        "[pipe-stage 2.5-rasterIter] submits=%d total-instances=%llu (this submit=%zu)\n",
-                        n, (unsigned long long)n_inst.load(),
-                        rasterScene.instanceIndices.size());
-                    std::fflush(stderr);
-                }
-            }
-        }
-
         ElapsedTimer batchTimer; // ROGUESQ_LOG_BATCH: submitRasterScene recording time
         for (size_t sceneIdx = 0; sceneIdx < rasterScene.instanceIndices.size(); ++sceneIdx) {
             const uint32_t i = rasterScene.instanceIndices[sceneIdx];
             const InstanceDrawCall &drawCall = instanceDrawCallVector[i];
-
-            // ROGUESQ_LOG_PIPELINE (stage 2.6) — per-instance classification,
-            // per-frame counted. Reset on g_pipe_frame_idx advance.
-            {
-                static const bool log_pipe = []{
-                    const char *e = std::getenv("ROGUESQ_LOG_PIPELINE");
-                    return e && *e && *e != '0';
-                }();
-                if (log_pipe && drawCall.type != InstanceDrawCall::Type::FillRect) {
-                    extern std::atomic<uint64_t> g_pipe_frame_idx;
-                    static std::atomic<uint64_t> last_frame{(uint64_t)-1};
-                    static std::atomic<int> n_in_frame{0};
-                    static std::atomic<int> n_total{0};
-                    uint64_t cur = g_pipe_frame_idx.load(std::memory_order_relaxed);
-                    uint64_t prev = last_frame.exchange(cur, std::memory_order_relaxed);
-                    if (prev != cur) {
-                        int finalCount = n_in_frame.exchange(0, std::memory_order_relaxed);
-                        if (finalCount > 0) {
-                            std::fprintf(stderr,
-                                "[pipe-stage 2.6-iter] frame=%llu FINAL=%d\n",
-                                (unsigned long long)prev, finalCount);
-                            std::fflush(stderr);
-                        }
-                    }
-                    int nf = ++n_in_frame;
-                    int nt = ++n_total;
-                    if (nf == 1 || (nf % 50) == 0 || nt <= 5) {
-                        const uint32_t lo = (uint32_t)(drawCall.triangles.shaderDesc.colorCombiner.L);
-                        std::fprintf(stderr,
-                            "[pipe-stage 2.6-iter] frame=%llu nf=%d total=%d type=%d L=0x%08X\n",
-                            (unsigned long long)cur, nf, nt, (int)drawCall.type, lo);
-                        std::fflush(stderr);
-                    }
-                }
-            }
 
             switch (drawCall.type) {
             case InstanceDrawCall::Type::IndexedTriangles:
@@ -853,9 +790,6 @@ namespace RT64 {
 
                 // Draw calls can sometimes end up with empty scissors and cause validation errors. We just skip them.
                 if (triangles.scissor.isEmpty()) {
-                    // ROGUESQ_LOG_PIPELINE (stage 3) — empty-scissor drops.
-                    // If this is where most attribution-period draws die,
-                    // the cull is in scissor computation upstream.
                     static const bool log_pipe = []{
                         const char *e = std::getenv("ROGUESQ_LOG_PIPELINE");
                         return e && *e && *e != '0';
@@ -866,7 +800,7 @@ namespace RT64 {
                         if (n <= 5 || (n % 500) == 0) {
                             const uint32_t lo = (uint32_t)(drawCall.triangles.shaderDesc.colorCombiner.L);
                             std::fprintf(stderr,
-                                "[pipe-stage 3-scissorSkip] skipped=%d L=0x%08X type=%d\n",
+                                "[pipe-scissor] skipped=%d L=0x%08X type=%d\n",
                                 n, lo, (int)drawCall.type);
                             std::fflush(stderr);
                         }

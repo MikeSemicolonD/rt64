@@ -119,7 +119,6 @@ namespace RT64 {
         void setScissor_logged(State *state, DisplayList **dl);
         void setTile_logged(State *state, DisplayList **dl);
         void setCombine_logged(State *state, DisplayList **dl);
-        void setFillColor_overridden(State *state, DisplayList **dl);
         void fillRect_logged(State *state, DisplayList **dl);  // fillRect_op02_aware stays in core (op_02-coupled)
         void texrectLLE_guarded(State *state, DisplayList **dl);
         // RS64 light for a texture rectangle drawn as a 3D glow (the game's blinking lamps): centre and half width in native pixels.
@@ -136,11 +135,6 @@ namespace RT64 {
         // setTile/setTextureImage read) — extern during the incremental split.
         extern int s_ci4_tlut_recent;
         extern uint32_t s_last_tlut_src;
-        // FORCE_VISIBLE debug gate (def in core during the split) + its forced
-        // G_CC_PRIMITIVE-mux combiner words, shared by setFillColor/setCombine/texrect.
-        bool force_visible_enabled();
-        inline constexpr uint32_t FORCED_COMB_W0 = 0x00FFFEE7u;  // c0/c1=(0,0,0,PRIM)
-        inline constexpr uint32_t FORCED_COMB_W1 = 0x771F77F8u;  // a0/a1=(0,0,0,PRIM)
         // Attribution de-flicker counters (def in core during the split): texrectLLE counts
         // glyphs + fillRect counts fills; setColorImage reads them at each 0x76A000 frame boundary.
         extern int s_attrib_glyphs_frame;

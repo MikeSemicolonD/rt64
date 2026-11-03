@@ -141,31 +141,6 @@ namespace RT64 {
                     s_count, (*dl)->p0(8, 8), (*dl)->p0(0, 8), (*dl)->w1);
                 std::fflush(stderr);
             }
-            // Strip coverage-related otherModeL bits (AA_EN / CVG_X_ALPHA /
-            // ALPHA_CVG_SEL) — Factor 5's combiner outputs alpha=0, which
-            // combined with these bits makes RT64 discard pixels as zero-cvg.
-            static const uint32_t s_strip_mask = []() {
-                uint32_t mask = 0;
-                auto check = [&](const char* env, uint32_t bits) {
-                    const char* v = std::getenv(env);
-                    if (v && v[0] && v[0] != '0') mask |= bits;
-                };
-                check("ROGUESQ_HLE_NO_AA", 1u << 14);
-                check("ROGUESQ_HLE_NO_CVGA", (1u << 23) | (1u << 24));
-                check("ROGUESQ_HLE_FORCE_OPAQUE",
-                      (1u << 14) | (1u << 23) | (1u << 24));
-                return mask;
-            }();
-            if (s_strip_mask) {
-                const uint32_t shift = (*dl)->p0(8, 8);
-                const uint32_t length = (*dl)->p0(0, 8);
-                // setOtherModeL writes `length+1` bits at position `shift`.
-                // Only mask bits this write actually covers.
-                const uint32_t bitsCovered =
-                    ((length + 1 >= 32) ? 0xFFFFFFFFu
-                                        : ((1u << (length + 1)) - 1)) << shift;
-                (*dl)->w1 &= ~(s_strip_mask & bitsCovered);
-            }
             GBI_F3D::setOtherModeL(state, dl);
         }
 
@@ -260,91 +235,6 @@ namespace RT64 {
                     std::fflush(stderr);
                 }
             }
-            // Force solid-prim combiner under ROGUESQ_HLE_FORCE_VISIBLE.
-            if (force_visible_enabled()) {
-                state->rdp->setCombine(
-                    (uint64_t(FORCED_COMB_W1) << 32) | uint64_t(FORCED_COMB_W0));
-                // Also force prim color to magenta opaque so the combiner
-                // produces visible pixels.
-                state->rdp->setPrimColor(0, 0xFF, 0xFF00FFFFu);
-                return;
-            }
-
-            // ROGUESQ_HLE_FORCE_COMB — like FORCE_VISIBLE but does NOT
-            // bypass texrects to fillRects. Keeps the texrect dispatch
-            // path intact, only swaps the combiner to constant-white.
-            // Use to test: do texrects produce visible pixels when the
-            // combiner output is forced to white (i.e. sampling+blender
-            // pipeline works), vs. is something else upstream killing
-            // them? If white pixels appear at attribution glyph
-            // positions, the original combiner (or its texture
-            // sampling) is the bug. If still black, the texrect
-            // dispatch path itself drops the work.
-            static bool s_force_comb = []() {
-                const char* v = std::getenv("ROGUESQ_HLE_FORCE_COMB");
-                return v && v[0] && v[0] != '0';
-            }();
-            if (s_force_comb) {
-                state->rdp->setCombine(
-                    (uint64_t(FORCED_COMB_W1) << 32) | uint64_t(FORCED_COMB_W0));
-                state->rdp->setPrimColor(0, 0xFF, 0xFFFFFFFFu);
-                return;
-            }
-
-            // ROGUESQ_HLE_FORCE_PRIM_OUTPUT — port of the LLE-era
-            // PARTICLE_VISIBLE_DEBUG fix (reverted commit e718774 in lib/rt64).
-            // For the cinematic-text mux family (0xFC11FE23 and variants —
-            // attribution glyphs + N64 logo + explosion sprites), rewrite
-            // both color and alpha cycle 1 D fields to force output =
-            // PRIMITIVE color, alpha = ONE. Bypasses texture sampling
-            // entirely so we can distinguish "pipeline works, sampling
-            // broken" from "deeper bug".
-            //
-            //   color D cycle 1 (H bits 17-15) ← 3 (C_PRIMITIVE)
-            //   alpha D cycle 1 (H bits 11-9)  ← 6 (A_ONE)
-            //   (also rewrite cycle 2 D bits for 2-cycle muxes)
-            //
-            // Default off; set ROGUESQ_HLE_FORCE_PRIM_OUTPUT=1 to enable.
-            // If attribution shows prim-colored shapes where text should
-            // be, the gap is in texture sampling. If still black, the
-            // gap is in the blender/render-target pipeline.
-            static bool s_force_prim = []() {
-                const char* v = std::getenv("ROGUESQ_HLE_FORCE_PRIM_OUTPUT");
-                return v && v[0] && v[0] != '0';
-            }();
-            if (s_force_prim) {
-                const uint32_t w0 = (*dl)->w0;
-                const uint32_t w1 = (*dl)->w1;
-                const uint32_t lowL = w0;
-                const bool is_cinematic_mux =
-                    (lowL == 0xFC11FE23u) || (lowL == 0xFC11E623u) ||
-                    (lowL == 0xFC119623u) || (lowL == 0xFC127FFFu) ||
-                    (lowL == 0xFC127E24u);
-                if (is_cinematic_mux) {
-                    // Rewrite H bits to force PRIMITIVE color + ONE alpha output.
-                    uint32_t patched_w1 = w1;
-                    patched_w1 = (patched_w1 & ~(0x7u << 15)) | (3u << 15); // color D c1
-                    patched_w1 = (patched_w1 & ~(0x7u << 6 )) | (3u << 6 ); // color D c2
-                    patched_w1 = (patched_w1 & ~(0x7u << 9 )) | (6u << 9 ); // alpha D c1
-                    patched_w1 = (patched_w1 & ~(0x7u << 0 )) | (6u << 0 ); // alpha D c2
-                    if (gbi_log_enabled()) {
-                        static int s_n = 0;
-                        if (++s_n <= 4) {
-                            std::fprintf(stderr,
-                                "[gbi-f5] force-prim rewrite w0=0x%08X w1=0x%08X -> w1=0x%08X\n",
-                                w0, w1, patched_w1);
-                            std::fflush(stderr);
-                        }
-                    }
-                    // Force prim color to a bright known value so the
-                    // forced-prim output is unmistakable on screen.
-                    state->rdp->setPrimColor(0, 0xFF, 0x00FFFFFFu); // bright cyan
-                    state->rdp->setCombine(
-                        (uint64_t(patched_w1) << 32) | uint64_t(w0));
-                    return;
-                }
-            }
-
             // Factor 5 alpha-all-zero patch (2026-05-13).
             //
             // Attribution-screen DLs emit setCombine with alpha cycle-1 fields
@@ -359,44 +249,34 @@ namespace RT64 {
             // (= A_ONE for alphaInputABD). New alpha equation:
             //   (A - B) * C + D = (0 - 0) * 0 + 1 = 1
             // The blender sees alpha=1, color reaches the framebuffer.
-            //
-            // Gated default-on; disable with ROGUESQ_HLE_PATCH_ALPHA=0 if it
-            // breaks anything (e.g. legitimate fully-transparent draws).
-            static bool s_patch_enabled = []() {
-                const char* v = std::getenv("ROGUESQ_HLE_PATCH_ALPHA");
-                return !(v && v[0] == '0');  // default on
-            }();
-
-            uint32_t w0 = (*dl)->w0;
-            uint32_t w1 = (*dl)->w1;
-            if (s_patch_enabled) {
-                const uint32_t alphaA = (w0 >> 12) & 0x7;
-                const uint32_t alphaB = (w1 >> 12) & 0x7;
-                const uint32_t alphaC = (w0 >>  9) & 0x7;
-                const uint32_t alphaD = (w1 >>  9) & 0x7;
-                if (alphaA == 7 && alphaB == 7 && alphaC == 7 && alphaD == 7) {
-                    // Default: rewrite D to index 6 (A_ONE) → alpha = (0-0)*0+1 = 1
-                    // so opaque content reaches the framebuffer.
-                    //
-                    // Attribution exception: the all-7s combiner there draws CI4
-                    // glyph text whose letter SHAPE lives in the texture's alpha
-                    // coverage. Forcing alpha=1 fills each glyph quad solid →
-                    // white squares (user-confirmed 2026-05-21). Instead rewrite
-                    // D to index 1 (TEXEL0): alpha = (A-B)*0 + TEXEL0 = TEXEL0,
-                    // so the glyph's own coverage cuts out the letter shape.
-                    const uint32_t newD = (g_current_scene == F5_SCENE_ATTRIBUTION) ? 0x1u : 0x6u;
-                    const uint32_t patched_w1 = (w1 & ~(0x7u << 9)) | (newD << 9);
-                    static int s_patched = 0;
-                    if (gbi_log_enabled() && (++s_patched <= 4)) {
-                        std::fprintf(stderr,
-                            "[gbi-f5] alpha-patch setCombine w0=0x%08X w1=0x%08X -> w1=0x%08X (D=%u, attrib=%d)\n",
-                            w0, w1, patched_w1, newD, (g_current_scene == F5_SCENE_ATTRIBUTION));
-                        std::fflush(stderr);
-                    }
-                    state->rdp->setCombine(
-                        (uint64_t(patched_w1) << 32) | uint64_t(w0));
-                    return;
+            const uint32_t w0 = (*dl)->w0;
+            const uint32_t w1 = (*dl)->w1;
+            const uint32_t alphaA = (w0 >> 12) & 0x7;
+            const uint32_t alphaB = (w1 >> 12) & 0x7;
+            const uint32_t alphaC = (w0 >>  9) & 0x7;
+            const uint32_t alphaD = (w1 >>  9) & 0x7;
+            if (alphaA == 7 && alphaB == 7 && alphaC == 7 && alphaD == 7) {
+                // Default: rewrite D to index 6 (A_ONE) → alpha = (0-0)*0+1 = 1
+                // so opaque content reaches the framebuffer.
+                //
+                // Attribution exception: the all-7s combiner there draws CI4
+                // glyph text whose letter SHAPE lives in the texture's alpha
+                // coverage. Forcing alpha=1 fills each glyph quad solid →
+                // white squares (user-confirmed 2026-05-21). Instead rewrite
+                // D to index 1 (TEXEL0): alpha = (A-B)*0 + TEXEL0 = TEXEL0,
+                // so the glyph's own coverage cuts out the letter shape.
+                const uint32_t newD = (g_current_scene == F5_SCENE_ATTRIBUTION) ? 0x1u : 0x6u;
+                const uint32_t patched_w1 = (w1 & ~(0x7u << 9)) | (newD << 9);
+                static int s_patched = 0;
+                if (gbi_log_enabled() && (++s_patched <= 4)) {
+                    std::fprintf(stderr,
+                        "[gbi-f5] alpha-patch setCombine w0=0x%08X w1=0x%08X -> w1=0x%08X (D=%u, attrib=%d)\n",
+                        w0, w1, patched_w1, newD, (g_current_scene == F5_SCENE_ATTRIBUTION));
+                    std::fflush(stderr);
                 }
+                state->rdp->setCombine(
+                    (uint64_t(patched_w1) << 32) | uint64_t(w0));
+                return;
             }
 
             GBI_RDP::setCombine(state, dl);
@@ -537,39 +417,6 @@ namespace RT64 {
                     }
                 }
             }
-            // ROGUESQ_FX_PROBE: RGBA32 (fmt0/siz3) effect texrects — the animated sprite
-            // billboards if they take the texrect path. Format-keyed, address-independent.
-            {
-                static int s_fxt = -1;
-                if (s_fxt == -1) { const char* v = std::getenv("ROGUESQ_FX_PROBE"); s_fxt = (v && *v && v[0] != '0') ? 0 : -2; }
-                if (s_fxt >= 0) {
-                    const uint8_t rtile = (*dl)[0].p1(24, 3);
-                    const auto& T = state->rdp->tiles[rtile];
-                    {
-                        static uint32_t s_dt = 0; ++s_dt;
-                        const auto& prim = state->rdp->primColorStack[state->rdp->primColorStackSize - 1];
-                        const auto& comb = state->rdp->colorCombinerStack[state->rdp->colorCombinerStackSize - 1];
-                        // Census of texrect TYPES: dedup by (fmt,siz,comb,otherL) so each kind of
-                        // texrect prints once. The animated billboard sprites are whichever small
-                        // rects flipbook their source texture; identify by fmt/siz + on-screen size.
-                        static std::unordered_set<uint64_t> s_seent;
-                        uint64_t key = ((uint64_t)T.fmt << 60) ^ ((uint64_t)T.siz << 56)
-                                     ^ ((uint64_t)comb.L << 4) ^ ((uint64_t)state->rdp->otherMode.L << 24);
-                        if (s_seent.size() < 80 && s_seent.insert(key).second) {
-                            const int32_t ulx = (*dl)[0].p1(12, 12), uly = (*dl)[0].p1(0, 12);
-                            const int32_t lrx = (*dl)[0].p0(12, 12), lry = (*dl)[0].p0(0, 12);
-                            std::fprintf(stderr,
-                                "[fx-rect] #%u tex=%06X fmt=%u siz=%u cimg=%06X px=(%d,%d %dx%d) prim=(%.2f %.2f %.2f %.2f) combL=%08X combH=%08X otherL=%08X otherH=%08X\n",
-                                s_dt, state->rdp->texture.address & 0x00FFFFFFu, T.fmt, T.siz,
-                                state->rdp->colorImage.address & 0x00FFFFFFu,
-                                ulx >> 2, uly >> 2, (lrx - ulx) >> 2, (lry - uly) >> 2,
-                                (float)prim.x, (float)prim.y, (float)prim.z, (float)prim.w,
-                                comb.L, comb.H, state->rdp->otherMode.L, state->rdp->otherMode.H);
-                            std::fflush(stderr);
-                        }
-                    }
-                }
-            }
             if (texrect_copy_undefined_tile(state, dl)) {
                 (*dl)++;  // skip the 8-byte texcoord follow-up to keep dispatch aligned
                 return;
@@ -681,20 +528,6 @@ namespace RT64 {
                         s, t, ds, dt);
                     std::fflush(stderr);
                 }
-            }
-            // ROGUESQ_HLE_FORCE_VISIBLE: draw every texrect as a magenta fillRect at the same coords to tell "not presenting" from "texrect path wrong".
-            if (force_visible_enabled()) {
-                state->rdp->setFillColor(0xF80FF80F);  // RGBA5551 magenta opaque
-                // Use the original texrect bounds. drawTexRect cycles to
-                // 1cycle and emits 2 tris. Force-fillRect is simpler: just
-                // call drawRect bypassing texture sampling.
-                int32_t ulx = (*dl)[0].p1(12, 12);
-                int32_t uly = (*dl)[0].p1(0, 12);
-                int32_t lrx = (*dl)[0].p0(12, 12);
-                int32_t lry = (*dl)[0].p0(0, 12);
-                state->rdp->fillRect(ulx, uly, lrx, lry);
-                (*dl)++;  // consume the LLE texrect follow-up word
-                return;
             }
             dlh_followup(*dl);
             {
@@ -854,49 +687,6 @@ namespace RT64 {
                     s_count, tile, uls, ult, lrs, dxt);
                 std::fflush(stderr);
             }
-            // ROGUESQ_FX_PROBE: for the RGBA32 effect-sprite textures, log the image siz/fmt
-            // (SETTIMG) vs the LOAD-tile siz/fmt. loadBlockOperation only splits into both TMEM
-            // banks when the LOAD tile is siz3/fmt0; a 16b load idiom leaves the alpha bank empty.
-            {
-                static int s_fxl = -1;
-                if (s_fxl == -1) { const char* v = std::getenv("ROGUESQ_FX_PROBE"); s_fxl = (v && *v && v[0] != '0') ? 0 : -2; }
-                const uint32_t srcFx = f5_unmoved_address(state->rdp->texture.address & 0x00FFFFFFu);
-                const bool rgbaImg = (state->rdp->texture.siz == 3 && state->rdp->texture.fmt == 0);
-                if (s_fxl >= 0 && s_fxl < 24 && (rgbaImg || (srcFx >= 0x550000u && srcFx < 0x560000u))) {
-                    ++s_fxl;
-                    const LoadTile &lt = state->rdp->tiles[tile];
-                    std::fprintf(stderr,
-                        "[fx-load] src=0x%06X imgFmt=%u imgSiz=%u | loadtile[tile=%u fmt=%u siz=%u line=%u tmem=%u] uls=%u lrs=%u dxt=%u words=%d rgba32split=%d\n",
-                        srcFx, state->rdp->texture.fmt, state->rdp->texture.siz,
-                        tile, lt.fmt, lt.siz, lt.line, lt.tmem, uls, lrs, dxt, (int)(lrs - uls) + 1,
-                        (lt.siz == 3 && lt.fmt == 0) ? 1 : 0);
-                    std::fflush(stderr);
-                }
-            }
-            // ROGUESQ_DUMP_TEX=1: when a CI4 flipbook frame loads, dump the SOURCE
-            // bytes from RDRAM (texture.address) to measure whether the streamed
-            // texture data is coherent CI4 (structured, non-zero) or garbage/unloaded
-            // (the real cause of the flipbook noise, given the base CI4 decode works).
-            {
-                static int s_dt = -1;
-                if (s_dt == -1) { const char* v = std::getenv("ROGUESQ_DUMP_TEX"); s_dt = (v && *v && v[0] != '0') ? 0 : -2; }
-                const uint32_t srcChk = f5_unmoved_address(state->rdp->texture.address & 0x00FFFFFFu);
-                const bool isFlipbook = (srcChk >= 0x4C0000u && srcChk < 0x520000u);
-                if (s_dt >= 0 && s_dt < 16 && s_ci4_tlut_recent > 0 && isFlipbook) {
-                    ++s_dt;
-                    const uint32_t src = srcChk;
-                    const uint8_t* ram = state->RDRAM;
-                    int nz = 0; char hex[3 * 48 + 1]; int hp = 0;
-                    for (int i = 0; i < 48; ++i) {
-                        uint8_t b = ram[(src + i) ^ 3];
-                        if (b) ++nz;
-                        hp += std::snprintf(hex + hp, sizeof(hex) - hp, "%02X ", b);
-                    }
-                    std::fprintf(stderr, "[tex-dump] src=0x%08X fmt=%u siz=%u nz=%d/48 bytes: %s\n",
-                        state->rdp->texture.address, state->rdp->texture.fmt, state->rdp->texture.siz, nz, hex);
-                    std::fflush(stderr);
-                }
-            }
             // Split the draw call on TMEM reload (skybox one-texture bug; see loadTile_guarded).
             static int s_split = -1;
             if (s_split < 0) { const char* e = std::getenv("ROGUESQ_F5_NO_TILE_SPLIT"); s_split = (e && e[0] == '1') ? 0 : 1; }
@@ -935,26 +725,6 @@ namespace RT64 {
                         (unsigned long long)state->rdp->TMEM[4], (unsigned long long)state->rdp->TMEM[5],
                         (unsigned long long)state->rdp->TMEM[6], (unsigned long long)state->rdp->TMEM[7]);
                     s_ci4tm_arm = 3;  // log the next few setTiles (the render tile that binds this)
-                    std::fflush(stderr);
-                }
-            }
-            // ROGUESQ_DUMP_TEX: after a flipbook loadBlock, FORCE the (normally
-            // deferred) load to execute and dump TMEM[0..3], so we can compare the
-            // loaded TMEM to the coherent source bytes. If TMEM matches source -> the
-            // load is fine and the garble is in SAMPLING (RT64 internal). If TMEM is
-            // scrambled -> the LOAD is the bug (fixable here).
-            {
-                static int s_tm = -1;
-                if (s_tm == -1) { const char* v = std::getenv("ROGUESQ_DUMP_TEX"); s_tm = (v && *v && v[0] != '0') ? 0 : -2; }
-                const uint32_t srcChk = f5_unmoved_address(state->rdp->texture.address & 0x00FFFFFFu);
-                if (s_tm >= 0 && s_tm < 8 && s_ci4_tlut_recent > 0 &&
-                    srcChk >= 0x4C0000u && srcChk < 0x520000u) {
-                    ++s_tm;
-                    state->rdp->loadBlockOperation(state->rdp->tiles[tile], state->rdp->texture, false);
-                    std::fprintf(stderr, "[tmem-dump] src=0x%06X TMEM[0..3]: %016llX %016llX %016llX %016llX\n",
-                        srcChk,
-                        (unsigned long long)state->rdp->TMEM[0], (unsigned long long)state->rdp->TMEM[1],
-                        (unsigned long long)state->rdp->TMEM[2], (unsigned long long)state->rdp->TMEM[3]);
                     std::fflush(stderr);
                 }
             }
@@ -997,41 +767,9 @@ namespace RT64 {
                 }
                 return;
             }
-            // ROGUESQ_CI4_DESWIZZLE=1: the cinematic CI4 mosaic textures (0x4Cxxxx-
-            // 0x52xxxx, e.g. the N64-logo tiles) are stored TMEM-SWIZZLED (odd rows
-            // have their 32-bit halves swapped). RT64 doesn't apply the matching swap
-            // -> streaky garble. PROVEN (decoded-pixel-diff): copying with byteoff^=4
-            // on odd rows (32 B/row, 64-wide CI4) yields a clean image. Pre-swizzle the
-            // source into a scratch ring (guest 0x80713000, 16x2KB, in the safe gap
-            // between modelview matrix 0x80710040 and DL 0x80720000) and redirect the
-            // texture there so RT64 loads de-swizzled (clean) data.
-            {
-                static int s_dsw = -1;
-                if (s_dsw < 0) { const char* v = std::getenv("ROGUESQ_CI4_DESWIZZLE"); s_dsw = (v && *v && v[0] != '0') ? 1 : 0; }
-                // De-swizzle is applied ONLY to the explosion FIRE CI4 tiles (~0x53xxxx-
-                // 0x57xxxx). The N64-logo CI4 mosaic (0x4Cxxxx-0x52xxxx) is NOT de-swizzled
-                // (removed per user — it looked wrong on the logo; RT64 handles it natively).
-                // Explosion-hold trigger: when a fire CI4 tile loads, arm the cine-pace crawl.
-                if (masked >= 0x530000u && masked < 0x580000u && s_ci4_tlut_recent > 0) {
-                    g_explosion_hold = 90;  // frames to crawl (~30s linger at 3fps; re-arms while fire loads)
-                }
-                if (s_dsw && masked >= 0x530000u && masked < 0x580000u && s_ci4_tlut_recent > 0) {
-                    static int s_slot = 0;
-                    const uint32_t SCRATCH_BASE = 0x00713000u;
-                    const int SLOTS = 22, SLOT_SZ = 0x800;  // 2KB/64x64 CI4; 22*2KB ends <0x71E000 (F5 vertex scratch)
-                    uint32_t dst = SCRATCH_BASE + (uint32_t)(s_slot % SLOTS) * SLOT_SZ;
-                    s_slot++;
-                    uint8_t* ram = state->RDRAM;
-                    for (uint32_t i = 0; i < (uint32_t)SLOT_SZ; ++i) {
-                        uint32_t srcI = ((i / 32u) & 1u) ? (i ^ 4u) : i;   // odd-row 32-bit swap
-                        ram[(dst + i) ^ 3] = ram[(masked + srcI) ^ 3];
-                    }
-                    (*dl)->w1 = (w1 & 0xFF000000u) | dst;   // redirect to de-swizzled scratch
-                    if (gbi_log_enabled()) {
-                        static int s_dl = 0;
-                        if (++s_dl <= 6) { std::fprintf(stderr, "[gbi-f5] deswizzle CI4 0x%06X -> 0x%06X\n", masked, dst); std::fflush(stderr); }
-                    }
-                }
+            // Explosion-hold trigger: when a fire CI4 tile loads, arm the cine-pace crawl.
+            if (masked >= 0x530000u && masked < 0x580000u && s_ci4_tlut_recent > 0) {
+                g_explosion_hold = 90;  // frames to crawl (~30s linger at 3fps; re-arms while fire loads)
             }
             // Track distinct SETTIMG source addresses to find missing fb-as-
             // texture composite ops (e.g. hi-res scratch → lo-res VI fb).
@@ -1259,16 +997,6 @@ namespace RT64 {
                     }
                 }
             }
-        }
-
-
-        // Force magenta-opaque fillColor (RGBA5551 0xF80F packed twice) under FORCE_VISIBLE.
-        void setFillColor_overridden(State *state, DisplayList **dl) {
-            if (force_visible_enabled()) {
-                state->rdp->setFillColor(0xF80FF80F);
-                return;
-            }
-            GBI_RDP::setFillColor(state, dl);
         }
 
     } // namespace GBI_F3DFACTOR5
