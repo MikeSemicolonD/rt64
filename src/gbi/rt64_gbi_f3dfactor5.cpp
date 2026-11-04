@@ -461,7 +461,8 @@ namespace RT64 {
             auto it = s_sprites_prev.find(id);
             return (it != s_sprites_prev.end()) && (it->second > 2);
         }
-        static constexpr uint32_t F5_NODE_MAP_SLOTS = 256;
+        // Every 0x40 slot of a 64 KB ring buffer: at long draw distances a frame passes 256 matrices, and later objects lost their ids to AUTO pairing.
+        static constexpr uint32_t F5_NODE_MAP_SLOTS = (0x10000u - 0x40u) / 0x40u;
         static uint32_t s_node_map[4][F5_NODE_MAP_SLOTS] = {};   // [buffer][slot] = stamped id (0 = leave AUTO)
         // Per ring slot: id that replaces the node id (0 = none). Set for tow cable segments.
         static uint32_t s_node_alias[4][F5_NODE_MAP_SLOTS] = {};

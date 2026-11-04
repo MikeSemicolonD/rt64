@@ -15,6 +15,10 @@
 namespace RT64 {
     struct State;
 
+    // Saves the game's color buffer at the next present to a PNG at path (rt64_present_queue.cpp); waits up to timeoutMs. ok is false if no present wrote it in time.
+    struct RS64CaptureResult { bool ok = false; uint32_t width = 0; uint32_t height = 0; uint32_t colours = 0; };
+    RS64CaptureResult rs64CaptureFrame(const std::string &path, int timeoutMs);
+
     // RS64: MCP bridge requests that need RT64 state, run on the gfx thread by drain() at the top of State::updateScreen.
     namespace rs64mcp {
         bool has(const std::string &method);

@@ -6,10 +6,14 @@
 
 #include <atomic>
 #include <chrono>
+#include <condition_variable>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <filesystem>
+#include <mutex>
 #include <string>
+#include <unordered_set>
 #include <vector>
 
 #define STB_IMAGE_WRITE_IMPLEMENTATION
@@ -18,6 +22,7 @@
 #include "common/rt64_thread.h"
 #include "rhi/rt64_render_hooks.h"
 
+#include "rt64_rs64_mcp.h"
 #include "rt64_rs64_transition.h"
 #include "rt64_workload_queue.h"
 
@@ -49,26 +54,58 @@ namespace RT64 {
         uint32_t height = 0;
         uint32_t rowWidth = 0;
         bool rgba8 = true;
+        bool requested = false;
         int taken = 0;
         std::chrono::steady_clock::time_point last = std::chrono::steady_clock::now();
     };
 
     static RS64Screenshot rs64Screenshot;
 
+    // On-demand capture (rs64CaptureFrame, the MCP screenshot): the present thread takes the request, writes the PNG and signals.
+    static std::mutex rs64CaptureMutex;
+    static std::condition_variable rs64CaptureCondition;
+    static std::string rs64CapturePath;
+    static uint64_t rs64CaptureRequested = 0;
+    static uint64_t rs64CaptureTaken = 0;
+    static uint64_t rs64CaptureWritten = 0;
+    static RS64CaptureResult rs64CaptureLast;
+
+    RS64CaptureResult rs64CaptureFrame(const std::string &path, int timeoutMs) {
+        std::unique_lock<std::mutex> lock(rs64CaptureMutex);
+        rs64CapturePath = path;
+        const uint64_t want = ++rs64CaptureRequested;
+        if (!rs64CaptureCondition.wait_for(lock, std::chrono::milliseconds(timeoutMs), [want]() { return rs64CaptureWritten >= want; })) {
+            rs64CaptureRequested = rs64CaptureWritten;
+            return {};
+        }
+
+        return rs64CaptureLast;
+    }
+
     static bool rs64QueueScreenshot(RenderDevice *device, RenderCommandList *commandList, const VIRenderer::RenderParams &params) {
         static const double every = []() { const char *v = std::getenv("ROGUESQ_SCREENSHOT_EVERY"); return (v != nullptr) ? std::atof(v) : 0.0; }();
         static const int maxShots = []() { const char *v = std::getenv("ROGUESQ_SCREENSHOT_MAX"); return (v != nullptr) ? std::max(std::atoi(v), 1) : 20; }();
         RS64Screenshot &s = rs64Screenshot;
         const bool rgba8 = (params.textureFormat == RenderFormat::R8G8B8A8_UNORM);
-        if ((every <= 0.0) || (s.taken >= maxShots) || (!rgba8 && (params.textureFormat != RenderFormat::R16G16B16A16_UNORM))) {
+        if (!rgba8 && (params.textureFormat != RenderFormat::R16G16B16A16_UNORM)) {
             return false;
+        }
+
+        bool requested = false;
+        {
+            const std::scoped_lock lock(rs64CaptureMutex);
+            if (rs64CaptureRequested > rs64CaptureTaken) {
+                rs64CaptureTaken = rs64CaptureRequested;
+                requested = true;
+            }
         }
 
         const auto now = std::chrono::steady_clock::now();
-        if (std::chrono::duration<double>(now - s.last).count() < every) {
+        if (!requested && ((every <= 0.0) || (s.taken >= maxShots) || (std::chrono::duration<double>(now - s.last).count() < every))) {
             return false;
         }
 
+        s.requested = requested;
         s.last = now;
         s.rgba8 = rgba8;
         s.width = params.textureWidth;
@@ -112,6 +149,29 @@ namespace RT64 {
         }
 
         s.buffer->unmap();
+
+        if (s.requested) {
+            std::unordered_set<uint32_t> colours;
+            for (size_t i = 0; (i < rgba.size()) && (colours.size() < 65536); i += 4 * 7) {
+                uint32_t c;
+                std::memcpy(&c, &rgba[i], 4);
+                colours.insert(c);
+            }
+
+            const std::scoped_lock lock(rs64CaptureMutex);
+            const std::filesystem::path out(rs64CapturePath);
+            std::error_code ec;
+            if (out.has_parent_path()) {
+                std::filesystem::create_directories(out.parent_path(), ec);
+            }
+
+            const bool ok = stbi_write_png(rs64CapturePath.c_str(), int(s.width), int(s.height), 4, rgba.data(), int(s.width) * 4) != 0;
+            rs64CaptureLast = { ok, s.width, s.height, uint32_t(colours.size()) };
+            rs64CaptureWritten = rs64CaptureTaken;
+            rs64CaptureCondition.notify_all();
+            return;
+        }
+
         std::error_code ec;
         std::filesystem::create_directories("screenshots", ec);
         char path[64];

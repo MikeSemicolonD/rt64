@@ -161,7 +161,8 @@ namespace RT64 {
                 { "fb", f }, { "proj", p }, { "call", d }, { "tris", call.triangleCount }, { "tiles", call.tileCount }, { "tmem_hashes", hashes },
                 { "combiner", { hex(call.colorCombiner.L), hex(call.colorCombiner.H) } }, { "other_mode", { hex(call.otherMode.L), hex(call.otherMode.H) } },
                 { "geometry_mode", hex(call.geometryMode) }, { "min_world", call.minWorldMatrix }, { "max_world", call.maxWorldMatrix },
-                { "min_world_addr", hex(drawData.worldTransformPhysicalAddresses[call.minWorldMatrix]) }
+                { "min_world_addr", hex(drawData.worldTransformPhysicalAddresses[call.minWorldMatrix]) },
+                { "prim", { call.rdpParams.primColor[0], call.rdpParams.primColor[1], call.rdpParams.primColor[2], call.rdpParams.primColor[3] } }
             };
         }
 
@@ -266,7 +267,8 @@ namespace RT64 {
 
             j["attributes_changed"] = changed;
             if (proj.type == Projection::Type::Rectangle) {
-                j["rect"] = { { "ulx", call.rect.ulx }, { "uly", call.rect.uly }, { "lrx", call.rect.lrx }, { "lry", call.rect.lry }, { "dsdx", call.rectDsdx }, { "dtdy", call.rectDtdy } };
+                j["rect"] = { { "ulx", call.rect.ulx }, { "uly", call.rect.uly }, { "lrx", call.rect.lrx }, { "lry", call.rect.lry }, { "dsdx", call.rectDsdx }, { "dtdy", call.rectDtdy },
+                    { "left_origin", call.rectLeftOrigin }, { "right_origin", call.rectRightOrigin } };
             }
 
             if (proj.usesViewport()) {
