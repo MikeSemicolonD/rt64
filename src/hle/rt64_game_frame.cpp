@@ -5,9 +5,11 @@
 #include "common/rt64_math.h"
 #include "common/rt64_diag_bounds.h"
 
+#include <algorithm>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <tuple>
 
 #include "rt64_game_frame.h"
 #include "rt64_workload_queue.h"
@@ -667,59 +669,147 @@ namespace RT64 {
         tileCheckSet.clear();
         lookAtCheckSet.clear();
 
-        // Traverse the map and fill the set with all the combinations of transforms to check.
-        for (std::pair<uint64_t, GameCallMap> curIt : curCallHashMap) {
-            auto prevRange = prevCallHashMap.equal_range(curIt.first);
-            for (auto prevIt = prevRange.first; prevIt != prevRange.second; prevIt++) {
-                const GameIndices::Projection &curProjIndices = curScene.projections[curIt.second.sceneProjIndex];
-                const Workload &curWorkload = workloadQueue.workloads[curProjIndices.workloadIndex];
-                const FramebufferPair &curFbPair = curWorkload.fbPairs[curProjIndices.fbPairIndex];
-                const Projection &curProj = curFbPair.projections[curProjIndices.projectionIndex];
-                const GameCall &curCall = curProj.gameCalls[curIt.second.callIndex];
-                const GameIndices::Projection &prevProjIndices = prevScene.projections[prevIt->second.sceneProjIndex];
-                const Workload &prevWorkload = workloadQueue.workloads[prevProjIndices.workloadIndex];
-                const FramebufferPair &prevFbPair = prevWorkload.fbPairs[prevProjIndices.fbPairIndex];
-                const Projection &prevProj = prevFbPair.projections[prevProjIndices.projectionIndex];
-                const GameCall &prevCall = prevProj.gameCalls[prevIt->second.callIndex];
-                const uint32_t curWorldMatrixCount = (curCall.callDesc.maxWorldMatrix - curCall.callDesc.minWorldMatrix) + 1;
-                const uint32_t prevWorldMatrixCount = (prevCall.callDesc.maxWorldMatrix - prevCall.callDesc.minWorldMatrix) + 1;
-                if ((curWorldMatrixCount == prevWorldMatrixCount) && curIt.second.doTransformMatching && prevIt->second.doTransformMatching) {
-                    for (uint32_t w = 0; w < curWorldMatrixCount; w++) {
-                        const uint32_t curWorldMatrix = curCall.callDesc.minWorldMatrix + w;
-                        const uint32_t curGroupIndex = curWorkload.drawData.worldTransformGroups[curWorldMatrix];
-                        const TransformGroup &curGroup = curWorkload.drawData.transformGroups[curGroupIndex];
-                        const uint32_t prevWorldMatrix = prevCall.callDesc.minWorldMatrix + w;
-                        const uint32_t prevGroupIndex = prevWorkload.drawData.worldTransformGroups[prevWorldMatrix];
-                        const TransformGroup &prevGroup = prevWorkload.drawData.transformGroups[prevGroupIndex];
-                        if ((curGroup.matrixId == prevGroup.matrixId) && ((curGroup.matrixId == G_EX_ID_AUTO) || ((curGroup.matrixId != G_EX_ID_IGNORE) && (curGroup.ordering == G_EX_ORDER_AUTO)))) {
-                            transformCheckSet.insert(IndexPair(curWorldMatrix, prevWorldMatrix));
-                        }
-                    }
+        // RS64: a set entry depends on each side's call only through a small key (its matrix range, a tile slot's texture, its look-at index), so each
+        // hash bucket is deduplicated per side by those keys instead of visiting every call pair (the end ceremony insignia was 428 x 428 a frame).
+        struct SideCall { const Workload *workload; const GameCall *call; const GameCallMap *map; };
+        struct XformKey { const Workload *workload; uint32_t minMatrix; uint32_t maxMatrix; };
+        struct TileKey { uint32_t count; uint32_t slot; uint64_t hash; uint32_t tileIndex; };
+        struct SlotKey { uint32_t count; uint32_t slot; uint32_t id; uint32_t matrix; };
+        thread_local std::vector<SlotKey> prevSlots;
+        auto slotKeyLess = [](const SlotKey &a, const SlotKey &b) { return std::make_tuple(a.count, a.slot, a.id) < std::make_tuple(b.count, b.slot, b.id); };
+        thread_local std::vector<SideCall> curCalls, prevCalls;
+        struct TileCall { const Workload *workload; uint32_t tileIndex; uint32_t count; bool match; };
+        thread_local std::vector<TileCall> curTiles, prevTiles;
+        thread_local std::vector<const TileCall *> prevTileAll, prevTileUnmatched;
+        thread_local std::vector<XformKey> curXforms, prevXforms;
+        thread_local std::vector<TileKey> prevTileHashes;
+        thread_local std::vector<uint32_t> curLookAts, prevLookAts;
+        const uint32_t textureGenMask = G_LIGHTING | G_TEXTURE_GEN;
+        auto resolveCall = [&](const GameScene &scene, const GameCallMap &map) {
+            const GameIndices::Projection &indices = scene.projections[map.sceneProjIndex];
+            const Workload &workload = workloadQueue.workloads[indices.workloadIndex];
+            const Projection &proj = workload.fbPairs[indices.fbPairIndex].projections[indices.projectionIndex];
+            return SideCall{ &workload, &proj.gameCalls[map.callIndex], &map };
+        };
+        auto xformKeys = [](const std::vector<SideCall> &calls, std::vector<XformKey> &keys) {
+            keys.clear();
+            for (const SideCall &c : calls) {
+                if (c.map->doTransformMatching) {
+                    keys.push_back({ c.workload, c.call->callDesc.minWorldMatrix, c.call->callDesc.maxWorldMatrix });
                 }
-
-                if ((curCall.callDesc.tileCount == prevCall.callDesc.tileCount) && (curIt.second.doTileInterpolation && prevIt->second.doTileInterpolation)) {
-                    for (uint32_t t = 0; t < curCall.callDesc.tileCount; t++) {
-                        const DrawCallTile &curCallTile = curWorkload.drawData.callTiles[curCall.callDesc.tileIndex + t];
-                        const DrawCallTile &prevCallTile = prevWorkload.drawData.callTiles[prevCall.callDesc.tileIndex + t];
-                        bool doTileMatching = curIt.second.doTileMatching && prevIt->second.doTileMatching;
-                        if (doTileMatching && (curCallTile.tmemHashOrID != prevCallTile.tmemHashOrID)) {
-                            continue;
-                        }
-
-                        tileCheckSet.insert(IndexPair(curCall.callDesc.tileIndex + t, prevCall.callDesc.tileIndex + t));
-                    }
-                }
-
-                const uint32_t textureGenMask = G_LIGHTING | G_TEXTURE_GEN;
-                const bool curUsesTextureGen = (curCall.callDesc.geometryMode & textureGenMask) == textureGenMask;
-                const bool prevUsesTextureGen = (prevCall.callDesc.geometryMode & textureGenMask) == textureGenMask;
-                if (curUsesTextureGen && prevUsesTextureGen && (true && true)) { // TODO: Do look at matching condition.
+            }
+            auto asTuple = [](const XformKey &k) { return std::make_tuple(k.workload, k.minMatrix, k.maxMatrix); };
+            std::sort(keys.begin(), keys.end(), [&](const XformKey &a, const XformKey &b) { return asTuple(a) < asTuple(b); });
+            keys.erase(std::unique(keys.begin(), keys.end(), [&](const XformKey &a, const XformKey &b) { return asTuple(a) == asTuple(b); }), keys.end());
+        };
+        auto lookAtKeys = [&](const std::vector<SideCall> &calls, std::vector<uint32_t> &keys) {
+            keys.clear();
+            for (const SideCall &c : calls) {
+                if ((c.call->callDesc.geometryMode & textureGenMask) == textureGenMask) {
                     // FIXME: We assume the same look at is used throughout the entire draw call, so we only check the first vertex.
-                    const uint32_t curVertexIndex = curWorkload.drawData.faceIndices[curCall.meshDesc.faceIndicesStart];
-                    const uint32_t prevVertexIndex = prevWorkload.drawData.faceIndices[prevCall.meshDesc.faceIndicesStart];
-                    const uint32_t curLookAtIndex = curWorkload.drawData.lookAtIndices[curVertexIndex] >> RSP_LOOKAT_INDEX_SHIFT;
-                    const uint32_t prevLookAtIndex = prevWorkload.drawData.lookAtIndices[prevVertexIndex] >> RSP_LOOKAT_INDEX_SHIFT;
-                    lookAtCheckSet.insert(IndexPair(curLookAtIndex, prevLookAtIndex));
+                    const uint32_t vertexIndex = c.workload->drawData.faceIndices[c.call->meshDesc.faceIndicesStart];
+                    keys.push_back(c.workload->drawData.lookAtIndices[vertexIndex] >> RSP_LOOKAT_INDEX_SHIFT);
+                }
+            }
+            std::sort(keys.begin(), keys.end());
+            keys.erase(std::unique(keys.begin(), keys.end()), keys.end());
+        };
+        auto tileHash = [](const TileCall &c, uint32_t t) { return c.workload->drawData.callTiles[c.tileIndex + t].tmemHashOrID; };
+        auto tileCalls = [](const std::vector<SideCall> &calls, std::vector<TileCall> &tiles) {
+            tiles.clear();
+            for (const SideCall &c : calls) {
+                if (c.map->doTileInterpolation) {
+                    tiles.push_back({ c.workload, c.call->callDesc.tileIndex, c.call->callDesc.tileCount, c.map->doTileMatching != 0 });
+                }
+            }
+            auto asTuple = [](const TileCall &k) { return std::make_tuple(k.workload, k.tileIndex, k.count, k.match); };
+            std::sort(tiles.begin(), tiles.end(), [&](const TileCall &a, const TileCall &b) { return asTuple(a) < asTuple(b); });
+            tiles.erase(std::unique(tiles.begin(), tiles.end(), [&](const TileCall &a, const TileCall &b) { return asTuple(a) == asTuple(b); }), tiles.end());
+        };
+        auto tileKeyLess = [](const TileKey &a, const TileKey &b) { return std::make_tuple(a.count, a.slot, a.hash) < std::make_tuple(b.count, b.slot, b.hash); };
+
+        for (auto curIt = curCallHashMap.begin(); curIt != curCallHashMap.end();) {
+            const auto curEnd = curCallHashMap.upper_bound(curIt->first);
+            const auto prevRange = prevCallHashMap.equal_range(curIt->first);
+            curCalls.clear();
+            prevCalls.clear();
+            for (; curIt != curEnd; curIt++) {
+                curCalls.push_back(resolveCall(curScene, curIt->second));
+            }
+            for (auto prevIt = prevRange.first; prevIt != prevRange.second; prevIt++) {
+                prevCalls.push_back(resolveCall(prevScene, prevIt->second));
+            }
+            if (prevCalls.empty()) {
+                continue;
+            }
+
+            // A matrix slot pairs with the same slot of a same-count call holding the same id, so prev slots are looked up by (count, slot, id).
+            xformKeys(curCalls, curXforms);
+            xformKeys(prevCalls, prevXforms);
+            prevSlots.clear();
+            for (const XformKey &p : prevXforms) {
+                const uint32_t count = (p.maxMatrix - p.minMatrix) + 1;
+                for (uint32_t w = 0; w < count; w++) {
+                    const TransformGroup &prevGroup = p.workload->drawData.transformGroups[p.workload->drawData.worldTransformGroups[p.minMatrix + w]];
+                    prevSlots.push_back({ count, w, prevGroup.matrixId, p.minMatrix + w });
+                }
+            }
+            std::sort(prevSlots.begin(), prevSlots.end(), slotKeyLess);
+            for (const XformKey &c : curXforms) {
+                const uint32_t count = (c.maxMatrix - c.minMatrix) + 1;
+                for (uint32_t w = 0; w < count; w++) {
+                    const TransformGroup &curGroup = c.workload->drawData.transformGroups[c.workload->drawData.worldTransformGroups[c.minMatrix + w]];
+                    if ((curGroup.matrixId != G_EX_ID_AUTO) && ((curGroup.matrixId == G_EX_ID_IGNORE) || (curGroup.ordering != G_EX_ORDER_AUTO))) {
+                        continue;
+                    }
+                    const auto range = std::equal_range(prevSlots.begin(), prevSlots.end(), SlotKey{ count, w, curGroup.matrixId, 0 }, slotKeyLess);
+                    for (auto e = range.first; e != range.second; e++) {
+                        transformCheckSet.insert(IndexPair(c.minMatrix + w, e->matrix));
+                    }
+                }
+            }
+
+            // Two tile-matching calls pair only slots with the same texture; any other pair of same-count calls pairs every slot. Calls often share
+            // their tile entries, so each side is first reduced to distinct (workload, tile range, matching) entries.
+            tileCalls(curCalls, curTiles);
+            tileCalls(prevCalls, prevTiles);
+            prevTileAll.clear();
+            prevTileUnmatched.clear();
+            prevTileHashes.clear();
+            for (const TileCall &p : prevTiles) {
+                prevTileAll.push_back(&p);
+                if (!p.match) {
+                    prevTileUnmatched.push_back(&p);
+                    continue;
+                }
+                for (uint32_t t = 0; t < p.count; t++) {
+                    prevTileHashes.push_back({ p.count, t, tileHash(p, t), p.tileIndex + t });
+                }
+            }
+            std::sort(prevTileHashes.begin(), prevTileHashes.end(), tileKeyLess);
+            for (const TileCall &c : curTiles) {
+                for (const TileCall *p : (c.match ? prevTileUnmatched : prevTileAll)) {
+                    if (p->count == c.count) {
+                        for (uint32_t t = 0; t < c.count; t++) {
+                            tileCheckSet.insert(IndexPair(c.tileIndex + t, p->tileIndex + t));
+                        }
+                    }
+                }
+                if (c.match) {
+                    for (uint32_t t = 0; t < c.count; t++) {
+                        const auto range = std::equal_range(prevTileHashes.begin(), prevTileHashes.end(), TileKey{ c.count, t, tileHash(c, t), 0 }, tileKeyLess);
+                        for (auto e = range.first; e != range.second; e++) {
+                            tileCheckSet.insert(IndexPair(c.tileIndex + t, e->tileIndex));
+                        }
+                    }
+                }
+            }
+
+            lookAtKeys(curCalls, curLookAts);
+            lookAtKeys(prevCalls, prevLookAts);
+            for (uint32_t c : curLookAts) {
+                for (uint32_t p : prevLookAts) {
+                    lookAtCheckSet.insert(IndexPair(c, p));
                 }
             }
         }
