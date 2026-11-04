@@ -67,6 +67,7 @@ extern "C" { volatile unsigned g_f5_task_faces = 0; }
 extern "C" { volatile unsigned g_f5_heur[4] = {}; }
 extern "C" { volatile int g_explosion_hold = 0; }
 extern "C" int rs64_static_terrain_mode(void);
+extern "C" int rs64_credits_active(void);
 
 namespace RT64 {
     namespace GBI_F3DFACTOR5 {
@@ -3383,6 +3384,8 @@ namespace RT64 {
             (*dl) += 2;
         }
 
+        static bool f5_texrect_quad(State* state, const DisplayList* dl, uint32_t id, const char* probe, float dy);
+
         // Crosshair rings are texrects, which RT64 never interpolates. A texrect that matches a ring element of the HUD struct draws instead as a camera-space quad on its own transform id. ROGUESQ_F5_XHAIR_QUAD=0 keeps the texrect.
         bool f5_crosshair_quad(State* state, const DisplayList* dl) {
             static const bool s_on = env_on("ROGUESQ_F5_XHAIR_QUAD", true);
@@ -3392,7 +3395,6 @@ namespace RT64 {
             const uint32_t w0 = dl[0].w0, w1 = dl[0].w1;
             const rs64xhair::Rect r{ ((w1 >> 12) & 0xFFFu) / 4.0f, (w1 & 0xFFFu) / 4.0f, ((w0 >> 12) & 0xFFFu) / 4.0f, (w0 & 0xFFFu) / 4.0f };
             const uint8_t tile = (uint8_t)((w1 >> 24) & 7u);
-            const int16_t uls = (int16_t)(dl[1].w0 >> 16), ult = (int16_t)(dl[1].w0 & 0xFFFFu);
             const int16_t dsdx = (int16_t)(dl[1].w1 >> 16), dtdy = (int16_t)(dl[1].w1 & 0xFFFFu);
             const auto &t = state->rdp->tiles[tile];
             const rs64xhair::TexSize tex{ (uint32_t)((t.lrs - t.uls) >> 2) + 1u, (uint32_t)((t.lrt - t.ult) >> 2) + 1u };
@@ -3410,6 +3412,81 @@ namespace RT64 {
             if (ring < 0) {
                 return false;
             }
+
+            return f5_texrect_quad(state, dl, 0x80000000u | (uint32_t)ring, (ring == 2) ? "xhair-quad-bomb" : ring ? "xhair-quad-in" : "xhair-quad-out", 0.0f);
+        }
+
+        // A credits glyph's interpolation id: the previous task's glyph with the same texture and x (the text only scrolls vertically) nearest in y, within
+        // 8 px; lines are further apart than that and the text moves ~1.5 px a frame. RT64's automatic ids ignore the texture and paired different letters.
+        // The game places glyphs on a half-pixel grid, so a ~0.67 px scroll steps 1, 1, 0 px and interpolation replays that uneven speed. Each glyph
+        // draws at its own smoothed y (`shown`): last frame's plus the average step of all glyphs, eased toward the game's y and kept within a pixel of it.
+        struct F5Glyph { uint32_t key; float y; float shown; uint32_t id; };
+        static std::vector<F5Glyph> s_glyph_prev, s_glyph_cur;
+        static uint64_t s_glyph_task = ~0ull;
+        static uint32_t s_glyph_next = 0;
+        static float s_glyph_speed = 0.0f;
+
+        static uint32_t f5_credits_glyph_id(State* state, uint32_t key, float y, float& shown) {
+            if (state->displayListCounter != s_glyph_task) {
+                s_glyph_task = state->displayListCounter;
+                s_glyph_prev.swap(s_glyph_cur);
+                s_glyph_cur.clear();
+            }
+            F5Glyph* best = nullptr;
+            float bestDist = 8.0f;
+            for (F5Glyph& g : s_glyph_prev) {
+                const float dist = std::fabs(g.y - y);
+                if ((g.key == key) && (g.id != 0) && (dist < bestDist)) {
+                    best = &g;
+                    bestDist = dist;
+                }
+            }
+            uint32_t id = 0;
+            shown = y;
+            if (best != nullptr) {
+                id = best->id;
+                best->id = 0;
+                s_glyph_speed += 0.02f * ((y - best->y) - s_glyph_speed);
+
+                const float predicted = best->shown + s_glyph_speed;
+
+                shown = std::clamp(predicted + 0.05f * (y - predicted), y - 1.0f, y + 1.0f);
+            }
+            else {
+                s_glyph_next = (s_glyph_next + 1) & 0xFFFFFFu;
+                id = 0x81000000u | s_glyph_next;
+            }
+            s_glyph_cur.push_back({ key, y, shown, id });
+            return id;
+        }
+
+        // The credits scroll their glyphs as texrects, which RT64 never interpolates, so they moved at 30 fps. Drawn as quads on stable ids they
+        // interpolate like the 3D scene. ROGUESQ_F5_CREDITS_QUAD=0 keeps the texrects.
+        bool f5_credits_glyph_quad(State* state, const DisplayList* dl) {
+            static const bool s_on = env_on("ROGUESQ_F5_CREDITS_QUAD", true);
+            const uint32_t cycle = (state->rdp->otherMode.H >> 20) & 3u;
+            if (!s_on || !f5_native_active() || !rs64_credits_active() || (cycle > 1)) {
+                return false;
+            }
+            if (state->rdp->tiles[(dl[0].w1 >> 24) & 7u].fmt != G_IM_FMT_I) {
+                return false;
+            }
+            const uint32_t ulx = (dl[0].w1 >> 12) & 0xFFFu;
+            const uint32_t key = ((state->rdp->texture.address & 0xFFFFFFu) * 31u) ^ ulx;
+            const float y = (dl[0].w1 & 0xFFFu) / 4.0f;
+            float shown = y;
+            const uint32_t id = f5_credits_glyph_id(state, key, y, shown);
+
+            return f5_texrect_quad(state, dl, id, "credits-glyph", shown - y);
+        }
+
+        // Draws the texrect at dl, moved down by dy pixels, as a camera-space quad on transform `id`; false leaves it to the texrect path.
+        static bool f5_texrect_quad(State* state, const DisplayList* dl, uint32_t id, const char* probe, float dy) {
+            const uint32_t w0 = dl[0].w0, w1 = dl[0].w1;
+            const rs64xhair::Rect r{ ((w1 >> 12) & 0xFFFu) / 4.0f, (w1 & 0xFFFu) / 4.0f + dy, ((w0 >> 12) & 0xFFFu) / 4.0f, (w0 & 0xFFFu) / 4.0f + dy };
+            const uint8_t tile = (uint8_t)((w1 >> 24) & 7u);
+            const int16_t uls = (int16_t)(dl[1].w0 >> 16), ult = (int16_t)(dl[1].w0 & 0xFFFFu);
+            const int16_t dsdx = (int16_t)(dl[1].w1 >> 16), dtdy = (int16_t)(dl[1].w1 & 0xFFFFu);
 
             // Un-project the rect corners onto a plane of constant screen depth through the current projection and viewport.
             const hlslpp::float4x4 proj = state->rsp->viewProjMatrixStack[state->rsp->projectionMatrixStackSize - 1];
@@ -3470,7 +3547,7 @@ namespace RT64 {
             uint32_t &gm = state->rsp->geometryModeStack[state->rsp->geometryModeStackSize - 1];
             const uint32_t savedGM = gm;
             gm &= ~(uint32_t)(G_LIGHTING | G_FOG | G_TEXTURE_GEN | state->rsp->cullBothMask);
-            state->rsp->matrixId(0x80000000u | (uint32_t)ring, /*push*/true, /*proj*/false, /*decompose*/true,
+            state->rsp->matrixId(id, /*push*/true, /*proj*/false, /*decompose*/true,
                 G_EX_COMPONENT_INTERPOLATE, G_EX_COMPONENT_INTERPOLATE, G_EX_COMPONENT_INTERPOLATE, G_EX_COMPONENT_INTERPOLATE, G_EX_COMPONENT_INTERPOLATE,
                 G_EX_COMPONENT_SKIP, G_EX_COMPONENT_SKIP, G_EX_COMPONENT_AUTO, G_EX_COMPONENT_AUTO,
                 G_EX_ORDER_LINEAR, G_EX_ASPECT_AUTO, G_EX_EDIT_NONE, /*idIsAddress*/false, /*editGroup*/false);
@@ -3479,7 +3556,7 @@ namespace RT64 {
             modelTop = hlslpp::float4x4(scale, 0, 0, 0, 0, scale, 0, 0, 0, 0, scale, 0, centre[0], centre[1], centre[2], 1);
             state->rsp->modelViewProjChanged = true;
             state->rsp->setVertex(0x80000000u | (F5_VTX_SCRATCH + F5_FACE_SLOT * sizeof(RSP::Vertex)), 4, F5_FACE_SLOT);
-            f5_hud_probe_slot(state, (ring == 2) ? "xhair-quad-bomb" : ring ? "xhair-quad-in" : "xhair-quad-out", F5_FACE_SLOT, 4);
+            f5_hud_probe_slot(state, probe, F5_FACE_SLOT, 4);
             state->rsp->drawIndexedTri(F5_FACE_SLOT, F5_FACE_SLOT + 2, F5_FACE_SLOT + 3);
             state->rsp->drawIndexedTri(F5_FACE_SLOT, F5_FACE_SLOT + 3, F5_FACE_SLOT + 1);
             modelTop = savedModel;
@@ -3502,11 +3579,11 @@ namespace RT64 {
             if (!f5_native_active()) return;
 
             // The game's drop shadows (a craft silhouette on an intensity texture, combiner FC1217FF FFFFFE38, black translucent prim colour) give way to
-            // the ray-traced sun shadows when those are on.
+            // the ray-traced sun shadows when those are on. The opening crawl's text uses the same material with an opaque prim.
             const hlslpp::float4& prim = state->rdp->primColorStack[state->rdp->primColorStackSize - 1];
             const interop::ColorCombiner& cc = state->rdp->colorCombinerStack[state->rdp->colorCombinerStackSize - 1];
             const bool dropShadow = ((cc.L & 0x00FFFFFFu) == 0x001217FFu) && (cc.H == 0xFFFFFE38u) && (state->rdp->texture.fmt == G_IM_FMT_I) && ((float)prim.x == 0.0f) &&
-                ((float)prim.y == 0.0f) && ((float)prim.z == 0.0f) && ((float)prim.w > 0.0f);
+                ((float)prim.y == 0.0f) && ((float)prim.z == 0.0f) && ((float)prim.w > 0.0f) && ((float)prim.w < 1.0f);
             if (rs64lights::config().shadows && dropShadow) {
                 return;
             }

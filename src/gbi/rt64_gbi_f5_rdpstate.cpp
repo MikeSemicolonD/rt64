@@ -609,7 +609,7 @@ namespace RT64 {
                     }
                 }
             }
-            if (f5_crosshair_quad(state, *dl)) {
+            if (f5_crosshair_quad(state, *dl) || f5_credits_glyph_quad(state, *dl)) {
                 (*dl)++;
                 return;
             }

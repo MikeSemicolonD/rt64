@@ -692,7 +692,7 @@ namespace RT64 {
                         const uint32_t prevGroupIndex = prevWorkload.drawData.worldTransformGroups[prevWorldMatrix];
                         const TransformGroup &prevGroup = prevWorkload.drawData.transformGroups[prevGroupIndex];
                         if ((curGroup.matrixId == prevGroup.matrixId) && ((curGroup.matrixId == G_EX_ID_AUTO) || ((curGroup.matrixId != G_EX_ID_IGNORE) && (curGroup.ordering == G_EX_ORDER_AUTO)))) {
-                            transformCheckSet.emplace(curWorldMatrix, prevWorldMatrix);
+                            transformCheckSet.insert(IndexPair(curWorldMatrix, prevWorldMatrix));
                         }
                     }
                 }
@@ -706,7 +706,7 @@ namespace RT64 {
                             continue;
                         }
 
-                        tileCheckSet.emplace(curCall.callDesc.tileIndex + t, prevCall.callDesc.tileIndex + t);
+                        tileCheckSet.insert(IndexPair(curCall.callDesc.tileIndex + t, prevCall.callDesc.tileIndex + t));
                     }
                 }
 
@@ -719,7 +719,7 @@ namespace RT64 {
                     const uint32_t prevVertexIndex = prevWorkload.drawData.faceIndices[prevCall.meshDesc.faceIndicesStart];
                     const uint32_t curLookAtIndex = curWorkload.drawData.lookAtIndices[curVertexIndex] >> RSP_LOOKAT_INDEX_SHIFT;
                     const uint32_t prevLookAtIndex = prevWorkload.drawData.lookAtIndices[prevVertexIndex] >> RSP_LOOKAT_INDEX_SHIFT;
-                    lookAtCheckSet.emplace(curLookAtIndex, prevLookAtIndex);
+                    lookAtCheckSet.insert(IndexPair(curLookAtIndex, prevLookAtIndex));
                 }
             }
         }

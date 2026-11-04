@@ -1278,11 +1278,12 @@ namespace RT64 {
         const int32_t uvHeight = (flip ? rectWidth : rectHeight) << 2;
         const int32_t lrs = ((uls << 7) + dsdx * uvWidth) >> 7;
         const int32_t lrt = ((ult << 7) + dtdy * uvHeight) >> 7;
-        const float vFractionOffset = (uly & 0x3) ? (dtdy >> 5) / 32.0f : 0.0f;
+        // RS64: no one-row texture advance for a fractional top edge. The RDP starts such a rect on the next scanline, where that advance lines up,
+        // but the rect is drawn from its exact position here, so the advance shifted glyphs up and cut their top rows on half-pixel frames (credits).
         float u1 = uls / 32.0f;
-        float v1 = ult / 32.0f + vFractionOffset;
+        float v1 = ult / 32.0f;
         float u2 = lrs / 32.0f;
-        float v2 = lrt / 32.0f + vFractionOffset;
+        float v2 = lrt / 32.0f;
         triTcFloats.emplace_back(u1);
         triTcFloats.emplace_back(v1);
         triTcFloats.emplace_back(flip ? u1 : u2);
@@ -1308,9 +1309,9 @@ namespace RT64 {
                 const int32_t rightPixels = intersectionRect.right(true) - drawRect.left(true);
                 const int32_t bottomPixels = intersectionRect.bottom(true) - drawRect.top(true);
                 const float intU1 = (((uls << 7) + dsdx * ((flip ? topPixels : leftPixels) << 2)) >> 7) / 32.0f;
-                const float intV1 = (((ult << 7) + dtdy * ((flip ? leftPixels : topPixels) << 2)) >> 7) / 32.0f + vFractionOffset;
+                const float intV1 = (((ult << 7) + dtdy * ((flip ? leftPixels : topPixels) << 2)) >> 7) / 32.0f;
                 const float intU2 = (((uls << 7) + dsdx * ((flip ? bottomPixels : rightPixels) << 2)) >> 7) / 32.0f;
-                const float intV2 = (((ult << 7) + dtdy * ((flip ? rightPixels : bottomPixels) << 2)) >> 7) / 32.0f + vFractionOffset;
+                const float intV2 = (((ult << 7) + dtdy * ((flip ? rightPixels : bottomPixels) << 2)) >> 7) / 32.0f;
                 updateCallTexcoords(intU1, intV1);
                 updateCallTexcoords(intU2, intV2);
             }

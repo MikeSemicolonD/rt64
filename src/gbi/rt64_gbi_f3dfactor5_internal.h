@@ -109,6 +109,7 @@ namespace RT64 {
         void f5_hud_probe(State *state, const char *tag, float cx, float cy, float w, float h);
         // Draws a crosshair-ring texrect (dl points at its 16 bytes) as an interpolated quad; false leaves it to the texrect path.
         bool f5_crosshair_quad(State *state, const DisplayList *dl);
+        bool f5_credits_glyph_quad(State *state, const DisplayList *dl);
 
         // --- RDP-state / raster handlers (rt64_gbi_f5_rdpstate.cpp): Factor-5 wrappers
         //     around the base GBI_F3D/GBI_RDP handlers (logging, guards, CI4 reinterpret).
