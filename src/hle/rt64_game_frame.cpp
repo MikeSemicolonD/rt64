@@ -970,6 +970,22 @@ namespace RT64 {
         curTransformMap.rigidBody.updateAngular(prevTransform, curTransform, curGroup.rotationInterpolation, curGroup.scaleInterpolation, curGroup.skewInterpolation);
         curTransformMap.rigidBody.updatePerspective(prevTransform, curTransform, curGroup.perspectiveInterpolation);
         curTransformMap.rigidBody.updateDecomposition(curTransform, curGroup.decompose);
+
+        // A recycled scene node pairs two unrelated objects; their blend can pass right by the camera and draw huge for an in-between frame (laser streaks).
+        const float prevDist = hlslpp::length(prevTransform[3].xyz);
+        const float curDist = hlslpp::length(curTransform[3].xyz);
+        const float midDist = hlslpp::length((prevTransform[3].xyz + curTransform[3].xyz) * 0.5f);
+
+        if (curTransformMap.rigidBody.lerpTranslation && (std::min(prevDist, curDist) > 256.0f) && (midDist < 0.3f * std::min(prevDist, curDist))) {
+            RigidBody &body = curTransformMap.rigidBody;
+
+            body.lerpTranslation = false;
+            body.lerpRotation = false;
+            body.lerpScale = false;
+            body.lerpSkew = false;
+            body.lerpPerspective = false;
+        }
+
         curTransformMap.prevTransformIndex = prevTransformIndex;
         curTransformMap.mapped = true;
         curWorkloadMap.prevTransformsMapped[prevTransformIndex] = true;
