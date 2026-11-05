@@ -24,7 +24,7 @@ namespace interop {
         float4 receiverSkip;
         // Soft shadows: tan(sun angular radius), pixels per world unit at unit distance, max blur radius in pixels, terrain receivers (0 off, 1 smooth normals, 2 smooth normals + terminator).
         float4 softParams;
-        // Terrain-normal depth window (fraction of view distance), unused x3.
+        // Terrain-normal depth window (fraction of view distance), water reflection blur radius (px), unused x2.
         float4 terrainParams;
         // Off-screen casters: view -> viewport clip (frustum test), history slot cameras in this frame's camera space (w = skip radius), slot mask (0x08 << slot).
         float4x4 screenFromView;
@@ -51,7 +51,7 @@ namespace interop {
         // The frame's vertex fog (RSPFog mul, offset; z = 1 when valid) and colour, for fogging what water reflects as the view fogs it.
         float4 fogParams;
         float4 fogColor;
-        // The sky a water reflection ray that hits nothing sees, from this frame's sky dome draws: rgb near the horizon and overhead (zenith w = strength, 0 = off). skyHorizon.w: cast shadow strength on water.
+        // Sky dome averages near the horizon and overhead (rgb, unused by the trace: a missed water ray takes the drawn sky pixel). skyZenith.w: sky reflection strength (0 = off). skyHorizon.w: cast shadow strength on water.
         float4 skyHorizon;
         float4 skyZenith;
     };

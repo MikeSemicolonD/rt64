@@ -21,6 +21,7 @@
 #   include "shaders/RS64ShadowsSoftPS.hlsl.spirv.h"
 #   include "shaders/RS64ShadowBlurPS.hlsl.spirv.h"
 #   include "shaders/RS64ShadowBlurVPS.hlsl.spirv.h"
+#   include "shaders/RS64ShadowBlurWaterPS.hlsl.spirv.h"
 #   include "shaders/RS64ShadowTemporalPS.hlsl.spirv.h"
 #endif
 #include "shaders/FbChangesDrawDepthPS.hlsl.spirv.h"
@@ -80,6 +81,7 @@
 #   include "shaders/RS64ShadowsSoftPS.hlsl.dxil.h"
 #   include "shaders/RS64ShadowBlurPS.hlsl.dxil.h"
 #   include "shaders/RS64ShadowBlurVPS.hlsl.dxil.h"
+#   include "shaders/RS64ShadowBlurWaterPS.hlsl.dxil.h"
 #   include "shaders/RS64ShadowTemporalPS.hlsl.dxil.h"
 #   include "shaders/FbChangesDrawDepthPS.hlsl.dxil.h"
 #   include "shaders/FbReadAnyChangesCS.hlsl.dxil.h"
@@ -1001,6 +1003,7 @@ namespace RT64 {
             rs64ShadowBlurH.pipelineLayout = blurLayout();
             rs64ShadowBlurV.pipelineLayout = blurLayout();
             rs64ShadowBlurVDebug.pipelineLayout = blurLayout();
+            rs64ShadowBlurWater.pipelineLayout = blurLayout();
             std::unique_ptr<RenderShader> blurHShader = device->createShader(CREATE_SHADER_INPUTS(RS64ShadowBlurPSBlobDXIL, RS64ShadowBlurPSBlobSPIRV, RS64ShadowBlurPSBlobSPIRV, "PSMain", shaderFormat));
             std::unique_ptr<RenderShader> blurVShader = device->createShader(CREATE_SHADER_INPUTS(RS64ShadowBlurVPSBlobDXIL, RS64ShadowBlurVPSBlobSPIRV, RS64ShadowBlurVPSBlobSPIRV, "PSMain", shaderFormat));
             maskDesc.pixelShader = blurHShader.get();
@@ -1030,6 +1033,17 @@ namespace RT64 {
             compDesc.renderTargetBlend[0] = compose;
             compDesc.pipelineLayout = rs64ShadowBlurV.pipelineLayout.get();
             rs64ShadowBlurV.pipeline = device->createGraphicsPipeline(compDesc);
+
+            // Water reflections: added after the compose (result = dst + src), as an absolute colour the UNORM compose factors cannot carry.
+            std::unique_ptr<RenderShader> blurWaterShader = device->createShader(CREATE_SHADER_INPUTS(RS64ShadowBlurWaterPSBlobDXIL, RS64ShadowBlurWaterPSBlobSPIRV, RS64ShadowBlurWaterPSBlobSPIRV, "PSMain", shaderFormat));
+            RenderBlendDesc add = compose;
+            add.srcBlend = RenderBlend::ONE;
+            add.dstBlend = RenderBlend::ONE;
+            compDesc.pixelShader = blurWaterShader.get();
+            compDesc.renderTargetBlend[0] = add;
+            compDesc.pipelineLayout = rs64ShadowBlurWater.pipelineLayout.get();
+            rs64ShadowBlurWater.pipeline = device->createGraphicsPipeline(compDesc);
+            compDesc.pixelShader = blurVShader.get();
             compDesc.renderTargetBlend[0] = RenderBlendDesc::Copy();
             compDesc.pipelineLayout = rs64ShadowBlurVDebug.pipelineLayout.get();
             rs64ShadowBlurVDebug.pipeline = device->createGraphicsPipeline(compDesc);

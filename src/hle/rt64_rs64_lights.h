@@ -1533,6 +1533,8 @@ namespace rs64lights {
         float reflStrength;
         // Strength of the sky a water reflection ray sees when it hits nothing (0 = water keeps its drawn colour there).
         float reflSky;
+        // Blur radius (pixels at native resolution) of water reflections: one jittered ray per pixel speckles at reflection edges.
+        float reflWaterBlurPx;
         // Cast shadow strength on water (1 = as on ground): what the water reflects stays lit in a shadow.
         float waterShadow;
         // A level sun lower than this (degrees) is lifted to it: a near-horizon sun throws long shadows and the terminator blackens gentle slopes.
@@ -1607,6 +1609,7 @@ namespace rs64lights {
             envFloat("ROGUESQ_RT_REFL_RANGE", 0.1f),
             envFloat("ROGUESQ_RT_REFL_STRENGTH", 3.0f),
             std::max(envFloat("ROGUESQ_RT_REFL_SKY", 1.0f), 0.0f),
+            std::max(envFloat("ROGUESQ_RT_REFL_WATER_BLUR", 3.0f), 0.0f),
             std::clamp(envFloat("ROGUESQ_RT_WATER_SHADOW", 0.5f), 0.0f, 1.0f),
             std::clamp(envFloat("ROGUESQ_RT_SUN_MIN_ELEVATION", 25.0f), 0.0f, 89.0f),
             std::max(envFloat("ROGUESQ_RT_LIGHTS_SPRITE_EMIT_REF", 0.12f), 0.0f),
@@ -2180,13 +2183,13 @@ namespace rs64lights {
     }
 
     // Shadow-pass composite, blend dst * src + dst * srcA = dst * dark * (1 + indirect): a = darkening from sun shadow and AO, rgb = dark x indirect clamped to 1
-    // (the colour target may be UNORM). Mirrored by RS64ShadowBlurPS.
-    inline void composeFactor(float shadow, float ao, const float indirect[3], float shadowStrength, float aoStrength, float out[4]) {
+    // (the colour target is UNORM). On water (waterF > 0) rgb is 0 and a keeps dark x (1 - F); the additive water draw adds indirect (R x F). Mirrored by RS64ShadowBlurPS.
+    inline void composeFactor(float shadow, float ao, const float indirect[3], float waterF, float shadowStrength, float aoStrength, float out[4]) {
         const float dark = (1.0f - shadowStrength * shadow) * (1.0f - aoStrength * ao);
         for (int k = 0; k < 3; ++k) {
-            out[k] = dark * std::clamp(indirect[k], 0.0f, 1.0f);
+            out[k] = (waterF > 0.0f) ? 0.0f : dark * std::clamp(indirect[k], 0.0f, 1.0f);
         }
-        out[3] = dark;
+        out[3] = dark * ((waterF > 0.0f) ? std::clamp(1.0f - waterF, 0.0f, 1.0f) : 1.0f);
     }
 
     // The shadow trace pass runs for any of its features.

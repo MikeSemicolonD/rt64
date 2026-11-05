@@ -4,6 +4,11 @@
 
 #include "shared/rt64_rs64_shadow_blur_cb.h"
 
+// The additive water draw is the vertical pass too.
+#ifdef RS64_BLUR_WATER
+#define RS64_BLUR_V
+#endif
+
 ConstantBuffer<RS64ShadowBlurCB> gBlur : register(b0);
 Texture2D<float> gDepth : register(t1);
 Texture2D<float4> gMask : register(t2);
@@ -52,6 +57,15 @@ BlurOut PSMain(in float4 pos : SV_Position, in float2 uv : TEXCOORD0) {
     const int2 px = int2(pos.xy);
     const float4 c = gMask.Load(int3(px, 0));
     const float4 ci = gIndirect.Load(int3(px, 0));
+    // Water (alpha -F) carries an absolute reflection colour, everything else a multiplier: the two never blur into each other.
+    const bool water = (ci.a < 0.0f);
+
+#ifdef RS64_BLUR_WATER
+    if (!water) {
+        discard;
+    }
+#endif
+
     const int2 lo = int2(gBlur.viewport.xy);
     const int2 hi = int2(gBlur.viewport.xy + gBlur.viewport.zw) - 1;
     // Lit pixels carry radius 0; take the radius of any neighbour whose penumbra reaches here so the blur spreads onto both sides of the edge.
@@ -92,9 +106,10 @@ BlurOut PSMain(in float4 pos : SV_Position, in float2 uv : TEXCOORD0) {
                 const int2 q = clamp(px + int2(round(gBlur.texelDir * (off * float(sgn)))), lo, hi);
                 const float stepPx = dot(float2(q - px), gBlur.texelDir);
                 const float4 tq = gMask.Load(int3(q, 0));
-                const float w = g * depthWeight(dc + slope * stepPx, decodeDist(tq.b));
+                const float4 iq = gIndirect.Load(int3(q, 0));
+                const float w = ((iq.a < 0.0f) == water) ? (g * depthWeight(dc + slope * stepPx, decodeDist(tq.b))) : 0.0f;
                 sum += w * float2(tq.r, tq.a);
-                isum += w * gIndirect.Load(int3(q, 0));
+                isum += w * iq;
                 wsum += w;
             }
         }
@@ -102,7 +117,10 @@ BlurOut PSMain(in float4 pos : SV_Position, in float2 uv : TEXCOORD0) {
         ao = sum.y / wsum;
         ind = isum / wsum;
     }
-#ifdef RS64_BLUR_V
+#ifdef RS64_BLUR_WATER
+    // Additive (ONE, ONE) after the compose: the reflection's R * F, unshadowed, since what the water reflects stays lit in a shadow on it.
+    return float4(ind.rgb, 0.0f);
+#elif defined(RS64_BLUR_V)
     // Debug views (copy blend): 5 shadow, 6 AO, 7 indirect, 8 reflection, 9 raw reflection hit colour.
     const float dbg = gBlur.aoParams.y;
     if (dbg > 8.5f) {
@@ -120,10 +138,10 @@ BlurOut PSMain(in float4 pos : SV_Position, in float2 uv : TEXCOORD0) {
     if (dbg > 4.5f) {
         return float4((1.0f - s).xxx, 1.0f);
     }
-    // Mirrors rs64lights::composeFactor (blend dst * src + dst * srcA). A water mix (alpha -F) keeps 1 - F of the water under its reflection.
+    // Mirrors rs64lights::composeFactor (blend dst * src + dst * srcA). A water mix (alpha -F) keeps 1 - F of the water; the water draw adds the reflection.
     const float dark = (1.0f - gBlur.params.x * s) * (1.0f - gBlur.aoParams.x * ao);
-    const float keep = (ind.a < 0.0f) ? saturate(1.0f + ind.a) : 1.0f;
-    return float4(dark * saturate(ind.rgb), dark * keep);
+    const float keep = water ? saturate(1.0f + ind.a) : 1.0f;
+    return float4(water ? float3(0.0f, 0.0f, 0.0f) : (dark * saturate(ind.rgb)), dark * keep);
 #else
     BlurOut o;
     o.mask = float4(s, radius, c.b, ao);

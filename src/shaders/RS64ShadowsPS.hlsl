@@ -190,6 +190,78 @@ RS64Receiver rs64Receiver(float2 px) {
     return r;
 }
 
+// The frame as drawn so far (before this pass composes), single-sampled: the trace passes skip MSAA targets.
+Texture2D<float4> gColor : register(t12, space3);
+
+// Pixel and depth where clip-space point c lands; false behind the camera or off screen.
+bool rs64ScreenAt(float4 c, out int2 px, out float2 ndc, out float depth) {
+    px = int2(0, 0);
+    ndc = float2(0.0f, 0.0f);
+    depth = 1.0f;
+    if (c.w <= 0.0f) {
+        return false;
+    }
+
+    ndc = c.xy / c.w;
+    if (any(abs(ndc) > 1.0f)) {
+        return false;
+    }
+
+    const float2 rel = float2(ndc.x * 0.5f + 0.5f, 0.5f - ndc.y * 0.5f);
+    px = clamp(int2(gShadows.viewport.xy + rel * gShadows.viewport.zw), int2(gShadows.viewport.xy), int2(gShadows.viewport.xy + gShadows.viewport.zw) - 1);
+    depth = gDepth.Load(int3(px, 0));
+    return true;
+}
+
+// A reflection hit at camera-space point q as the frame draws it (lit and fogged by the game), when it is on screen and nothing is drawn in front of it.
+// Where the frame draws something farther there (sky or haze), the hit lies past the game's draw range or fog, so the reflection shows what is drawn.
+bool rs64ScreenHit(float3 q, out float3 rgb) {
+    rgb = float3(0.0f, 0.0f, 0.0f);
+    int2 px;
+    float2 ndc;
+    float depth;
+    if (!rs64ScreenAt(mul(gShadows.screenFromView, float4(q, 1.0f)), px, ndc, depth)) {
+        return false;
+    }
+
+    const float4 v4 = mul(gShadows.viewFromScreen, float4(ndc, depth, 1.0f));
+    const float seen = (depth >= 0.9980f) ? 1.0e30f : length(v4.xyz / v4.w);
+    const float want = length(q);
+    if (seen < want * 0.95f) {
+        return false;
+    }
+
+    rgb = gColor.Load(int3(px, 0)).rgb;
+    return true;
+}
+
+// The drawn sky in direction d (camera space), with the horizon haze the game fogs it with; off screen it takes the nearest screen edge. Where something
+// is drawn in front of the sky there (a craft the ray passed), it takes the first sky pixel above.
+static const uint kSkySearchSteps = 8;
+bool rs64ScreenSky(float3 d, out float3 rgb) {
+    rgb = float3(0.0f, 0.0f, 0.0f);
+    float4 c = mul(gShadows.screenFromView, float4(d, 0.0f));
+    if (c.w <= 0.0f) {
+        return false;
+    }
+
+    c.xy = clamp(c.xy / c.w, -1.0f, 1.0f);
+    c.w = 1.0f;
+    const float stepY = (1.0f - c.y) / float(kSkySearchSteps);
+    [loop]
+    for (uint k = 0; k <= kSkySearchSteps; k++) {
+        int2 px;
+        float2 ndc;
+        float depth;
+        if (rs64ScreenAt(float4(c.x, c.y + stepY * float(k), 0.0f, 1.0f), px, ndc, depth) && (depth >= 0.9980f)) {
+            rgb = gColor.Load(int3(px, 0)).rgb;
+            return true;
+        }
+    }
+
+    return false;
+}
+
 // Floor-facing receivers (hangar deck); mirrors rs64lights::receiverSkipped / reflectionReceiver.
 bool rs64FloorReceiver(float3 n) {
     return (gShadows.receiverSkip.w > 0.0f) && (dot(n, gShadows.receiverSkip.xyz) > gShadows.receiverSkip.w);
@@ -319,8 +391,9 @@ RS64TraceOut PSMain(in float4 pos : SV_Position, in float2 uv : TEXCOORD0) {
 
     // Closest-hit rays, one loop: GI hemisphere rays, then the hangar deck's rough or the water's near-mirror reflection ray. Hit colours come from
     // the per-draw table.
-    const uint giCount = ((features & 4u) != 0u) ? max(uint(gShadows.giParams.x), 1u) : 0u;
     const bool waterRefl = ((features & 16u) != 0u) && rc.water;
+    // Water carries its reflection in the indirect target instead of GI (RS64ShadowBlurPS adds it on top of the drawn water).
+    const uint giCount = (((features & 4u) != 0u) && !waterRefl) ? max(uint(gShadows.giParams.x), 1u) : 0u;
     const uint reflCount = ((((features & 8u) != 0u) && deck) || waterRefl) ? 1u : 0u;
     const float3 v = p / dist;
     float3 gi = float3(0.0f, 0.0f, 0.0f);
@@ -340,11 +413,10 @@ RS64TraceOut PSMain(in float4 pos : SV_Position, in float2 uv : TEXCOORD0) {
         uint id;
         uint prim;
         if (!rs64ClosestHit(r, gShadows.cutoutDrawCount, t, id, prim)) {
-            // Water whose ray hits nothing reflects the sky (the dome is not traced): horizon to zenith by the ray's elevation off the flat surface,
-            // fogged as the view fogs the water there.
-            if (isRefl && waterRefl && (gShadows.skyZenith.w > 0.0f)) {
-                const float3 sky = lerp(gShadows.skyHorizon.rgb, gShadows.skyZenith.rgb, smoothstep(0.05f, 0.6f, saturate(dot(r.Direction, n))));
-                waterR = lerp(sky, gShadows.fogColor.rgb, rs64FogAlpha(p));
+            // Water whose ray hits nothing reflects the sky as the frame draws it there (the dome is not traced); with no drawn sky to take, the water stays as drawn.
+            float3 sky;
+            if (isRefl && waterRefl && (gShadows.skyZenith.w > 0.0f) && rs64ScreenSky(r.Direction, sky)) {
+                waterR = sky;
                 waterF = saturate(rs64Schlick(saturate(dot(-v, n)), 0.02f) * kWaterReflStrength) * rs64WaterShoreAlpha(p) * gShadows.skyZenith.w;
                 if (gShadows.debugMode == 9) {
                     refl += sky;
@@ -359,12 +431,14 @@ RS64TraceOut PSMain(in float4 pos : SV_Position, in float2 uv : TEXCOORD0) {
             continue;
         }
         if (isRefl && waterRefl) {
-            // Water: a near mirror, weighted by its own Fresnel (F0 0.02) at every distance; mixed in below. A miss (sky) leaves the water as drawn.
-            // The hit is fogged as the view fogs it there (RSPProcessCS vertex fog), so the fog hides in the reflection what it hides on screen.
-            waterR = lerp(hc.rgb, gShadows.fogColor.rgb, rs64FogAlpha(r.Origin + r.Direction * t));
+            // Water: a near mirror, weighted by its own Fresnel (F0 0.02) at every distance; mixed in below. A hit on screen takes its drawn pixel, which
+            // the game has lit and fogged; off screen or hidden, its hit colour fogged as the view fogs it there and at least as much as the water.
+            const float3 hitP = r.Origin + r.Direction * t;
+            float3 seen;
+            waterR = rs64ScreenHit(hitP, seen) ? seen : lerp(hc.rgb, gShadows.fogColor.rgb, max(rs64FogAlpha(hitP), rs64FogAlpha(p)));
             waterF = saturate(rs64Schlick(saturate(dot(-v, n)), 0.02f) * kWaterReflStrength) * rs64WaterShoreAlpha(p);
             if (gShadows.debugMode == 9) {
-                refl += hc.rgb;
+                refl += waterR;
             }
         }
         else if (isRefl) {
@@ -401,35 +475,21 @@ RS64TraceOut PSMain(in float4 pos : SV_Position, in float2 uv : TEXCOORD0) {
     ao *= clear;
     gi *= clear;
 
-    // The compose is dst * src + dst * srcA on a unorm target (both clamped to [0, 1]). For a mix dst * (1 - F) + R * F on water, srcA takes the
-    // (1 - F) (alpha carries -F) and src carries R * F over this cell's estimated colour (texture x vertex colours), so dst * src gives R * F back up
-    // to dst. The blur stays linear in both, so mix edges cannot overshoot.
-    float waterMixF = 0.0f;
-    if ((waterF > 0.0f) && (gShadows.debugMode != 9)) {
-        float3 waterColor;
-        if (rs64TerrainCellColor(gRs64TerrainPrim, waterColor)) {
-            // The drawn water is fogged like everything else: unfogged, the estimate swung with every sand or rock cell under a near-uniform fogged
-            // surface, and so did the reflection (a checkerboard on foggy levels).
-            waterColor = lerp(waterColor, gShadows.fogColor.rgb, rs64FogAlpha(p));
-
-            // One brightness ratio for all channels: a per-channel one against blue water clipped red alone (rainbow edges); the reflection takes the water's hue.
-            const float3 luma = float3(0.3f, 0.59f, 0.11f);
-            refl += saturate(waterF * dot(waterR, luma) / max(dot(waterColor, luma), 0.02f)).xxx;
-            waterMixF = max(waterF, 1.0e-4f);
-        }
-        else {
-            refl += waterR * waterF;
-        }
+    // Water mixes dst * (1 - F) + R * F: the compose keeps 1 - F of the drawn water (alpha carries -F) and a second, additive draw adds R * F (rgb).
+    // The colour target is UNORM, so a ratio against the water's colour clipped every reflection brighter than the water to the same value.
+    const bool waterMix = (waterF > 0.0f) && (gShadows.debugMode != 9);
+    if (waterMix) {
+        radius = max(radius, gShadows.terrainParams.y);
     }
 
-    const float3 indirect = gi + refl;
+    const float3 indirect = waterMix ? (waterR * waterF) : (gi + refl);
     if (any(gi > 0.0f) || (any(refl != 0.0f) && !rc.water)) {
         radius = max(radius, gShadows.giParams.w);
     }
     o.mask = float4(shadow, radius, o.mask.b, ao);
 
     // Negative alpha marks a water mix and carries its -F; otherwise it is the reflection luminance (debug 8).
-    o.indirect = float4(indirect, (waterMixF > 0.0f) ? -waterMixF : dot(refl, float3(0.3f, 0.59f, 0.11f)));
+    o.indirect = float4(indirect, waterMix ? -max(waterF, 1.0e-4f) : dot(refl, float3(0.3f, 0.59f, 0.11f)));
     return o;
 }
 

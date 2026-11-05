@@ -3081,6 +3081,7 @@ namespace RT64 {
         if (framebuffer.rs64LightsShadowedSet) {
             framebuffer.rs64LightsShadowedSet->setBuffer(framebuffer.rs64LightsShadowedSet->gParams, framebuffer.rs64LightsBuffer.get(), sizeof(interop::RS64LightsCB));
             framebuffer.rs64LightsShadowedSet->setTexture(framebuffer.rs64LightsShadowedSet->gDepth, p.fbStorage->depthTarget->texture.get(), RenderTextureLayout::DEPTH_READ, p.fbStorage->depthTarget->textureView.get());
+            framebuffer.rs64LightsShadowedSet->setTexture(framebuffer.rs64LightsShadowedSet->gColor, p.fbStorage->depthTarget->texture.get(), RenderTextureLayout::DEPTH_READ, p.fbStorage->depthTarget->textureView.get());
         }
         framebuffer.rs64LightsDebug = (cfg.debugMode != 0);
         return true;
@@ -3135,7 +3136,7 @@ namespace RT64 {
         cb.skyHorizon = { (float)skyH.x, (float)skyH.y, (float)skyH.z, cfg.waterShadow };
         cb.skyZenith = { (float)skyZ.x, (float)skyZ.y, (float)skyZ.z, ((float)skyZ.w > 0.0f) ? cfg.reflSky : 0.0f };
         cb.featureMask |= (soft && (cb.waterPrim > 0)) ? 16u : 0u;
-        cb.terrainParams = { cfg.terrainNormalWindow, 0.0f, 0.0f, 0.0f };
+        cb.terrainParams = { cfg.terrainNormalWindow, cfg.reflWaterBlurPx * res, 0.0f, 0.0f };
         rs64lights::Mat4 sfv;
         if (rs64lights::inverse(inv, sfv)) {
             memcpy(&cb.screenFromView, &sfv, sizeof(sfv));
@@ -3147,6 +3148,13 @@ namespace RT64 {
         framebuffer.rs64ShadowsBuffer->unmap();
         framebuffer.rs64ShadowsSet->setBuffer(framebuffer.rs64ShadowsSet->gParams, framebuffer.rs64ShadowsBuffer.get(), sizeof(interop::RS64ShadowsCB));
         framebuffer.rs64ShadowsSet->setTexture(framebuffer.rs64ShadowsSet->gDepth, p.fbStorage->depthTarget->texture.get(), RenderTextureLayout::DEPTH_READ, p.fbStorage->depthTarget->textureView.get());
+        if (soft) {
+            framebuffer.rs64ShadowsSet->setTexture(framebuffer.rs64ShadowsSet->gColor, p.fbStorage->colorTarget->texture.get(), RenderTextureLayout::SHADER_READ);
+        }
+        else {
+            framebuffer.rs64ShadowsSet->setTexture(framebuffer.rs64ShadowsSet->gColor, p.fbStorage->depthTarget->texture.get(), RenderTextureLayout::DEPTH_READ, p.fbStorage->depthTarget->textureView.get());
+        }
+
         framebuffer.rs64ShadowsDebug = (cfg.shadowsDebug != 0);
         framebuffer.rs64ShadowsSoft = soft;
         if (soft) {
@@ -3154,7 +3162,7 @@ namespace RT64 {
             interop::RS64ShadowBlurCB bcb = {};
             memcpy(&bcb.viewFromScreen, &inv, sizeof(inv));
             bcb.viewport = cb.viewport;
-            const float blurMax = std::max({ maxRadius, cfg.ao ? cb.aoParams.w : 0.0f, cfg.gi ? cb.giParams.w : 0.0f });
+            const float blurMax = std::max({ maxRadius, cfg.ao ? cb.aoParams.w : 0.0f, cfg.gi ? cb.giParams.w : 0.0f, ((cb.featureMask & 16u) != 0u) ? cb.terrainParams.y : 0.0f });
             bcb.params = { cfg.shadows ? cfg.shadowStrength : 0.0f, 0.02f, (cfg.shadowsDebug >= 5) ? 1.0f : 0.0f, blurMax };
             bcb.aoParams = { cfg.aoStrength, (cfg.shadowsDebug >= 5) ? float(cfg.shadowsDebug) : 0.0f, 0.0f, 0.0f };
             fillRS64Temporal(p, framebuffer, transformsIndex, inv, bcb);
@@ -3495,7 +3503,11 @@ namespace RT64 {
             RenderTexture *ping = framebuffer.rs64SoftPing.get();
             RenderTexture *ind = framebuffer.rs64SoftIndirect.get();
             RenderTexture *indPing = framebuffer.rs64SoftIndirectPing.get();
-            const RenderTextureBarrier toMask[] = { RenderTextureBarrier(mask, RenderTextureLayout::COLOR_WRITE), RenderTextureBarrier(ind, RenderTextureLayout::COLOR_WRITE) };
+            // The trace reads the colour target for screen-space water reflections; it is written again by the compose.
+            RenderTexture *color = targetDrawCall.fbStorage->colorTarget->texture.get();
+            const RenderTextureBarrier toMask[] = {
+                RenderTextureBarrier(mask, RenderTextureLayout::COLOR_WRITE), RenderTextureBarrier(ind, RenderTextureLayout::COLOR_WRITE), RenderTextureBarrier(color, RenderTextureLayout::SHADER_READ)
+            };
             worker->commandList->barriers(RenderBarrierStage::GRAPHICS, toMask, uint32_t(std::size(toMask)));
             worker->commandList->setFramebuffer(framebuffer.rs64SoftMaskFb.get());
             worker->commandList->clearColor(0, RenderColor(0.0f, 0.0f, 0.0f, 0.0f));
@@ -3547,7 +3559,9 @@ namespace RT64 {
             worker->commandList->setGraphicsDescriptorSet(framebuffer.rs64BlurHSet->get(), 0);
             worker->commandList->drawInstanced(3, 1, 0, 0);
 
-            const RenderTextureBarrier toCompose[] = { RenderTextureBarrier(ping, RenderTextureLayout::SHADER_READ), RenderTextureBarrier(indPing, RenderTextureLayout::SHADER_READ) };
+            const RenderTextureBarrier toCompose[] = {
+                RenderTextureBarrier(ping, RenderTextureLayout::SHADER_READ), RenderTextureBarrier(indPing, RenderTextureLayout::SHADER_READ), RenderTextureBarrier(color, RenderTextureLayout::COLOR_WRITE)
+            };
             worker->commandList->barriers(RenderBarrierStage::GRAPHICS, toCompose, uint32_t(std::size(toCompose)));
             worker->commandList->setFramebuffer(targetDrawCall.fbStorage->colorWriteDepthRead.get());
             worker->commandList->setViewports(v);
@@ -3557,6 +3571,14 @@ namespace RT64 {
             worker->commandList->setGraphicsPipelineLayout(vrec.pipelineLayout.get());
             worker->commandList->setGraphicsDescriptorSet(framebuffer.rs64BlurVSet->get(), 0);
             worker->commandList->drawInstanced(3, 1, 0, 0);
+
+            if (!framebuffer.rs64ShadowsDebug) {
+                worker->commandList->setPipeline(shaderLibrary->rs64ShadowBlurWater.pipeline.get());
+                worker->commandList->setGraphicsPipelineLayout(shaderLibrary->rs64ShadowBlurWater.pipelineLayout.get());
+                worker->commandList->setGraphicsDescriptorSet(framebuffer.rs64BlurVSet->get(), 0);
+                worker->commandList->drawInstanced(3, 1, 0, 0);
+            }
+
             return;
         }
         const ShaderRecord &record = framebuffer.rs64ShadowsDebug ? shaderLibrary->rs64ShadowsDebug : shaderLibrary->rs64Shadows;
@@ -3664,6 +3686,7 @@ namespace RT64 {
         framebuffer.rs64FogBuffer->unmap();
         framebuffer.rs64FogSet->setBuffer(framebuffer.rs64FogSet->gParams, framebuffer.rs64FogBuffer.get(), sizeof(interop::RS64FogShaftsCB));
         framebuffer.rs64FogSet->setTexture(framebuffer.rs64FogSet->gDepth, p.fbStorage->depthTarget->texture.get(), RenderTextureLayout::DEPTH_READ, p.fbStorage->depthTarget->textureView.get());
+        framebuffer.rs64FogSet->setTexture(framebuffer.rs64FogSet->gColor, p.fbStorage->depthTarget->texture.get(), RenderTextureLayout::DEPTH_READ, p.fbStorage->depthTarget->textureView.get());
         framebuffer.rs64FogDebug = (cfg.fogShaftsDebug != 0);
         return true;
     }
