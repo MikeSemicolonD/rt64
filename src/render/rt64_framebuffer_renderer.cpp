@@ -4166,7 +4166,8 @@ namespace RT64 {
         // A texture pack replaced some layers: the variant that also samples the texture cache (set 1).
         const bool packs = g.anyReplaced && (shaderLibrary->rs64TerrainPacks.pipeline != nullptr) && (descTextureSet != nullptr);
         const ShaderRecord &record = packs ? shaderLibrary->rs64TerrainPacks : shaderLibrary->rs64Terrain;
-        worker->commandList->setPipeline(record.pipeline.get());
+        const ShaderRecord &blended = packs ? shaderLibrary->rs64TerrainWaterPacks : shaderLibrary->rs64TerrainWater;
+        worker->commandList->setPipeline((cb.fogClip ? blended : record).pipeline.get());
         worker->commandList->setGraphicsPipelineLayout(record.pipelineLayout.get());
         worker->commandList->setGraphicsDescriptorSet(g.set->get(), 0);
         if (packs) {

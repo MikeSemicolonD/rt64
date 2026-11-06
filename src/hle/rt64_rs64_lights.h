@@ -904,7 +904,7 @@ namespace rs64lights {
         std::vector<TerrainCellColors> harvest;
         // The game's task counter (30 a second), the clock for the texture animations.
         uint64_t task = 0;
-        // A cutscene keeping the game's view distance: land past the fog end is not drawn (RS64TerrainCB::fogClip).
+        // A cutscene keeping the game's view distance: land fades out toward the fog end (RS64TerrainCB::fogClip).
         bool fogClip = false;
     };
 

@@ -17,6 +17,9 @@ static const float kWaterGlintPower = 48.0f;
 // Cells past the map edge over which the water there fades fully into the fog.
 static const float kEdgeFogCells = 16.0f;
 
+// With fogClip, the fog amount from which land fades out into the sky behind it, gone at full fog.
+static const float kFogClipFadeStart = 0.75f;
+
 // The terrain combiner (TEXEL0 * SHADE) and the blender's fog (shade alpha toward the fog colour); the tile texture is clamped bilinear.
 // The water draw also tints toward the sky at grazing angles and adds the sun's glint, in camera space.
 float4 PSMain(in float4 vPosition : SV_POSITION, in float4 vShade : COLOR0, in float2 vUV : TEXCOORD0, nointerpolation in uint vLayer : LAYER,
@@ -85,8 +88,11 @@ float4 PSMain(in float4 vPosition : SV_POSITION, in float4 vShade : COLOR0, in f
         color = lerp(color, gTerrain.fogColor.rgb, fresnel * kWaterFresnel * vEdge.y);
     }
 
-    if (gTerrain.fogClip && !gTerrain.water && (fog >= 0.995f)) {
-        discard;
+    if (gTerrain.fogClip) {
+        alpha *= 1.0f - smoothstep(kFogClipFadeStart, 1.0f, fog);
+        if (alpha <= 0.0f) {
+            discard;
+        }
     }
 
     if (gTerrain.debug == 2) {
