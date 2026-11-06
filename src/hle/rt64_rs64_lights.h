@@ -752,17 +752,45 @@ namespace rs64lights {
         return 1.18920712f / tcScale;
     }
 
+    // Cutout flags: a translucent draw (a World Devastator's foot beam) is alpha-tested for water reflection rays only, and never casts.
+    constexpr uint32_t CutoutTranslucent = 1u;
+    // The draw's colour combiner reads prim; a prim it ignores (a beam fading in sets it red) must not tint the reflection.
+    constexpr uint32_t CutoutUsesPrim = 2u;
+
+    // Average vertex colour of up to 16 of a draw's triangles' first vertices, as rgb8 in bits 8-31 of the cutout flags (the colour of an untextured translucent draw).
+    inline uint32_t packCutoutShade(const std::vector<uint32_t> &faceIndices, const std::vector<uint8_t> &normColBytes, uint32_t start, uint32_t triangleCount) {
+        uint32_t sum[3] = {};
+        uint32_t n = 0;
+        const uint32_t step = std::max<uint32_t>(1, triangleCount / 16) * 3;
+        for (uint32_t k = 0; (k < triangleCount * 3) && (size_t(start) + k < faceIndices.size()); k += step) {
+            const size_t v = faceIndices[start + k];
+            if (v * 4 + 3 < normColBytes.size()) {
+                sum[0] += normColBytes[v * 4 + 0];
+                sum[1] += normColBytes[v * 4 + 1];
+                sum[2] += normColBytes[v * 4 + 2];
+                ++n;
+            }
+        }
+
+        if (n == 0) {
+            return 0xFFFFFF00u;
+        }
+
+        return ((sum[0] / n) << 8) | ((sum[1] / n) << 16) | ((sum[2] / n) << 24);
+    }
+
     struct CutoutRange {
         IndexRange range;
         uint32_t instanceIndex = 0;
         uint32_t tileIndex = 0;
+        uint32_t flags = 0;
     };
 
     struct CutoutEntry {
         uint32_t firstTriangle;
         uint32_t instanceIndex;
         uint32_t tileIndex;
-        uint32_t pad;
+        uint32_t flags;
     };
 
     // Cutout BLAS indices plus one table entry per kept draw (first triangle in the BLAS, call index, RDP tile); ranges past the face buffer are dropped.
@@ -773,7 +801,7 @@ namespace rs64lights {
             if ((count == 0) || (size_t(ranges[r].range.start) + count > faceIndexCount)) {
                 continue;
             }
-            table.push_back({ uint32_t(indices.size() / 3), ranges[r].instanceIndex, ranges[r].tileIndex, 0 });
+            table.push_back({ uint32_t(indices.size() / 3), ranges[r].instanceIndex, ranges[r].tileIndex, ranges[r].flags });
             indices.insert(indices.end(), faceIndices + ranges[r].range.start, faceIndices + ranges[r].range.start + count);
             added += count;
         }
@@ -1510,6 +1538,11 @@ namespace rs64lights {
         float softBlurPx;
         bool terrainNormals;
         bool terrainTerminator;
+        // The terminator fades in between these flatness values (|heightfield normal . up|): a cliff's normal swings column by column and saw-tooths.
+        float terminatorFlatLo;
+        float terminatorFlatHi;
+        // Model faces turned away from the sun darken like a cast shadow: their baked shading follows a fixed light, so a shadow cast on a ship was darker than its own dark side.
+        bool modelTerminator;
         float spriteShadowStart;
         float terrainNormalWindow;
         int shadowHistory;
@@ -1586,7 +1619,10 @@ namespace rs64lights {
             envFloat("ROGUESQ_RT_SHADOWS_SUN_ANGLE", 1.0f),
             std::clamp(envFloat("ROGUESQ_RT_SHADOWS_SOFT_BLUR", 8.0f), 0.0f, 32.0f),
             envFloat("ROGUESQ_RT_SHADOWS_TERRAIN_NORMALS", 1.0f) != 0.0f,
-            envFloat("ROGUESQ_RT_SHADOWS_TERMINATOR", 0.0f) != 0.0f,
+            envFloat("ROGUESQ_RT_SHADOWS_TERMINATOR", 1.0f) != 0.0f,
+            std::clamp(envFloat("ROGUESQ_RT_SHADOWS_TERMINATOR_FLAT_LO", 0.80f), 0.0f, 1.0f),
+            std::clamp(envFloat("ROGUESQ_RT_SHADOWS_TERMINATOR_FLAT_HI", 0.92f), 0.0f, 1.0f),
+            envFloat("ROGUESQ_RT_SHADOWS_MODEL_TERMINATOR", 1.0f) != 0.0f,
             envFloat("ROGUESQ_RT_LIGHTS_SPRITE_SHADOW_START", 1.0f),
             std::clamp(envFloat("ROGUESQ_RT_SHADOWS_TERRAIN_NORMAL_WINDOW", 0.03f), 0.0f, 0.5f),
             std::clamp((int)envFloat("ROGUESQ_RT_SHADOWS_HISTORY", 2.0f), 0, 4),

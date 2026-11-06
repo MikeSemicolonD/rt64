@@ -51,7 +51,7 @@ namespace interop {
         // The frame's vertex fog (RSPFog mul, offset; z = 1 when valid) and colour, for fogging what water reflects as the view fogs it.
         float4 fogParams;
         float4 fogColor;
-        // Sky dome averages near the horizon and overhead (rgb, unused by the trace: a missed water ray takes the drawn sky pixel). skyZenith.w: sky reflection strength (0 = off). skyHorizon.w: cast shadow strength on water.
+        // Sky dome averages near the horizon and overhead (rgb: a missed water ray takes the drawn sky pixel, or the fog colour, or skyHorizon without fog). skyZenith.w: sky reflection strength (0 = off). skyHorizon.w: cast shadow strength on water.
         float4 skyHorizon;
         float4 skyZenith;
     };

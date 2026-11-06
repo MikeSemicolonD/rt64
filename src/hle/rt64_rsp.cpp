@@ -1270,9 +1270,15 @@ namespace RT64 {
                 constexpr uint32_t kCurrentLevelPhys = 0x130B70u;
                 constexpr uint32_t kBootLogoLevel = 19u;
                 const bool bootIntro = (state->RDRAM != nullptr) && (*reinterpret_cast<const uint32_t *>(state->RDRAM + kCurrentLevelPhys) == kBootLogoLevel);
-                if ((polyN < 3) && s_castOffscreen && !bootIntro && (farCount == 0) && !isDomeTri && rs64lights::config().shadows.load(std::memory_order_relaxed)) {
+                // A triangle clipped at the near plane or the guard band casts whole too: a huge close object (a World Devastator) otherwise cast only its
+                // on-screen pieces, and its shadow came out cut into bands.
+                const bool castWhole = s_castOffscreen && !bootIntro && (farCount == 0) && !isDomeTri && rs64lights::config().shadows.load(std::memory_order_relaxed);
+                if (castWhole) {
                     const interop::OtherMode &om = otherModeStack[otherModeStackSize - 1];
                     workload.rs64CastOnly.push_back({ { globalIndices[0], globalIndices[1], globalIndices[2] }, om.L, om.H, fWorldIndices[globalIndices[0]], workload.drawData.viewProjIndices[globalIndices[0]] });
+                }
+
+                if (polyN < 3) {
                     return;
                 }
                 const bool usesCulling = !doubleSided && (geometryMode & cullTestMask);

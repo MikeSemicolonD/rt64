@@ -209,6 +209,8 @@ namespace RT64 {
             std::vector<uint32_t> cutoutIndices;
             std::vector<rs64lights::CutoutEntry> cutoutTable;
             uint32_t cutoutDrawCount = 0;
+            // The world view's main transform, so a later view's pass (the cockpit) keeps the world's cast-only triangles when it regathers.
+            uint32_t worldViewTi = UINT32_MAX;
             std::unique_ptr<RenderBuffer> cutoutIndexBuffer, cutoutTableBuffer, cutoutBlasBuffer, cutoutBlasScratch;
             std::unique_ptr<RenderAccelerationStructure> cutoutBlas;
             uint64_t cutoutIndexCapacity = 0, cutoutTableCapacity = 0, cutoutBlasCapacity = 0, cutoutBlasScratchCapacity = 0;

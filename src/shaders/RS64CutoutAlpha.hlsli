@@ -39,12 +39,16 @@ float2 rs64TexCoord(uint vertexIndex) {
     return asfloat(gTexCoords.Load2(vertexIndex * 8));
 }
 
-// Texel-0 alpha at the hit against the draw's alpha-compare threshold (mirrors rs64lights::cutoutThreshold); untextured cutouts block.
-bool rs64CutoutBlocks(uint prim, float2 bary, uint count) {
-    const RS64CutoutDraw d = gCutoutDraws[rs64CutoutDrawFor(prim, count)];
+// Translucent cutouts (flags bit 0: foot beams, foam) are hits only while this is set, for water reflection rays; they never cast.
+static bool gRs64TranslucentRays = false;
+// A translucent texel blocks a water reflection ray from this alpha.
+static const float kTranslucentAlphaMin = 0.2f;
+
+// Texel 0 at a cutout hit; white for an untextured draw.
+float4 rs64CutoutTexel(RS64CutoutDraw d, uint prim, float2 bary) {
     const RenderParams rp = DynamicRenderParams[d.instanceIndex];
     if (!renderFlagUsesTexture0(rp.flags)) {
-        return true;
+        return float4(1.0f, 1.0f, 1.0f, 1.0f);
     }
     const uint i0 = gCutoutIndices.Load((prim * 3 + 0) * 4);
     const uint i1 = gCutoutIndices.Load((prim * 3 + 1) * 4);
@@ -60,9 +64,42 @@ bool rs64CutoutBlocks(uint prim, float2 bary, uint count) {
     const GPUTile gpuTile = GPUTiles[d.tileIndex];
     // Mirrors rs64lights::cutoutMipGradient: gradients that land on mip 0 (zero gradients give log2(0) = NaN on mipmapped replacements).
     const float2 g = 1.18920712f / gpuTile.tcScale;
-    const float4 texel = sampleTexture(otherMode, rp.flags, uv, float2(g.x, 0.0f), float2(0.0f, g.y), rdpTile, gpuTile, false);
+    return sampleTexture(otherMode, rp.flags, uv, float2(g.x, 0.0f), float2(0.0f, g.y), rdpTile, gpuTile, false);
+}
+
+// Texel-0 alpha at the hit against the draw's alpha-compare threshold (mirrors rs64lights::cutoutThreshold); untextured cutouts block.
+bool rs64CutoutBlocks(uint prim, float2 bary, uint count) {
+    const RS64CutoutDraw d = gCutoutDraws[rs64CutoutDrawFor(prim, count)];
+    if ((d.flags & 1u) != 0u) {
+        return gRs64TranslucentRays && (rs64CutoutTexel(d, prim, bary).a >= kTranslucentAlphaMin);
+    }
+
+    if (!renderFlagUsesTexture0(DynamicRenderParams[d.instanceIndex].flags)) {
+        return true;
+    }
+
+    const OtherMode otherMode = { DynamicRenderParams[d.instanceIndex].omL, DynamicRenderParams[d.instanceIndex].omH };
     const float threshold = (otherMode.alphaCompare() == G_AC_THRESHOLD) ? instanceRDPParams[d.instanceIndex].blendColor.a : 0.5f;
-    return texel.a >= threshold;
+    return rs64CutoutTexel(d, prim, bary).a >= threshold;
+}
+
+// A translucent cutout hit's colour (texel 0, or the draw's average vertex colour untextured, times prim when the combiner reads it) and opacity; a = 0 otherwise.
+float4 rs64TranslucentHit(uint instanceId, uint prim, float2 bary, uint count) {
+    if ((instanceId != 2) || (count == 0)) {
+        return float4(0.0f, 0.0f, 0.0f, 0.0f);
+    }
+
+    const RS64CutoutDraw d = gCutoutDraws[rs64CutoutDrawFor(prim, count)];
+    if ((d.flags & 1u) == 0u) {
+        return float4(0.0f, 0.0f, 0.0f, 0.0f);
+    }
+
+    const float4 texel = rs64CutoutTexel(d, prim, bary);
+    const bool textured = renderFlagUsesTexture0(DynamicRenderParams[d.instanceIndex].flags);
+    const float3 shade = float3((d.flags >> 8) & 0xFFu, (d.flags >> 16) & 0xFFu, (d.flags >> 24) & 0xFFu) / 255.0f;
+    const float3 base = textured ? texel.rgb : shade;
+    const float3 rgb = ((d.flags & 2u) != 0u) ? base * instanceRDPParams[d.instanceIndex].primColor.rgb : base;
+    return float4(saturate(rgb), max(saturate(texel.a), 1.0e-3f));
 }
 
 // TLAS instance id of the last committed caster hit (2 = cutout BLAS); read by the shadow pass's debug mode 3.
@@ -144,6 +181,9 @@ float4 rs64HitColor(uint instanceId, uint prim, uint4 hitParams) {
     return rs64UnpackHit((instanceId == 1) ? hitParams.z : hitParams.w);
 }
 
+// Barycentrics of the last rs64ClosestHit hit, for sampling a translucent cutout there.
+static float2 gRs64HitBary = float2(0.0f, 0.0f);
+
 // Closest hit for bounce and reflection rays: casters, terrain (back faces culled), cutouts (alpha-tested) and emissive draws.
 bool rs64ClosestHit(RayDesc ray, uint cutoutCount, out float hitT, out uint instanceId, out uint prim) {
     RayQuery<RAY_FLAG_SKIP_PROCEDURAL_PRIMITIVES> q;
@@ -157,6 +197,7 @@ bool rs64ClosestHit(RayDesc ray, uint cutoutCount, out float hitT, out uint inst
     hitT = hit ? q.CommittedRayT() : ray.TMax;
     instanceId = hit ? q.CommittedInstanceID() : 0;
     prim = hit ? q.CommittedPrimitiveIndex() : 0;
+    gRs64HitBary = hit ? q.CommittedTriangleBarycentrics() : float2(0.0f, 0.0f);
     return hit;
 }
 

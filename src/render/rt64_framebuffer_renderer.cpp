@@ -1644,6 +1644,7 @@ namespace RT64 {
             rs64Shadow.cutoutDrawCount = 0;
         }
         rs64Shadow.ranges.clear();
+        rs64Shadow.worldViewTi = UINT32_MAX;
         rs64Shadow.cutoutRanges.clear();
         rs64Shadow.cutoutIndices.clear();
         rs64Shadow.rangeCalls.clear();
@@ -2045,9 +2046,10 @@ namespace RT64 {
                 std::fprintf(stderr, "[rt-lights] MSAA target: light pass skipped\n");
             }
         }
-        // A new view over the world (the cockpit) keeps only the point lights: its traced passes would see a depth holding just itself, and its geometry stays out of the world's casters.
+        // A new view over the world (the cockpit) traces sun shadows only, onto its own pixels (the world under it is cleared depth), with its geometry
+        // joining the casters; the world's terrain origin and hit colours stay as the world's pass set them.
         const bool newView = framebuffer.rs64NewView;
-        const bool shadowsWanted = !newView && rs64lights::tracePassWanted(lightsCfg.shadows, lightsCfg.ao, lightsCfg.gi, lightsCfg.reflections) && p.rs64Lights && (p.fbStorage->colorTarget != nullptr) && !lightsMSAA && p.curWorkload->rs64Sun.valid && p.worker->device->getCapabilities().rayQuery;
+        const bool shadowsWanted = (newView ? lightsCfg.shadows.load(std::memory_order_relaxed) : rs64lights::tracePassWanted(lightsCfg.shadows, lightsCfg.ao, lightsCfg.gi, lightsCfg.reflections)) && p.rs64Lights && (p.fbStorage->colorTarget != nullptr) && !lightsMSAA && p.curWorkload->rs64Sun.valid && p.worker->device->getCapabilities().rayQuery;
         const bool fogWanted = !newView && lightsCfg.fogShafts && p.rs64Lights && (p.fbStorage->colorTarget != nullptr) && !lightsMSAA && p.curWorkload->rs64Sun.valid && p.worker->device->getCapabilities().rayQuery;
         const bool lightShadowsWanted = !newView && rs64lights::sceneWanted(false, lightsWanted, lightsCfg.lightShadows, p.worker->device->getCapabilities().rayQuery, lightsMSAA);
         const bool sceneWanted = shadowsWanted || lightShadowsWanted || fogWanted;
@@ -2544,7 +2546,11 @@ namespace RT64 {
             int32_t terrainOx = 0;
             int32_t terrainOz = 0;
             uint32_t terrainVotes = 0;
-            if (lightsCfg.shadowTerrain && tf.map && !tf.mixed && (tf.transformIndex < terrainWorld.size())) {
+            if (!newView) {
+                rs64Shadow.worldViewTi = mainTi;
+            }
+
+            if (!newView && lightsCfg.shadowTerrain && tf.map && !tf.mixed && (tf.transformIndex < terrainWorld.size())) {
                 const bool hasPrev = (rs64Shadow.terrainOriginVersion == tf.map->version);
                 if (tf.exact) {
                     terrainOx = tf.exactX;
@@ -2555,15 +2561,18 @@ namespace RT64 {
                     terrainVotes = rs64lights::solveTerrainOrigin(*tf.map, tf.samples.data(), tf.samples.size(), terrainOx, terrainOz, hasPrev, rs64Shadow.terrainOriginX, rs64Shadow.terrainOriginZ);
                 }
             }
-            rs64Shadow.terrainActive = (terrainVotes > 0);
-            if (rs64Shadow.terrainActive) {
+            if (!newView) {
+                rs64Shadow.terrainActive = (terrainVotes > 0);
+            }
+
+            if (!newView && rs64Shadow.terrainActive) {
                 rs64Shadow.terrainOriginVersion = tf.map->version;
                 rs64Shadow.terrainOriginX = terrainOx;
                 rs64Shadow.terrainOriginZ = terrainOz;
                 rs64Shadow.terrainMap = tf.map;
                 rs64lights::terrainInstanceTransform(rs64ToMat4(terrainWorld[tf.transformIndex]), terrainOx, terrainOz, rs64Shadow.terrainTransform);
             }
-            const bool hitColors = lightsCfg.gi || lightsCfg.reflections || (rs64Shadow.terrainWaterPrim > 0);
+            const bool hitColors = !newView && (lightsCfg.gi || lightsCfg.reflections || (rs64Shadow.terrainWaterPrim > 0));
             thread_local std::vector<std::pair<rs64lights::IndexRange, uint32_t>> terrainCalls;
             terrainCalls.clear();
             // Ranges accumulate over the workload's framebuffer pairs (the game can split one view across pairs); recordSetup consumes them.
@@ -2606,6 +2615,16 @@ namespace RT64 {
                         rs64Shadow.emissiveRanges.push_back({ call.meshDesc.faceIndicesStart, call.callDesc.triangleCount });
                         rs64Shadow.emissiveCalls.push_back(call.callDesc.callIndex);
                     }
+
+                    // Translucent world draws (a World Devastator's foot beams, foam) join the cutouts flagged translucent: water reflections alpha-test them.
+                    const bool translucent = !newView && lightsCfg.reflections && cm.xlu && !cm.primDepth && !cm.fillOrCopy && (cc == rs64lights::CasterNone) && !emissive && !glowCard;
+                    if (translucent && !drawnTerrain) {
+                        const auto &callTex = p.curWorkload->rs64CallTex;
+                        const uint32_t ci = call.callDesc.callIndex;
+                        const bool usesPrim = (ci < callTex.size()) && ((uint32_t((float)callTex[ci].w) & 2u) != 0);
+                        const uint32_t shade = rs64lights::packCutoutShade(p.curWorkload->drawData.faceIndices, p.curWorkload->drawData.normColBytes, call.meshDesc.faceIndicesStart, call.callDesc.triangleCount);
+                        rs64Shadow.cutoutRanges.push_back({ { call.meshDesc.faceIndicesStart, call.callDesc.triangleCount }, ci, call.callDesc.tileIndex, rs64lights::CutoutTranslucent | (usesPrim ? rs64lights::CutoutUsesPrim : 0u) | shade });
+                    }
                     if (!drawnTerrain) {
                         const auto &craftTi = p.curWorkload->rs64Craft;
                         const bool craft = oneTransform && (std::find(craftTi.begin(), craftTi.end(), call.callDesc.minWorldMatrix) != craftTi.end());
@@ -2646,7 +2665,8 @@ namespace RT64 {
                 const bool denied = std::find(noCast.begin(), noCast.end(), t.transform) != noCast.end();
                 const bool glowCard = std::find(glow.begin(), glow.end(), t.transform) != glow.end();
                 const bool terrain = rs64Shadow.terrainActive && rs64lights::isTerrainTransform(tf, t.transform);
-                if (terrain || (rs64lights::casterAfterDeny(rs64lights::casterClass(cm), denied, glowCard, lightsCfg.shadowCutout) != rs64lights::CasterOpaque) || !rs64SameView(drawData, t.view, mainTi))
+                const bool worldView = (rs64Shadow.worldViewTi != UINT32_MAX) && rs64SameView(drawData, t.view, rs64Shadow.worldViewTi);
+                if (terrain || (rs64lights::casterAfterDeny(rs64lights::casterClass(cm), denied, glowCard, lightsCfg.shadowCutout) != rs64lights::CasterOpaque) || !(rs64SameView(drawData, t.view, mainTi) || worldView))
                 {
                     continue;
                 }
@@ -3162,7 +3182,11 @@ namespace RT64 {
         cb.skyHorizon = { (float)skyH.x, (float)skyH.y, (float)skyH.z, cfg.waterShadow };
         cb.skyZenith = { (float)skyZ.x, (float)skyZ.y, (float)skyZ.z, ((float)skyZ.w > 0.0f) ? cfg.reflSky : 0.0f };
         cb.featureMask |= (soft && (cb.waterPrim > 0)) ? 16u : 0u;
-        cb.terrainParams = { cfg.terrainNormalWindow, cfg.reflWaterBlurPx * res, 0.0f, 0.0f };
+        cb.featureMask |= cfg.modelTerminator ? 32u : 0u;
+        if (framebuffer.rs64NewView) {
+            cb.featureMask &= (1u | 32u);
+        }
+        cb.terrainParams = { cfg.terrainNormalWindow, cfg.reflWaterBlurPx * res, cfg.terminatorFlatLo, std::max(cfg.terminatorFlatHi, cfg.terminatorFlatLo + 0.01f) };
         rs64lights::Mat4 sfv;
         if (rs64lights::inverse(inv, sfv)) {
             memcpy(&cb.screenFromView, &sfv, sizeof(sfv));
@@ -3516,7 +3540,9 @@ namespace RT64 {
             // History slots are placed when the scene is built, after the fill.
             uint8_t *bytes = static_cast<uint8_t *>(framebuffer.rs64ShadowsBuffer->map());
             memcpy(bytes + offsetof(interop::RS64ShadowsCB, historyCam), rs64Shadow.historyCam, sizeof(rs64Shadow.historyCam));
-            memcpy(bytes + offsetof(interop::RS64ShadowsCB, historyMask), &rs64Shadow.historyMask, sizeof(uint32_t));
+            // A new view (the cockpit) skips the history slots: earlier frames' world casters sweep past it and flickered across the dash.
+            const uint32_t historyMask = framebuffer.rs64NewView ? 0u : rs64Shadow.historyMask;
+            memcpy(bytes + offsetof(interop::RS64ShadowsCB, historyMask), &historyMask, sizeof(uint32_t));
             const uint32_t hitParams[4] = { rs64Shadow.hitCount, rs64Shadow.emissiveCount, rs64Shadow.terrainColor, rs64Shadow.averageColor };
             memcpy(bytes + offsetof(interop::RS64ShadowsCB, hitParams), hitParams, sizeof(hitParams));
             framebuffer.rs64ShadowsBuffer->unmap();
