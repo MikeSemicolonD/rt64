@@ -1652,6 +1652,7 @@ namespace RT64 {
         rs64Shadow.emissiveCalls.clear();
         rs64Shadow.skyRanges.clear();
         rs64Shadow.skyCalls.clear();
+        rs64Shadow.skyWorldValid = false;
         rs64Shadow.craftRanges.clear();
         // Gathered per frame with this frame's vertex buffer: a frame that builds no scene must not reuse them (the buffer may have been reallocated).
         rs64Shadow.indices.clear();
@@ -2612,6 +2613,10 @@ namespace RT64 {
                     if (hitColors && cm.primDepth && (cullBoth != 0) && ((call.callDesc.geometryMode & cullBoth) == cullBoth) && !cm.fillOrCopy) {
                         rs64Shadow.skyRanges.push_back({ call.meshDesc.faceIndicesStart, call.callDesc.triangleCount });
                         rs64Shadow.skyCalls.push_back(call.callDesc.callIndex);
+                        if (!rs64Shadow.skyWorldValid && oneTransform && (call.callDesc.minWorldMatrix < terrainWorld.size())) {
+                            rs64Shadow.skyWorld = rs64ToMat4(terrainWorld[call.callDesc.minWorldMatrix]);
+                            rs64Shadow.skyWorldValid = true;
+                        }
                     }
 
                     if (hitColors && (emissive || glowCard) && !cm.fillOrCopy) {
@@ -3188,6 +3193,7 @@ namespace RT64 {
         const hlslpp::float4 &skyH = rs64Shadow.skyHorizon, &skyZ = rs64Shadow.skyZenith;
         cb.skyHorizon = { (float)skyH.x, (float)skyH.y, (float)skyH.z, cfg.waterShadow };
         cb.skyZenith = { (float)skyZ.x, (float)skyZ.y, (float)skyZ.z, ((float)skyZ.w > 0.0f) ? cfg.reflSky : 0.0f };
+        cb.skyDome = { (float)rs64Shadow.skyDome.x, (float)rs64Shadow.skyDome.y, (float)rs64Shadow.skyDome.z, (float)rs64Shadow.skyDome.w };
         cb.featureMask |= (soft && (cb.waterPrim > 0)) ? 16u : 0u;
         cb.featureMask |= cfg.modelTerminator ? 32u : 0u;
         if (framebuffer.rs64NewView) {
@@ -3471,6 +3477,27 @@ namespace RT64 {
                     skySamples.push_back(sample);
                 }
             }
+        }
+
+        // The dome as a sphere in camera space: its draw's translation and its mean vertex distance (model space) times the draw's scale. The game slides
+        // the dome down as the camera climbs, so a reflected direction meets it at a different point than a direction at infinity would.
+        double domeLen = 0.0;
+        size_t domeVerts = 0;
+        for (size_t r = 0; r < s.skyRanges.size(); ++r) {
+            for (uint32_t f = 0; f < s.skyRanges[r].triangleCount * 3; ++f) {
+                const size_t fx = size_t(s.skyRanges[r].start) + f;
+                const size_t v = (fx < fi.size()) ? fi[fx] : SIZE_MAX;
+                if ((v != SIZE_MAX) && (v * 3 + 2 < pos.size())) {
+                    domeLen += std::sqrt(double(pos[v * 3]) * pos[v * 3] + double(pos[v * 3 + 1]) * pos[v * 3 + 1] + double(pos[v * 3 + 2]) * pos[v * 3 + 2]);
+                    ++domeVerts;
+                }
+            }
+        }
+
+        s.skyDome = hlslpp::float4(0.0f, 0.0f, 0.0f, 0.0f);
+        if (s.skyWorldValid && (domeVerts > 0)) {
+            const float radius = float(domeLen / double(domeVerts)) * rs64lights::transformScale(s.skyWorld);
+            s.skyDome = hlslpp::float4(s.skyWorld.m[3][0], s.skyWorld.m[3][1], s.skyWorld.m[3][2], radius);
         }
 
         float skyH[3] = {}, skyZ[3] = {};

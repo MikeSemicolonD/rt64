@@ -56,6 +56,8 @@ namespace interop {
         // Sky dome averages near the horizon and overhead (rgb: a missed water ray takes the drawn sky pixel, or the fog colour, or skyHorizon without fog). skyZenith.w: sky reflection strength (0 = off). skyHorizon.w: cast shadow strength on water.
         float4 skyHorizon;
         float4 skyZenith;
+        // The sky dome as a sphere in camera space (centre, radius; w = 0 when unknown): where a missed water reflection ray meets the drawn sky.
+        float4 skyDome;
     };
 #ifdef HLSL_CPU
 };

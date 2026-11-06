@@ -120,6 +120,8 @@ struct RS64Receiver {
     float terminatorWeight;
     // On static terrain, how far along a sun ray the terrain itself starts to block (rs64SunHitTerrainReceiver); 0 elsewhere.
     float terrainSkip;
+    // Water drawn under traced ground (the border rings): how far, in camera units, that ground sits above it, for the reflection ray to skip.
+    float waterUnder;
 };
 
 // The terrain's self-shadow skip, in terrain cells.
@@ -167,6 +169,7 @@ RS64Receiver rs64Receiver(float2 px) {
     r.waterCover = 0.0f;
     r.terminatorWeight = 0.0f;
     r.terrainSkip = 0.0f;
+    r.waterUnder = 0.0f;
     if (!r.sky) {
         float3 nT;
         r.terrain = (gShadows.softParams.w != 0.0f) && rs64TerrainNormal(r.p, r.dist, gShadows.terrainParams.x, nT);
@@ -179,7 +182,11 @@ RS64Receiver rs64Receiver(float2 px) {
                 const int2 cell = int2(floor(gRs64TerrainMapXZ / 512.0f));
                 const int2 mapSize = int2(gShadows.terrainMapWidth, gShadows.terrainMapHeight);
                 const bool border = (mapSize.x > 0) && (any(cell <= int2(1, 1)) || any(cell >= mapSize - 2));
-                r.waterCover = (gRs64TerrainPrim >= gShadows.waterPrim) ? 1.0f : rs64WaterCover(gRs64TerrainY + (border ? 4.0f * kWaterLift : 0.0f), kWaterLift);
+                const bool groundHit = (gRs64TerrainPrim < gShadows.waterPrim);
+                r.waterCover = !groundHit ? 1.0f : rs64WaterCover(gRs64TerrainY + (border ? 4.0f * kWaterLift : 0.0f), kWaterLift);
+                if (groundHit && (r.waterCover > 0.0f)) {
+                    r.waterUnder = max(asfloat(gTerrainColors.Load(12)) + kWaterLift - gRs64TerrainY, 0.0f) * gRs64TerrainCell / 512.0f;
+                }
             }
 
             r.water = (r.waterCover > 0.0f);
@@ -252,15 +259,33 @@ bool rs64ScreenHit(float3 q, out float3 rgb) {
 // is drawn in front of the sky there (a craft the ray passed), it takes the first sky pixel above. With no sky pixel on that edge (a camera looking down
 // at the sea), the haze the game draws along that edge (the fog colour; the dome average without fog): giving up there cut the water's reflection
 // off along a hard line.
+// The direction meets the dome where the game drew it (skyDome, slid down as the camera climbs), not at its point at infinity: projecting that
+// shifted the reflected sky with altitude and lost it below the dome's edge.
 static const uint kSkySearchSteps = 8;
 bool rs64ScreenSky(float3 d, out float3 rgb) {
     rgb = (gShadows.fogParams.z > 0.0f) ? gShadows.fogColor.rgb : gShadows.skyHorizon.rgb;
     float4 c = mul(gShadows.screenFromView, float4(d, 0.0f));
+
+    // Cast from the camera, not the water point: casting from each water point gave the reflection depth, like a bowl.
+    if (gShadows.skyDome.w > 0.0f) {
+        const float3 oc = -gShadows.skyDome.xyz;
+        const float b = dot(d, oc);
+        const float disc = b * b - (dot(oc, oc) - gShadows.skyDome.w * gShadows.skyDome.w);
+        const float t = (disc >= 0.0f) ? (-b + sqrt(disc)) : -1.0f;
+        if (t > 0.0f) {
+            c = mul(gShadows.screenFromView, float4(d * t, 1.0f));
+        }
+    }
     if (c.w <= 0.0f) {
         return true;
     }
 
-    c.xy = clamp(c.xy / c.w, -1.0f, 1.0f);
+    // Past the screen edge the clamped sample would smear edge clouds over the water, so it fades to the dome average (overhead past the top).
+    const float2 dir = c.xy / c.w;
+    const float off = saturate((max(abs(dir.x), dir.y) - 1.0f) * 2.0f);
+    const float3 offSky = lerp(rgb, gShadows.skyZenith.rgb, saturate((dir.y - 1.0f) * 2.0f));
+
+    c.xy = clamp(dir, -1.0f, 1.0f);
     c.w = 1.0f;
     const float stepY = (1.0f - c.y) / float(kSkySearchSteps);
     [loop]
@@ -270,10 +295,11 @@ bool rs64ScreenSky(float3 d, out float3 rgb) {
         float depth;
         if (rs64ScreenAt(float4(c.x, c.y + stepY * float(k), 0.0f, 1.0f), px, ndc, depth) && (depth >= 0.9980f)) {
             rgb = gColor.Load(int3(px, 0)).rgb;
-            return true;
+            break;
         }
     }
 
+    rgb = lerp(rgb, offSky, off);
     return true;
 }
 
@@ -446,7 +472,7 @@ RS64TraceOut PSMain(in float4 pos : SV_Position, in float2 uv : TEXCOORD0) {
         r.Origin = origin;
         r.Direction = isRefl ? rs64RoughReflect(v, n, waterRefl ? kWaterReflCone : gShadows.reflParams.x, rot) : rs64CosineDir(n, g, giCount, frac(rot + 0.5f));
         const float rise = max(dot(r.Direction, n), 0.05f);
-        r.TMin = max(gShadows.tMin, deckSkip / rise);
+        r.TMin = max(gShadows.tMin, ((isRefl && waterRefl) ? rc.waterUnder : deckSkip) / rise);
         r.TMax = isRefl ? gShadows.tMax : max(rs64Range(gShadows.giParams.y, dist), r.TMin * 2.0f);
         float t;
         uint id;

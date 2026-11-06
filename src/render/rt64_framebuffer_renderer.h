@@ -250,6 +250,10 @@ namespace RT64 {
             std::vector<uint32_t> skyCalls;
             hlslpp::float4 skyHorizon = hlslpp::float4(0.0f, 0.0f, 0.0f, 0.0f);
             hlslpp::float4 skyZenith = hlslpp::float4(0.0f, 0.0f, 0.0f, 0.0f);
+            // The dome's world transform (camera space) from its first draw this frame, and its sphere in camera space (centre, radius; w = 0 when unknown).
+            rs64lights::Mat4 skyWorld = rs64lights::identity();
+            bool skyWorldValid = false;
+            hlslpp::float4 skyDome = hlslpp::float4(0.0f, 0.0f, 0.0f, 0.0f);
             std::vector<uint32_t> emissiveIndices;
             std::vector<rs64lights::HitColorEntry> hitTable, emissiveTable;
             uint32_t terrainColor = 0;
