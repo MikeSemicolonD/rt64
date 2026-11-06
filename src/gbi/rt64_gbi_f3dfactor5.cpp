@@ -67,6 +67,8 @@ extern "C" { volatile unsigned g_f5_task_faces = 0; }
 extern "C" { volatile unsigned g_f5_heur[4] = {}; }
 extern "C" { volatile int g_explosion_hold = 0; }
 extern "C" int rs64_static_terrain_mode(void);
+extern "C" float rs64_fog_dist(void);
+extern "C" float rs64_draw_dist(void);
 extern "C" int rs64_credits_active(void);
 
 namespace RT64 {
@@ -2827,13 +2829,55 @@ namespace RT64 {
         // alpha = depth*mul + offset, so mul = 255*M, offset = 255*O, written as floats: the values
         // exceed RT64's int16 setFog range (a ramp only ~0.001 of depth wide).
         static double s_f5_fog_m = 0.0, s_f5_fog_o = 0.0;
+        // Fog as the game would set it at stock range (f5_cloud_floor_fog).
+        static bool s_f5_fog_stock = false;
         static void f5_apply_fog(State* state) {
             static int s_nofog = -1;
             if (s_nofog < 0) { const char* e = std::getenv("ROGUESQ_F5_NO_FOG"); s_nofog = (e && e[0] && e[0] != '0') ? 1 : 0; }
             if (s_nofog) { state->rsp->fog.mul = 0.0f; state->rsp->fog.offset = 0.0f; state->rsp->fogChanged = true; return; }
-            state->rsp->fog.mul = (float)(255.0 * s_f5_fog_m);
-            state->rsp->fog.offset = (float)(255.0 * s_f5_fog_o);
+            double m = s_f5_fog_m;
+            double o = s_f5_fog_o;
+            const double k = s_f5_fog_stock ? (double)rs64_fog_dist() : 1.0;
+            const auto& p = state->rsp->projMatrixStack[state->rsp->projectionMatrixStackSize - 1];
+
+            // The game scales its fog start and end by k; depth = A + B / z, so the stock fog at z is the scaled fog at k * z.
+            if ((k > 1.0) && ((double)p[3][3] == 0.0) && ((double)p[2][3] != 0.0)) {
+                const double a = (double)p[2][2] / (double)p[2][3];
+                o += a * m * (1.0 - 1.0 / k);
+                m /= k;
+            }
+
+            state->rsp->fog.mul = (float)(255.0 * m);
+            state->rsp->fog.offset = (float)(255.0 * o);
             state->rsp->fogChanged = true;
+        }
+
+        // Battle Above Taloraan has no ground: its cloud floor (drawn under the camera's own matrix, ring slot 0, baked around the camera) and its
+        // translucent cloud sheets (unlit, unculled: geometry mode 0x800005) swing round at the horizon as the craft banks once a longer draw distance
+        // pushes the far plane and fog out. They keep the stock reach: the floor the stock fog, both the stock far plane (depth A + k(1 - A), the scaled
+        // far plane being at depth 1). Everything else keeps the longer reach.
+        static constexpr uint32_t kTaloraanLevel = 10u;
+        static constexpr uint32_t kTaloraanCloudSheetGeom = 0x800005u;
+        static void f5_cloud_floor(State* state, uint32_t mvOff) {
+            const bool taloraan = (rd_be_u32(state->RDRAM, 0x80130B70u) == kTaloraanLevel);
+            const double k = taloraan ? (double)rs64_draw_dist() : 1.0;
+            const auto& p = state->rsp->projMatrixStack[state->rsp->projectionMatrixStackSize - 1];
+            float stockFar = 1.0f;
+            if ((k > 1.0) && ((double)p[3][3] == 0.0) && ((double)p[2][3] != 0.0)) {
+                const double a = (double)p[2][2] / (double)p[2][3];
+                stockFar = (float)(a + k * (1.0 - a));
+            }
+
+            state->rsp->farClipGeomMode = (stockFar != 1.0f) ? kTaloraanCloudSheetGeom : 0u;
+            state->rsp->farClipGeomDepth = stockFar;
+
+            const int buf = f5_ring_buffer(mvOff);
+            const bool floor = taloraan && ((buf == 0) || (buf == 1)) && (f5_ring_slot(mvOff) == 0);
+            state->rsp->farClipDepth = floor ? stockFar : 1.0f;
+            if (floor != s_f5_fog_stock) {
+                s_f5_fog_stock = floor;
+                f5_apply_fog(state);
+            }
         }
         static void f5_set_viewport(State* state, const int16_t* vs, const int16_t* vt);
         void op_03_f5(State* state, DisplayList** dl) {
@@ -3044,6 +3088,7 @@ namespace RT64 {
             }
             if (!proj) {
                 f5_regrid_after_load(state);
+                f5_cloud_floor(state, w1 & 0x00FFFFFFu);
             }
 
             // ROGUESQ_LOG_FACE_UV: compose the full fixed-point matrix (int part + frac/65536)

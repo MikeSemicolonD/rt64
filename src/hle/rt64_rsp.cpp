@@ -1195,11 +1195,12 @@ namespace RT64 {
             bool extreme = false;
             bool anyNear = false;
             int farCount = 0;
+            const float farDepth = ((farClipGeomMode != 0) && (geometryMode == farClipGeomMode)) ? std::min(farClipDepth, farClipGeomDepth) : farClipDepth;
             if (s_clip && !degenerate) {
                 for (int i = 0; i < 3; i++) {
                     const hlslpp::float4 p = workload.drawData.posTransformed[globalIndices[i]];
                     const float pw = p.w, px = p.x, py = p.y;
-                    if (s_farClip && p.z > pw) farCount++;
+                    if (s_farClip && p.z > farDepth * pw) farCount++;
                     if (pw <= kNearW) { extreme = true; anyNear = true; }
                     const float apx = px < 0.0f ? -px : px;
                     const float apy = py < 0.0f ? -py : py;
@@ -1221,7 +1222,7 @@ namespace RT64 {
 
             if (extreme) {
                 // Signed distance to near and the guard-band lateral planes; clipping at |x| = w cut the sky at the 4:3 edge once widescreen widens the view.
-                auto planeDist = [guardX](const hlslpp::float4 &p, int plane) -> float {
+                auto planeDist = [guardX, farDepth](const hlslpp::float4 &p, int plane) -> float {
                     const float x = p.x, y = p.y, z = p.z, w = p.w;
                     switch (plane) {
                         case 0:  return w - kNearW;
@@ -1229,7 +1230,7 @@ namespace RT64 {
                         case 2:  return guardX * w - x;
                         case 3:  return kGuard * w + y;
                         case 4:  return kGuard * w - y;
-                        default: return w - z;
+                        default: return farDepth * w - z;
                     }
                 };
                 uint32_t poly[12];

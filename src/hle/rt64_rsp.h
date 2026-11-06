@@ -182,6 +182,11 @@ namespace RT64 {
         uint32_t cullBothMask;
         uint32_t cullFrontMask;
         bool f5Cull = false;   // Factor 5: only G_CULL_BACK culls; 0x1000 is a texcoord flag, not CULL_FRONT
+        // Clip-space depth (z / w) of the far plane the CPU clipper cuts at: 1 is the projection's own. farClipDepth applies to every triangle (Taloraan's
+        // cloud floor); farClipGeomDepth only to triangles drawn with geometry mode farClipGeomMode (its cloud sheets).
+        float farClipDepth = 1.0f;
+        float farClipGeomDepth = 1.0f;
+        uint32_t farClipGeomMode = 0;
         uint32_t projMask;
         uint32_t loadMask;
         uint32_t pushMask;
