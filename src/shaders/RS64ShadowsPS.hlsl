@@ -212,8 +212,11 @@ bool rs64ScreenAt(float4 c, out int2 px, out float2 ndc, out float depth) {
         return false;
     }
 
+    // Kept a little inside the edges: the frame's outermost columns can hold a black or white sliver, and a water reflection reaching past the
+    // screen (the sky lookup clamps to the edge) copied it down the sea as a band.
     const float2 rel = float2(ndc.x * 0.5f + 0.5f, 0.5f - ndc.y * 0.5f);
-    px = clamp(int2(gShadows.viewport.xy + rel * gShadows.viewport.zw), int2(gShadows.viewport.xy), int2(gShadows.viewport.xy + gShadows.viewport.zw) - 1);
+    const int2 margin = max(int2(gShadows.viewport.zw / 160.0f), int2(2, 2));
+    px = clamp(int2(gShadows.viewport.xy + rel * gShadows.viewport.zw), int2(gShadows.viewport.xy) + margin, int2(gShadows.viewport.xy + gShadows.viewport.zw) - 1 - margin);
     depth = gDepth.Load(int3(px, 0));
     return true;
 }
