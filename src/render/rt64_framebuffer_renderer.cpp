@@ -2224,6 +2224,7 @@ namespace RT64 {
                     rs64TerrainCB.fogColor = drawData.rdpParams[call.callDesc.callIndex].fogColor;
                     rs64TerrainCB.resolution = fbParams.resolution;
                     rs64TerrainCB.heightScale = tp.map ? tp.map->heightScale : 1.0f;
+                    rs64TerrainCB.fogClip = tp.fogClip ? 1u : 0u;
                 }
 
                 uint32_t cycleType = call.callDesc.otherMode.cycleType();

@@ -39,6 +39,8 @@ namespace interop {
         // each side, where the edge cell carries on outward and the outer ring reaches past any far plane.
         uint water;
         uint waterMargin;
+        // 1: a cutscene that keeps the game's view distance, where land past the fog end is dropped so the sky shows there as with the game's own terrain.
+        uint fogClip;
     };
 #ifdef HLSL_CPU
 };

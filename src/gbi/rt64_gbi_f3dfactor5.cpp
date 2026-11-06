@@ -67,6 +67,7 @@ extern "C" { volatile unsigned g_f5_task_faces = 0; }
 extern "C" { volatile unsigned g_f5_heur[4] = {}; }
 extern "C" { volatile int g_explosion_hold = 0; }
 extern "C" int rs64_static_terrain_mode(void);
+extern "C" int rs64_terrain_fog_clip(void);
 extern "C" float rs64_fog_dist(void);
 extern "C" float rs64_draw_dist(void);
 extern "C" int rs64_credits_active(void);
@@ -2682,6 +2683,7 @@ namespace RT64 {
             }
             Workload& wl = state->ext.workloadQueue->workloads[state->ext.workloadQueue->writeCursor];
             rs64lights::TerrainPassFrame& pass = wl.rs64TerrainPass;
+            pass.fogClip = rs64_terrain_fog_clip() != 0;
             int32_t ox, oz;
             f5_terrain_origin(state, rec, flat, *s_terrain_map, camPtr, ox, oz);
             // The game lights its records with every level and runtime light (lava glow, explosions); hand those colours to the pass for this cell.

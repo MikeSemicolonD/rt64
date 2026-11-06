@@ -904,6 +904,8 @@ namespace rs64lights {
         std::vector<TerrainCellColors> harvest;
         // The game's task counter (30 a second), the clock for the texture animations.
         uint64_t task = 0;
+        // A cutscene keeping the game's view distance: land past the fog end is not drawn (RS64TerrainCB::fogClip).
+        bool fogClip = false;
     };
 
     // A texture animation from lv_X_TEX: after the plain id -> bank entries come blocks of (id, frame count, frames per second, banks...), ending at 0xFFFF.

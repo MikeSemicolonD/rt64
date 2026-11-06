@@ -85,6 +85,10 @@ float4 PSMain(in float4 vPosition : SV_POSITION, in float4 vShade : COLOR0, in f
         color = lerp(color, gTerrain.fogColor.rgb, fresnel * kWaterFresnel * vEdge.y);
     }
 
+    if (gTerrain.fogClip && !gTerrain.water && (fog >= 0.995f)) {
+        discard;
+    }
+
     if (gTerrain.debug == 2) {
         return float4(fog, gTerrain.water ? alpha : 0.0f, (gTerrain.water && (vEdge.x > 0.5f)) ? 1.0f : 0.0f, 1.0f);
     }
