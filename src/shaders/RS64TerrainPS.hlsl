@@ -3,6 +3,7 @@
 //
 
 #include "RS64Terrain.hlsli"
+#include "RS64WaterRipple.hlsli"
 
 float3 texel(uint layer, int2 p) {
     p = clamp(p, 0, 63);
@@ -50,7 +51,11 @@ float4 PSMain(in float4 vPosition : SV_POSITION, in float4 vShade : COLOR0, in f
     float fog = vShade.a;
     if (gTerrain.water) {
         const float3 v = normalize(-vViewPos);
-        float3 n = normalize(vNormal);
+        // Lattice steps are a quarter cell (128 map units).
+        const float2 m = vLattice * 128.0f;
+        const float footprint = max(length(ddx(m)), length(ddy(m)));
+        const float3 nMap = rs64RippleNormal(m, gTerrain.rippleTime, footprint, gTerrain.rippleStrength);
+        float3 n = normalize(mul((float3x3)gWorldTransforms[gTerrain.worldIndex], nMap));
         float3 l = normalize(vSunDir);
 
         // Seen from below the surface's open-air side: flip both, so a sign slip cannot hide the effect.

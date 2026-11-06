@@ -5,6 +5,7 @@
 #include "shared/rt64_rs64_shadows_cb.h"
 #include "RS64CutoutAlpha.hlsli"
 #include "RS64TerrainNormal.hlsli"
+#include "RS64WaterRipple.hlsli"
 
 ConstantBuffer<RS64ShadowsCB> gShadows : register(b1, space3);
 
@@ -152,7 +153,9 @@ RS64Receiver rs64Receiver(float2 px) {
     const float2 rel = (px - gShadows.viewport.xy) / gShadows.viewport.zw;
     const float4 v4 = mul(gShadows.viewFromScreen, float4(rel.x * 2.0f - 1.0f, 1.0f - rel.y * 2.0f, depth, 1.0f));
     r.p = v4.xyz / v4.w;
-    r.n = normalize(cross(ddy(r.p), ddx(r.p)));
+    const float3 dpx = ddx(r.p);
+    const float3 dpy = ddy(r.p);
+    r.n = normalize(cross(dpy, dpx));
     if (dot(r.n, r.p) > 0.0f) {
         r.n = -r.n;
     }
@@ -176,7 +179,14 @@ RS64Receiver rs64Receiver(float2 px) {
 
             r.water = (r.waterCover > 0.0f);
             const float3 up = (dot(gRs64TerrainUp, nT) < 0.0f) ? -gRs64TerrainUp : gRs64TerrainUp;
-            const float3 nS = normalize(lerp(nT, up, r.waterCover));
+            float3 surface = up;
+            if (r.water && (gShadows.rippleStrength > 0.0f)) {
+                const float footprint = max(length(dpx), length(dpy)) * 512.0f / max(gRs64TerrainCell, 1e-6f);
+                const float3 ripple = rs64CofactorNormal(gRs64TerrainXf, rs64RippleNormal(gRs64TerrainMapXZ, gShadows.rippleTime, footprint, gShadows.rippleStrength));
+                surface = (dot(ripple, up) < 0.0f) ? -ripple : ripple;
+            }
+
+            const float3 nS = normalize(lerp(nT, surface, r.waterCover));
             r.n = (dot(nS, r.p) > 0.0f) ? -nS : nS;
             r.terminatorWeight = (1.0f - r.waterCover) * smoothstep(gShadows.terrainParams.z, gShadows.terrainParams.w, abs(dot(nT, up)));
             r.terrainSkip = kTerrainSelfSkipCells * gRs64TerrainCell;

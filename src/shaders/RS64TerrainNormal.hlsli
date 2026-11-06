@@ -29,6 +29,9 @@ static float gRs64TerrainY = 0.0f;
 static float3 gRs64TerrainUp = float3(0.0f, 1.0f, 0.0f);
 // One terrain cell (512 map units) in camera units, from the last hit's transform.
 static float gRs64TerrainCell = 0.0f;
+// The last hit's map-space x, z and its map -> camera transform (water ripples are laid out in map space).
+static float2 gRs64TerrainMapXZ = float2(0.0f, 0.0f);
+static float3x4 gRs64TerrainXf = (float3x4)0;
 
 // Smooth heightfield normal (camera space) when the static terrain lies at this pixel's view distance (within window * dist); false for anything else.
 bool rs64TerrainNormal(float3 p, float dist, float window, out float3 n) {
@@ -46,7 +49,9 @@ bool rs64TerrainNormal(float3 p, float dist, float window, out float3 n) {
     }
     const uint prim = q.CommittedPrimitiveIndex();
     gRs64TerrainPrim = prim;
-    gRs64TerrainY = (q.CommittedObjectRayOrigin() + q.CommittedObjectRayDirection() * q.CommittedRayT()).y;
+    const float3 hitMap = q.CommittedObjectRayOrigin() + q.CommittedObjectRayDirection() * q.CommittedRayT();
+    gRs64TerrainY = hitMap.y;
+    gRs64TerrainMapXZ = hitMap.xz;
     const float2 bary = q.CommittedTriangleBarycentrics();
     const uint i0 = gTerrainIndices.Load((prim * 3 + 0) * 4);
     const uint i1 = gTerrainIndices.Load((prim * 3 + 1) * 4);
@@ -54,6 +59,7 @@ bool rs64TerrainNormal(float3 p, float dist, float window, out float3 n) {
     const float3 nm = rs64TerrainVertexNormal(i0) * (1.0f - bary.x - bary.y) + rs64TerrainVertexNormal(i1) * bary.x + rs64TerrainVertexNormal(i2) * bary.y;
     n = rs64CofactorNormal(q.CommittedObjectToWorld3x4(), nm);
     const float3x4 xf = q.CommittedObjectToWorld3x4();
+    gRs64TerrainXf = xf;
     gRs64TerrainUp = rs64CofactorNormal(xf, float3(0.0f, 1.0f, 0.0f));
     gRs64TerrainCell = 512.0f * length(float3(xf[0].x, xf[1].x, xf[2].x));
     return true;

@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <chrono>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
@@ -84,6 +85,12 @@ namespace rs64lights {
         // Rank for the light slots (Priority*), higher kept first.
         int priority = 0;
     };
+
+    // The water ripple clock: wall seconds wrapped at RS64WaterRipple.hlsli's kRippleLoop (every wave loops whole in it), so it keeps float precision.
+    inline float rippleClock() {
+        static const auto s_start = std::chrono::steady_clock::now();
+        return float(std::fmod(std::chrono::duration<double>(std::chrono::steady_clock::now() - s_start).count(), 64.0));
+    }
 
     // Flicker gain at time t (seconds): 1 - flicker x smooth value noise at 12 steps a second, each light on its own sequence (seed).
     inline float flickerGain(float flicker, uint32_t seed, double t) {
@@ -1572,6 +1579,8 @@ namespace rs64lights {
         float reflWaterBlurPx;
         // Cast shadow strength on water (1 = as on ground): what the water reflects stays lit in a shadow.
         float waterShadow;
+        // Slope strength of the water's wind ripples (0 = flat water).
+        float waterRipple;
         // A level sun lower than this (degrees) is lifted to it: a near-horizon sun throws long shadows and the terminator blackens gentle slopes.
         float sunMinElevationDeg;
         // Sprite frame brightness (spriteEmission) that lights at full strength; dimmer frames scale their light down. 0 = off.
@@ -1622,8 +1631,8 @@ namespace rs64lights {
             std::clamp(envFloat("ROGUESQ_RT_SHADOWS_SOFT_BLUR", 8.0f), 0.0f, 32.0f),
             envFloat("ROGUESQ_RT_SHADOWS_TERRAIN_NORMALS", 1.0f) != 0.0f,
             envFloat("ROGUESQ_RT_SHADOWS_TERMINATOR", 1.0f) != 0.0f,
-            std::clamp(envFloat("ROGUESQ_RT_SHADOWS_TERMINATOR_FLAT_LO", 0.80f), 0.0f, 1.0f),
-            std::clamp(envFloat("ROGUESQ_RT_SHADOWS_TERMINATOR_FLAT_HI", 0.92f), 0.0f, 1.0f),
+            std::clamp(envFloat("ROGUESQ_RT_SHADOWS_TERMINATOR_FLAT_LO", 0.3f), 0.0f, 1.0f),
+            std::clamp(envFloat("ROGUESQ_RT_SHADOWS_TERMINATOR_FLAT_HI", 0.9f), 0.0f, 1.0f),
             envFloat("ROGUESQ_RT_SHADOWS_MODEL_TERMINATOR", 1.0f) != 0.0f,
             envFloat("ROGUESQ_RT_LIGHTS_SPRITE_SHADOW_START", 1.0f),
             std::clamp(envFloat("ROGUESQ_RT_SHADOWS_TERRAIN_NORMAL_WINDOW", 0.03f), 0.0f, 0.5f),
@@ -1649,6 +1658,7 @@ namespace rs64lights {
             std::max(envFloat("ROGUESQ_RT_REFL_SKY", 1.0f), 0.0f),
             std::max(envFloat("ROGUESQ_RT_REFL_WATER_BLUR", 3.0f), 0.0f),
             std::clamp(envFloat("ROGUESQ_RT_WATER_SHADOW", 0.5f), 0.0f, 1.0f),
+            std::clamp(envFloat("ROGUESQ_RT_WATER_RIPPLE", 1.0f), 0.0f, 4.0f),
             std::clamp(envFloat("ROGUESQ_RT_SUN_MIN_ELEVATION", 25.0f), 0.0f, 89.0f),
             std::max(envFloat("ROGUESQ_RT_LIGHTS_SPRITE_EMIT_REF", 0.12f), 0.0f),
             envFloat("ROGUESQ_RT_LIGHTS_CUT_FADE", 1.0f) != 0.0f,

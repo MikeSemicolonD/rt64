@@ -41,6 +41,9 @@ namespace interop {
         uint waterMargin;
         // 1: a cutscene that keeps the game's view distance, where land fades out toward the fog end so the sky shows there as with the game's own terrain.
         uint fogClip;
+        // Water ripples (RS64WaterRipple.hlsli): clock in seconds, wrapped at its loop, and slope strength (0 = flat water).
+        float rippleTime;
+        float rippleStrength;
     };
 #ifdef HLSL_CPU
 };

@@ -2225,6 +2225,8 @@ namespace RT64 {
                     rs64TerrainCB.resolution = fbParams.resolution;
                     rs64TerrainCB.heightScale = tp.map ? tp.map->heightScale : 1.0f;
                     rs64TerrainCB.fogClip = tp.fogClip ? 1u : 0u;
+                    rs64TerrainCB.rippleTime = rs64lights::rippleClock();
+                    rs64TerrainCB.rippleStrength = rs64lights::config().waterRipple;
                 }
 
                 uint32_t cycleType = call.callDesc.otherMode.cycleType();
@@ -3177,6 +3179,8 @@ namespace RT64 {
         cb.sunColor = { sun.color[0], sun.color[1], sun.color[2], 0.0f };
         cb.featureMask = (cfg.shadows ? 1u : 0u) | ((soft && cfg.ao) ? 2u : 0u) | ((soft && cfg.gi) ? 4u : 0u) | ((soft && cfg.reflections && sun.fromModel) ? 8u : 0u);
         cb.waterPrim = rs64Shadow.terrainWaterPrim;
+        cb.rippleTime = rs64lights::rippleClock();
+        cb.rippleStrength = cfg.waterRipple;
         cb.fogParams = { fog.mul, fog.offset, fog.valid ? 1.0f : 0.0f, 0.0f };
         cb.fogColor = { fog.color[0], fog.color[1], fog.color[2], 0.0f };
         const hlslpp::float4 &skyH = rs64Shadow.skyHorizon, &skyZ = rs64Shadow.skyZenith;

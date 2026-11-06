@@ -46,8 +46,9 @@ namespace interop {
         uint featureMask;
         // First water triangle of the static terrain mesh (0 = no water).
         uint waterPrim;
-        uint featurePad1;
-        uint featurePad2;
+        // Water ripples (RS64WaterRipple.hlsli): clock in seconds, wrapped at its loop, and slope strength (0 = flat water).
+        float rippleTime;
+        float rippleStrength;
         // The frame's vertex fog (RSPFog mul, offset; z = 1 when valid) and colour, for fogging what water reflects as the view fogs it.
         float4 fogParams;
         float4 fogColor;
