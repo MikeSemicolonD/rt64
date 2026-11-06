@@ -1265,7 +1265,12 @@ namespace RT64 {
                 // While RT shadows are on, a triangle wholly outside the view (behind the camera, off to a side) is kept for the shadow casters only. It is never
                 // drawn: unclipped, its behind-the-camera vertices smear across the screen edge (interpolated frames rebuild them from screen space). ROGUESQ_RT_SHADOWS_OFFSCREEN=0 drops it.
                 static const bool s_castOffscreen = rs64lights::envFloat("ROGUESQ_RT_SHADOWS_OFFSCREEN", 1.0f) != 0.0f;
-                if ((polyN < 3) && s_castOffscreen && (farCount == 0) && !isDomeTri && rs64lights::config().shadows.load(std::memory_order_relaxed)) {
+
+                // The boot logo sequence (level 19, gCurrentLevel u32 at 0x80130B70) stages its next logo out of view, so nothing off screen casts there.
+                constexpr uint32_t kCurrentLevelPhys = 0x130B70u;
+                constexpr uint32_t kBootLogoLevel = 19u;
+                const bool bootIntro = (state->RDRAM != nullptr) && (*reinterpret_cast<const uint32_t *>(state->RDRAM + kCurrentLevelPhys) == kBootLogoLevel);
+                if ((polyN < 3) && s_castOffscreen && !bootIntro && (farCount == 0) && !isDomeTri && rs64lights::config().shadows.load(std::memory_order_relaxed)) {
                     const interop::OtherMode &om = otherModeStack[otherModeStackSize - 1];
                     workload.rs64CastOnly.push_back({ { globalIndices[0], globalIndices[1], globalIndices[2] }, om.L, om.H, fWorldIndices[globalIndices[0]], workload.drawData.viewProjIndices[globalIndices[0]] });
                     return;
