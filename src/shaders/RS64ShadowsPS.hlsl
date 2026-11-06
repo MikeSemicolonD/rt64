@@ -15,30 +15,6 @@ static const float kWaterReflStrength = 1.5f;
 static const float kWaterLift = 16.0f;
 Texture2D<float> gDepth : register(t2, space3);
 
-// The drawn water's opacity at water point p (camera space), as waterShoreAlpha in RS64Terrain.hlsli: the ground's depth under the drawn surface,
-// found by a ray down past the water quads.
-float rs64WaterShoreAlpha(float3 p) {
-    RayDesc ray;
-    ray.Origin = p;
-    ray.Direction = normalize((dot(gRs64TerrainUp, p) < 0.0f) ? -gRs64TerrainUp : gRs64TerrainUp);
-    ray.TMin = 0.0f;
-    ray.TMax = gShadows.tMax;
-    RayQuery<RAY_FLAG_SKIP_PROCEDURAL_PRIMITIVES | RAY_FLAG_FORCE_NON_OPAQUE> q;
-    q.TraceRayInline(gScene, RAY_FLAG_NONE, 0x02, ray);
-    while (q.Proceed()) {
-        if (q.CandidatePrimitiveIndex() < gShadows.waterPrim) {
-            q.CommitNonOpaqueTriangleHit();
-        }
-    }
-
-    if (q.CommittedStatus() != COMMITTED_TRIANGLE_HIT) {
-        return 1.0f;
-    }
-
-    const float depth = (q.CommittedObjectRayOrigin() + q.CommittedObjectRayDirection() * q.CommittedRayT()).y - asfloat(gTerrainColors.Load(12));
-    return smoothstep(0.0f, kWaterLift, depth);
-}
-
 // The game's vertex fog at camera-space point p (RSPProcessCS): 0 clear, 1 fully fogged; 0 when the scene has no fog.
 float rs64FogAlpha(float3 p) {
     if (gShadows.fogParams.z <= 0.0f) {
@@ -417,7 +393,7 @@ RS64TraceOut PSMain(in float4 pos : SV_Position, in float2 uv : TEXCOORD0) {
             float3 sky;
             if (isRefl && waterRefl && (gShadows.skyZenith.w > 0.0f) && rs64ScreenSky(r.Direction, sky)) {
                 waterR = sky;
-                waterF = saturate(rs64Schlick(saturate(dot(-v, n)), 0.02f) * kWaterReflStrength) * rs64WaterShoreAlpha(p) * gShadows.skyZenith.w;
+                waterF = saturate(rs64Schlick(saturate(dot(-v, n)), 0.02f) * kWaterReflStrength) * rc.waterCover * gShadows.skyZenith.w;
                 if (gShadows.debugMode == 9) {
                     refl += sky;
                 }
@@ -436,7 +412,7 @@ RS64TraceOut PSMain(in float4 pos : SV_Position, in float2 uv : TEXCOORD0) {
             const float3 hitP = r.Origin + r.Direction * t;
             float3 seen;
             waterR = rs64ScreenHit(hitP, seen) ? seen : lerp(hc.rgb, gShadows.fogColor.rgb, max(rs64FogAlpha(hitP), rs64FogAlpha(p)));
-            waterF = saturate(rs64Schlick(saturate(dot(-v, n)), 0.02f) * kWaterReflStrength) * rs64WaterShoreAlpha(p);
+            waterF = saturate(rs64Schlick(saturate(dot(-v, n)), 0.02f) * kWaterReflStrength) * rc.waterCover;
             if (gShadows.debugMode == 9) {
                 refl += waterR;
             }

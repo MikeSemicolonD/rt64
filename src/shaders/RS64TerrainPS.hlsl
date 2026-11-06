@@ -73,6 +73,17 @@ float4 PSMain(in float4 vPosition : SV_POSITION, in float4 vShade : COLOR0, in f
             fog = max(fog, max(smoothstep(0.0f, kEdgeFogCells, d), farPlaneFade(vViewPos) * saturate(d * 0.5f)));
         }
     }
+    else if (vEdge.y > 0.0f) {
+        // Ground the drawn water fades out over (a seabed bump just under the surface) takes the water's view tint, or it showed through as a dark patch.
+        const float3 v = normalize(-vViewPos);
+        float3 n = normalize(vNormal);
+        if (dot(n, v) < 0.0f) {
+            n = -n;
+        }
+
+        const float fresnel = pow(1.0f - saturate(dot(n, v)), 5.0f);
+        color = lerp(color, gTerrain.fogColor.rgb, fresnel * kWaterFresnel * vEdge.y);
+    }
 
     if (gTerrain.debug == 2) {
         return float4(fog, gTerrain.water ? alpha : 0.0f, (gTerrain.water && (vEdge.x > 0.5f)) ? 1.0f : 0.0f, 1.0f);
