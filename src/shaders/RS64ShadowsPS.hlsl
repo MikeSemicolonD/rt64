@@ -522,9 +522,15 @@ RS64TraceOut PSMain(in float4 pos : SV_Position, in float2 uv : TEXCOORD0) {
     if (giCount > 0) {
         gi *= gShadows.giParams.z / float(giCount);
     }
-    // A fogged surface shows the fog's colour, so its shadow, AO and bounce light fade with the fog in front of it.
+    // A fogged surface shows the fog's colour, so its shadow, AO and bounce light fade with the fog in front of it. The compose multiplies the drawn
+    // pixel, fog included, so the shadow only takes the share of its brightness the surface gives (drawn - fog colour x fog): scaling by 1 - fog alone
+    // also darkened the fog mixed in, and shadows in haze read as hard grey shapes where the game's baked shading fades into the fog.
     const float fogHere = lerp(rs64FogAlpha(p), rs64WaterFog(p), rc.waterCover);
-    const float clear = 1.0f - fogHere;
+    const float3 drawn = gColor.Load(int3(pos.xy, 0)).rgb;
+    const float3 lumW = float3(0.2126f, 0.7152f, 0.0722f);
+    const float drawnLum = dot(drawn, lumW);
+    const float surfaceLum = dot(max(drawn - gShadows.fogColor.rgb * fogHere, 0.0f), lumW);
+    const float clear = (drawnLum > 1.0e-4f) ? min(surfaceLum / drawnLum, 1.0f - fogHere) : (1.0f - fogHere);
     shadow *= clear * lerp(1.0f, gShadows.skyHorizon.w, rc.waterCover);
     waterR = lerp(waterR, gShadows.fogColor.rgb, fogHere);
     ao *= clear;
