@@ -495,15 +495,15 @@ namespace rs64lights {
         }
     }
 
-    // In pools by priority (higher first; within one priority, projectiles last), nearest light edge to the camera (origin) first; zero-intensity
-    // lights are dropped. Each pool first takes up to its share (priorityShare), then the slots left go to the pools' remaining lights in priority
+    // In pools by priority (higher first; within one priority, projectiles last), nearest light edge to the camera (origin) first; lights too faint
+    // to change a pixel (a burnt-out explosion frame) are dropped. Each pool first takes up to its share (priorityShare), then the slots left go to the pools' remaining lights in priority
     // order. Projectile lights (laser bolts, fired in pairs by every ship) take at most maxProjectiles slots in all. Within each pool, when lights
     // are left out, the chosen ones fade out as their edge distance nears the first one left out (over a quarter of their radius), so a light
     // swapping across the cut is dark: no pop.
     inline size_t selectLights(const Resolved* in, size_t n, Resolved* out, size_t maxOut, bool cutFade = true, size_t maxProjectiles = SIZE_MAX) {
         std::map<int, std::vector<std::pair<float, size_t>>, std::greater<int>> pools;
         for (size_t i = 0; i < n; ++i) {
-            if (!(in[i].intensity > 0.0f) || !(in[i].radius > 0.0f)) continue;
+            if (!(in[i].intensity >= (1.0f / 255.0f)) || !(in[i].radius > 0.0f)) continue;
             const float d = std::sqrt(in[i].pos[0] * in[i].pos[0] + in[i].pos[1] * in[i].pos[1] + in[i].pos[2] * in[i].pos[2]);
             pools[in[i].priority * 2 + (in[i].projectile ? 0 : 1)].emplace_back(d - in[i].radius, i);
         }
