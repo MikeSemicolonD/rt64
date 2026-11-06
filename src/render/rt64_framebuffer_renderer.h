@@ -167,6 +167,8 @@ namespace RT64 {
             std::unique_ptr<RS64TracedDescriptorSet> rs64LightsShadowedSet;
             bool rs64LightsShadowed = false;
             const void *rs64Target = nullptr;
+            // This pair draws a new view over an earlier 3D pair on the same colour target after clearing its depth (the cockpit over the world).
+            bool rs64NewView = false;
             std::unique_ptr<RenderBuffer> rs64FogBuffer;
             std::unique_ptr<RS64TracedDescriptorSet> rs64FogSet;
             bool rs64FogDebug = false;

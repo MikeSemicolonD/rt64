@@ -1727,13 +1727,22 @@ namespace rs64lights {
     }
 
     // The game may split one view over several framebuffer pairs on the same target; only the last keeps its full-screen pass so pixels are not shaded twice.
-    inline void lastPassPerTarget(const void* const* targets, bool* on, size_t n) {
+    // A pair that starts a new view (newView, after a depth clear) ends the earlier view, which keeps its own last pass.
+    inline void lastPassPerTarget(const void* const* targets, const bool* newView, bool* on, size_t n) {
         for (size_t i = 0; i < n; ++i) {
             if (!on[i]) {
                 continue;
             }
             for (size_t j = i + 1; j < n; ++j) {
-                if (on[j] && (targets[j] == targets[i])) {
+                if (targets[j] != targets[i]) {
+                    continue;
+                }
+
+                if (newView[j]) {
+                    break;
+                }
+
+                if (on[j]) {
                     on[i] = false;
                     break;
                 }

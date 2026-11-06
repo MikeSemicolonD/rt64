@@ -1607,20 +1607,23 @@ namespace RT64 {
         // One full-screen pass of each kind per colour target: earlier pairs that share the target defer to the last one.
         {
             thread_local std::vector<const void *> targets;
-            thread_local std::vector<uint8_t> shadowsOn, lightsOn, fogOn;
+            thread_local std::vector<uint8_t> shadowsOn, lightsOn, fogOn, newViews;
             targets.assign(framebufferCount, nullptr);
             shadowsOn.assign(framebufferCount, 0);
             lightsOn.assign(framebufferCount, 0);
             fogOn.assign(framebufferCount, 0);
+            newViews.assign(framebufferCount, 0);
             for (uint32_t f = 0; f < framebufferCount; f++) {
                 targets[f] = framebufferVector[f].rs64Target;
                 shadowsOn[f] = framebufferVector[f].rs64ShadowsOn ? 1 : 0;
                 lightsOn[f] = framebufferVector[f].rs64LightsOn ? 1 : 0;
                 fogOn[f] = framebufferVector[f].rs64FogOn ? 1 : 0;
+                newViews[f] = framebufferVector[f].rs64NewView ? 1 : 0;
             }
-            rs64lights::lastPassPerTarget(targets.data(), reinterpret_cast<bool *>(shadowsOn.data()), framebufferCount);
-            rs64lights::lastPassPerTarget(targets.data(), reinterpret_cast<bool *>(lightsOn.data()), framebufferCount);
-            rs64lights::lastPassPerTarget(targets.data(), reinterpret_cast<bool *>(fogOn.data()), framebufferCount);
+            const bool *nv = reinterpret_cast<const bool *>(newViews.data());
+            rs64lights::lastPassPerTarget(targets.data(), nv, reinterpret_cast<bool *>(shadowsOn.data()), framebufferCount);
+            rs64lights::lastPassPerTarget(targets.data(), nv, reinterpret_cast<bool *>(lightsOn.data()), framebufferCount);
+            rs64lights::lastPassPerTarget(targets.data(), nv, reinterpret_cast<bool *>(fogOn.data()), framebufferCount);
             for (uint32_t f = 0; f < framebufferCount; f++) {
                 framebufferVector[f].rs64ShadowsOn = (shadowsOn[f] != 0);
                 framebufferVector[f].rs64LightsOn = (lightsOn[f] != 0);
@@ -1980,6 +1983,27 @@ namespace RT64 {
             }
         }
 
+        // A new view: since the last 3D pair into this colour image, a pair cleared this pair's depth (a fill into the depth image).
+        bool depthCleared = false;
+        framebuffer.rs64NewView = false;
+        for (uint32_t f = p.fbPairIndex; f-- > 0;) {
+            const auto &prev = p.curWorkload->fbPairs[f];
+            if ((prev.colorImage.address == fbPair.depthImage.address) && (prev.colorImage.address != fbPair.colorImage.address)) {
+                depthCleared = true;
+                continue;
+            }
+
+            bool drew3D = false;
+            for (uint32_t pr = 0; pr < prev.projectionCount; pr++) {
+                drew3D = drew3D || ((prev.projections[pr].type == Projection::Type::Perspective) && (prev.projections[pr].gameCallCount > 0));
+            }
+
+            if ((prev.colorImage.address == fbPair.colorImage.address) && drew3D) {
+                framebuffer.rs64NewView = depthCleared;
+                break;
+            }
+        }
+
         if ((aspectRatioScale > 1.0f) && firstPassForColorImage && (p.fbStorage->colorTarget != nullptr) && !fbPair.scissorRect.isNull()) {
             const RenderRect full = convertFixedRect(fbPair.scissorRect, p.resolutionScale, p.fbWidth, 1.0f, extOriginPercentage, 0, G_EX_ORIGIN_NONE, G_EX_ORIGIN_NONE);
             // Inner edges round inward: the partial target column at the original-aspect edge is never drawn and would keep stale pixels.
@@ -2021,9 +2045,11 @@ namespace RT64 {
                 std::fprintf(stderr, "[rt-lights] MSAA target: light pass skipped\n");
             }
         }
-        const bool shadowsWanted = rs64lights::tracePassWanted(lightsCfg.shadows, lightsCfg.ao, lightsCfg.gi, lightsCfg.reflections) && p.rs64Lights && (p.fbStorage->colorTarget != nullptr) && !lightsMSAA && p.curWorkload->rs64Sun.valid && p.worker->device->getCapabilities().rayQuery;
-        const bool fogWanted = lightsCfg.fogShafts && p.rs64Lights && (p.fbStorage->colorTarget != nullptr) && !lightsMSAA && p.curWorkload->rs64Sun.valid && p.worker->device->getCapabilities().rayQuery;
-        const bool lightShadowsWanted = rs64lights::sceneWanted(false, lightsWanted, lightsCfg.lightShadows, p.worker->device->getCapabilities().rayQuery, lightsMSAA);
+        // A new view over the world (the cockpit) keeps only the point lights: its traced passes would see a depth holding just itself, and its geometry stays out of the world's casters.
+        const bool newView = framebuffer.rs64NewView;
+        const bool shadowsWanted = !newView && rs64lights::tracePassWanted(lightsCfg.shadows, lightsCfg.ao, lightsCfg.gi, lightsCfg.reflections) && p.rs64Lights && (p.fbStorage->colorTarget != nullptr) && !lightsMSAA && p.curWorkload->rs64Sun.valid && p.worker->device->getCapabilities().rayQuery;
+        const bool fogWanted = !newView && lightsCfg.fogShafts && p.rs64Lights && (p.fbStorage->colorTarget != nullptr) && !lightsMSAA && p.curWorkload->rs64Sun.valid && p.worker->device->getCapabilities().rayQuery;
+        const bool lightShadowsWanted = !newView && rs64lights::sceneWanted(false, lightsWanted, lightsCfg.lightShadows, p.worker->device->getCapabilities().rayQuery, lightsMSAA);
         const bool sceneWanted = shadowsWanted || lightShadowsWanted || fogWanted;
         const bool postWanted = lightsWanted || shadowsWanted || fogWanted;
         // The main 3D view is the perspective projection with the most draws; the pass runs after its last fragment (same view and projection), so other views such as the radar stay unlit.
