@@ -3179,6 +3179,8 @@ namespace RT64 {
         cb.sunColor = { sun.color[0], sun.color[1], sun.color[2], 0.0f };
         cb.featureMask = (cfg.shadows ? 1u : 0u) | ((soft && cfg.ao) ? 2u : 0u) | ((soft && cfg.gi) ? 4u : 0u) | ((soft && cfg.reflections && sun.fromModel) ? 8u : 0u);
         cb.waterPrim = rs64Shadow.terrainWaterPrim;
+        cb.terrainMapWidth = rs64Shadow.terrainMap ? rs64Shadow.terrainMap->width : 0u;
+        cb.terrainMapHeight = rs64Shadow.terrainMap ? rs64Shadow.terrainMap->height : 0u;
         cb.rippleTime = rs64lights::rippleClock();
         cb.rippleStrength = cfg.waterRipple;
         cb.fogParams = { fog.mul, fog.offset, fog.valid ? 1.0f : 0.0f, 0.0f };

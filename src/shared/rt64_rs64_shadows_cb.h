@@ -32,8 +32,9 @@ namespace interop {
         uint historyMask;
         // Sun shadow rays' reach (tMax, or less in the hangar, where only the ship's own parts should shade it).
         float sunTMax;
-        uint historyPad1;
-        uint historyPad2;
+        // The static terrain map's size in cells (0 without one), for telling its border ring apart.
+        uint terrainMapWidth;
+        uint terrainMapHeight;
         // AO (rays, range fraction of view distance, strength, min blur px), GI (rays, range fraction, strength, min blur px),
         // reflections (tan roughness cone, range fraction, strength, emissive gain for bounce + reflection), sun colour.
         float4 aoParams;

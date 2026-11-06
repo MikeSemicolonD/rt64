@@ -174,7 +174,12 @@ RS64Receiver rs64Receiver(float2 px) {
             // Water: the lookup found the water surface, or seabed under the drawn water, which covers it as much as its shore fade does there.
             // A yes/no here flipped whole shore cells between a sloped and a flat normal (a checkerboard along every shore).
             if (gShadows.waterPrim > 0) {
-                r.waterCover = (gRs64TerrainPrim >= gShadows.waterPrim) ? 1.0f : rs64WaterCover(gRs64TerrainY, kWaterLift);
+                // The map's outer two rings can be sea floor drawn as ground a few lifts over the water (Corellia's edge rows, the second one flagged shore),
+                // between the bay and the sea the margin carries on past the edge: it counts as water there, or it read as a strip of land.
+                const int2 cell = int2(floor(gRs64TerrainMapXZ / 512.0f));
+                const int2 mapSize = int2(gShadows.terrainMapWidth, gShadows.terrainMapHeight);
+                const bool border = (mapSize.x > 0) && (any(cell <= int2(1, 1)) || any(cell >= mapSize - 2));
+                r.waterCover = (gRs64TerrainPrim >= gShadows.waterPrim) ? 1.0f : rs64WaterCover(gRs64TerrainY + (border ? 4.0f * kWaterLift : 0.0f), kWaterLift);
             }
 
             r.water = (r.waterCover > 0.0f);

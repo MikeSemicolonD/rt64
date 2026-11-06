@@ -1096,15 +1096,41 @@ namespace rs64lights {
 
         // Water and shore cells also get a flat surface just under the drawn water, so traced rays meet water instead of the seabed without the
         // water surface shadowing itself.
-        const float y = (float(m.waterLevel * 16) - TerrainWaterLift + TerrainWaterTraceGap) * m.heightScale;
-        forEachTerrainWaterCell(m, [&](int32_t col, int32_t row, size_t) {
+        const float waterH = float(m.waterLevel * 16) - TerrainWaterLift;
+        const int32_t latticeW = int32_t(m.width) * 4, latticeH = int32_t(m.height) * 4;
+
+        // Ground height (map units, before heightScale) at lattice point (fx, fz), clamped to the map; the water level where no cell is loaded.
+        const auto latticeHeight = [&](int32_t fx, int32_t fz) {
+            fx = std::clamp(fx, 0, latticeW);
+            fz = std::clamp(fz, 0, latticeH);
+            const int32_t col = std::min(fx / 4, int32_t(m.width) - 1), row = std::min(fz / 4, int32_t(m.height) - 1);
+            const size_t c = size_t(row) * m.width + size_t(col);
+            if ((c >= m.present.size()) || !m.present[c] || ((c + 1) * 25 > m.heights.size())) {
+                return waterH;
+            }
+
+            return float(int32_t(m.heights[c * 25 + size_t((fz - row * 4) * 5 + (fx - col * 4))]) * 16);
+        };
+
+        forEachTerrainWaterCell(m, [&](int32_t col, int32_t row, size_t c) {
             const uint32_t a = uint32_t(pos.size() / 3);
             // The outer ring reaches TerrainWaterFarCells further, as the drawn water does.
             const float reach = float(TerrainWaterFarCells * TerrainTileSpan);
             const int32_t lastCol = int32_t(m.width) + TerrainWaterMargin - 1, lastRow = int32_t(m.height) + TerrainWaterMargin - 1;
             const float x0 = float(col * TerrainTileSpan) - ((col == -TerrainWaterMargin) ? reach : 0.0f), x1 = float((col + 1) * TerrainTileSpan) + ((col == lastCol) ? reach : 0.0f);
             const float z0 = float(row * TerrainTileSpan) - ((row == -TerrainWaterMargin) ? reach : 0.0f), z1 = float((row + 1) * TerrainTileSpan) + ((row == lastRow) ? reach : 0.0f);
-            const float corners[12] = { x0, y, z0, x1, y, z0, x0, y, z1, x1, y, z1 };
+
+            // Past the edge the terrain pass carries the edge cell on outward at its edge's height (RS64TerrainVS), the water's or the ground's above it;
+            // the traced surface follows it, or the camera ray's depth window missed it at most angles and nothing out there reflected.
+            const bool outside = (col < 0) || (row < 0) || (col >= int32_t(m.width)) || (row >= int32_t(m.height));
+            const bool water = (c < m.waterKind.size()) && (m.waterKind[c] != 0);
+            const auto cornerY = [&](int32_t kx, int32_t kz) {
+                const float h = outside ? latticeHeight((col + kx) * 4, (row + kz) * 4) : waterH;
+                return ((outside && !water) ? h : std::min(waterH, h)) + TerrainWaterTraceGap;
+            };
+
+            const float y00 = cornerY(0, 0) * m.heightScale, y10 = cornerY(1, 0) * m.heightScale, y01 = cornerY(0, 1) * m.heightScale, y11 = cornerY(1, 1) * m.heightScale;
+            const float corners[12] = { x0, y00, z0, x1, y10, z0, x0, y01, z1, x1, y11, z1 };
             pos.insert(pos.end(), corners, corners + 12);
             const uint32_t tri[6] = { a, a + 3, a + 2, a, a + 1, a + 3 };
             idx.insert(idx.end(), tri, tri + 6);
