@@ -34,7 +34,8 @@ namespace RT64 {
         }
         else {
             lerpTranslation = (componentInterpolation == G_EX_COMPONENT_INTERPOLATE);
-            linearVelocity = 0.0f;
+            // Kept for id'd transforms too: GameFrame::matchTransform tells a recycled node's jump from steady motion by it.
+            linearVelocity = (componentInterpolation == G_EX_COMPONENT_INTERPOLATE) ? hlslpp::float3(curTransform[3].xyz - prevTransform[3].xyz) : hlslpp::float3(0.0f, 0.0f, 0.0f);
         }
     }
 

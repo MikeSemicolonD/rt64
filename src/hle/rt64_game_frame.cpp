@@ -966,6 +966,7 @@ namespace RT64 {
             curTransformMap.rigidBody.transforms[curTransformMap.rigidBody.transformIndex] = DecomposedTransform(prevTransform);
         }
 
+        const hlslpp::float3 prevVelocity = curTransformMap.rigidBody.linearVelocity;
         curTransformMap.rigidBody.updateLinear(prevTransform, curTransform, curGroup.positionInterpolation);
         curTransformMap.rigidBody.updateAngular(prevTransform, curTransform, curGroup.rotationInterpolation, curGroup.scaleInterpolation, curGroup.skewInterpolation);
         curTransformMap.rigidBody.updatePerspective(prevTransform, curTransform, curGroup.perspectiveInterpolation);
@@ -976,7 +977,14 @@ namespace RT64 {
         const float curDist = hlslpp::length(curTransform[3].xyz);
         const float midDist = hlslpp::length((prevTransform[3].xyz + curTransform[3].xyz) * 0.5f);
 
-        if (curTransformMap.rigidBody.lerpTranslation && (std::min(prevDist, curDist) > 256.0f) && (midDist < 0.3f * std::min(prevDist, curDist))) {
+        // A node recycled elsewhere in view (Taloraan's cloud wisps wrap around the camera) lands far from where its last motion predicts: its blend
+        // swept a cloud across the screen for an in-between frame. ROGUESQ_INTERP_TELEPORT=0 turns this check off.
+        static const bool s_teleport = [](){ const char *e = std::getenv("ROGUESQ_INTERP_TELEPORT"); return !(e && e[0] == '0'); }();
+        const float miss = hlslpp::length(curTransform[3].xyz - prevTransform[3].xyz - prevVelocity);
+        const bool teleport = s_teleport && (miss > std::max(float(hlslpp::length(prevVelocity)), 0.25f * std::min(prevDist, curDist)));
+        s_pairJumpRejects += (teleport && curTransformMap.rigidBody.lerpTranslation) ? 1u : 0u;
+
+        if (curTransformMap.rigidBody.lerpTranslation && (teleport || ((std::min(prevDist, curDist) > 256.0f) && (midDist < 0.3f * std::min(prevDist, curDist))))) {
             RigidBody &body = curTransformMap.rigidBody;
 
             body.lerpTranslation = false;
