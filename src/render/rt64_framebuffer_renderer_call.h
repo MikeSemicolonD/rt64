@@ -51,6 +51,9 @@ namespace RT64 {
             struct {
                 RenderRect rect;
 
+                // A second area cleared with the same value (empty when right <= left).
+                RenderRect extra;
+
                 union {
                     RenderColor color;
                     float depth;

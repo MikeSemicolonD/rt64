@@ -959,8 +959,10 @@ namespace RT64 {
                     break;
                 }
 
-                const RenderRect *clearRects = rectCoversWholeTarget ? nullptr : &clearRect.rect;
-                uint32_t clearRectCount = rectCoversWholeTarget ? 0 : 1;
+                const RenderRect rects[2] = { clearRect.rect, clearRect.extra };
+                const bool hasExtra = (clearRect.extra.right > clearRect.extra.left) && (clearRect.extra.bottom > clearRect.extra.top);
+                const RenderRect *clearRects = rectCoversWholeTarget ? nullptr : rects;
+                uint32_t clearRectCount = rectCoversWholeTarget ? 0 : (hasExtra ? 2 : 1);
                 if (fbStorage->colorTarget != nullptr) {
                     worker->commandList->clearColor(0, clearRect.color, clearRects, clearRectCount);
                 }
@@ -2022,6 +2024,7 @@ namespace RT64 {
                 InstanceDrawCall stripClear;
                 stripClear.type = InstanceDrawCall::Type::FillRect;
                 stripClear.clearRect.rect = strip;
+                stripClear.clearRect.extra = RenderRect();
                 stripClear.clearRect.color = RenderColor(0.0f, 0.0f, 0.0f, 1.0f);
                 renderIndicesVector.push_back(interop::RenderIndices{});
                 rasterScene.instanceIndices.push_back(static_cast<uint32_t>(instanceDrawCallVector.size()));
@@ -2263,16 +2266,28 @@ namespace RT64 {
                     }
 
                     clearRect.rect = convertFixedRect(call.callDesc.rect, p.resolutionScale, p.fbWidth, invRatioScale, extOriginPercentage, horizontalMisalignment, call.callDesc.rectLeftOrigin, call.callDesc.rectRightOrigin);
+                    clearRect.extra = RenderRect();
 
                     // A partial fill touching a scissor edge extends to the widened edge on that side (the game masks the horizon ring with half-width fills).
                     if (invRatioScale != 1.0f) {
                         const RenderRect full = convertFixedRect(fbPair.scissorRect, p.resolutionScale, p.fbWidth, 1.0f, extOriginPercentage, 0, G_EX_ORIGIN_NONE, G_EX_ORIGIN_NONE);
+                        const RenderRect inner = clearRect.rect;
+                        const bool toBottom = (call.callDesc.rect.lry + 4 >= fbPair.scissorRect.lry);
                         if (call.callDesc.rect.ulx <= fbPair.scissorRect.ulx + 4) {
                             clearRect.rect.left = full.left;
+
+                            // The fill's top is the horizon at the original-aspect edge; a rolled horizon is higher past it, so the widened strip is filled up to
+                            // the top (the sky draws over it) or a wedge of the clear colour shows between the sky and the fill.
+                            if (toBottom && (inner.left > full.left)) {
+                                clearRect.extra = RenderRect(full.left, full.top, inner.left, clearRect.rect.top);
+                            }
                         }
 
                         if (call.callDesc.rect.lrx + 4 >= fbPair.scissorRect.lrx) {
                             clearRect.rect.right = full.right;
+                            if (toBottom && (inner.right < full.right)) {
+                                clearRect.extra = RenderRect(inner.right, full.top, full.right, clearRect.rect.top);
+                            }
                         }
                     }
                 }
