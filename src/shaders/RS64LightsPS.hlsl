@@ -133,7 +133,14 @@ float4 PSMain(in float4 pos : SV_Position, in float2 uv : TEXCOORD0) : SV_TARGET
             spot = (d > maxCos) ? 0.0f : ((maxCos - fallCos) > 1e-5f ? 1.0f - saturate((d - fallCos) / (maxCos - fallCos)) : 1.0f);
         }
 
-        sum += gLights.lightColor[i].rgb * gLights.lightColor[i].w * att * ndl * vis * spot;
+        float spec = 0.0f;
+        if (gLights.specParams.x > 0.0f) {
+            const float3 l = toLight / max(dist, 1e-4f);
+            const float3 h = normalize(l - normalize(p));
+            spec = gLights.specParams.x * pow(saturate(dot(n, h)), gLights.specParams.y) * saturate(dot(n, l) * 4.0f);
+        }
+
+        sum += gLights.lightColor[i].rgb * gLights.lightColor[i].w * att * (ndl + spec) * vis * spot;
     }
 
     if (gLights.debugMode == 2) {

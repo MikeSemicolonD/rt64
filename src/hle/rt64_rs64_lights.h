@@ -1612,6 +1612,9 @@ namespace rs64lights {
         float hangarShadowRange;
         // dropFarLights' radius / distance floor.
         float minLightReach;
+        // Blinn-Phong highlight strength (0 = off) and exponent for the light pass.
+        float specular;
+        float specularPower;
     };
 
     // ROGUESQ_RT_LIGHTS=1 enables the pass; the rest are tuning and debug knobs.
@@ -1684,6 +1687,8 @@ namespace rs64lights {
             std::clamp((int)envFloat("ROGUESQ_RT_LIGHTS_PROJECTILE_MAX", 8.0f), 0, (int)MaxLights),
             envFloat("ROGUESQ_RT_SHADOWS_HANGAR_RANGE", 500.0f),
             std::max(envFloat("ROGUESQ_RT_LIGHTS_MIN_REACH", 0.01f), 0.0f),
+            std::max(envFloat("ROGUESQ_RT_LIGHTS_SPEC", 0.5f), 0.0f),
+            std::clamp(envFloat("ROGUESQ_RT_LIGHTS_SPEC_POWER", 32.0f), 1.0f, 512.0f),
         };
         return c;
     }

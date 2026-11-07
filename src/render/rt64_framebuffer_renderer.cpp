@@ -3131,6 +3131,7 @@ namespace RT64 {
         cb.normalBias = cfg.shadowNormalBias;
         cb.terrainTMinScale = cfg.shadowTerrainTMin;
         cb.shadowParams = { cfg.lightShadowEnd, 0.0f, (cfg.terrainNormals && rs64Shadow.terrainNormalGpu) ? 1.0f : 0.0f, cfg.terrainNormalWindow };
+        cb.specParams = { cfg.specular, cfg.specularPower, 0.0f, 0.0f };
         // Flicker runs on wall time, so it keeps its pace whatever the frame rate.
         static const auto s_flickerStart = std::chrono::steady_clock::now();
         const double flickerT = std::chrono::duration<double>(std::chrono::steady_clock::now() - s_flickerStart).count();

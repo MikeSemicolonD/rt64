@@ -23,6 +23,8 @@ namespace interop {
         float normalBias;
         float terrainTMinScale;
         float4 shadowParams;
+        // x: specular strength, y: specular exponent.
+        float4 specParams;
         float4 lightPosRadius[RS64_MAX_LIGHTS];
         float4 lightColor[RS64_MAX_LIGHTS];
         float4 lightParams[RS64_MAX_LIGHTS];
