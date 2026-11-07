@@ -195,6 +195,15 @@ namespace RT64 {
     void State::loadDrawState() {
         const bool gpuCopiesEnabled = ext.emulatorConfig->framebuffer.copyWithGPU;
         bool textureCheck = false;
+
+        // The horizon ring fade below rewrites the combiner and env colour; the next draw takes the game's own again.
+        static bool s_ringFaded = false;
+        if (s_ringFaded) {
+            drawStatus.setChanged(DrawAttribute::Combine);
+            drawStatus.setChanged(DrawAttribute::EnvColor);
+            s_ringFaded = false;
+        }
+
         if (drawStatus.isChanged(DrawAttribute::Combine)) {
             drawCall.colorCombiner = rdp->colorCombinerStack[rdp->colorCombinerStackSize - 1];
             textureCheck = true;
@@ -269,6 +278,19 @@ namespace RT64 {
             if (s_skyFix && gameSkyPin) {
                 drawCall.otherMode.L |= (uint32_t)(G_ZS_PRIM | Z_UPD);
                 drawCall.rdpParams.primDepth = { 0.99999f, 0.0f };   // just under the 1.0 clear; remap T (0.995) stays well below
+
+                // The untextured horizon ring fades its shade alpha from 1 at the top to 0 at the bottom, but draws opaque (no FORCE_BL), so on
+                // hardware too its bottom met the below-horizon fill in a hard line. Its colour mixes toward the fill by that alpha instead:
+                // (shade - env) * shade alpha + env, env = the fill colour. ROGUESQ_F5_HORIZON_FADE=0 disables.
+                static const bool s_ringFade = [](){ const char *e = std::getenv("ROGUESQ_F5_HORIZON_FADE"); return !(e && e[0] == '0'); }();
+                const interop::ColorCombiner &cc = rdp->colorCombinerStack[rdp->colorCombinerStackSize - 1];
+                if (s_ringFade && (cc.L == 0xFCFFFFFFu) && (cc.H == 0xFFFE793Cu)) {
+                    const uint32_t fill = rdp->fillColorStack[rdp->fillColorStackSize - 1] & 0xFFFFu;
+                    drawCall.colorCombiner.L = 0xFC45FE8Bu;
+                    drawCall.colorCombiner.H = 0x55FEF97Cu;
+                    drawCall.rdpParams.envColor = { float((fill >> 11) & 31u) / 31.0f, float((fill >> 6) & 31u) / 31.0f, float((fill >> 1) & 31u) / 31.0f, 1.0f };
+                    s_ringFaded = true;
+                }
             }
         }
 
