@@ -199,12 +199,17 @@ namespace RT64 {
         const int ssaaMultiplier = ext.device->getCapabilities().computeShaders ? std::max(ext.sharedResources->userConfig.downsampleMultiplier, 1) : 1;
         switch (resolutionMode) {
         case UserConfiguration::Resolution::WindowIntegerScale:
+#if defined(__ANDROID__)
+            // Phone GPUs miss 30 fps in heavy scenes at the screen's scale (5x on a 1080p phone), so AUTO stays at the N64's resolution there.
+            resolutionMultiplier = 1.0f;
+#else
             if (ext.sharedResources->swapChainHeight > 0) {
                 resolutionMultiplier = std::max(float((ext.sharedResources->swapChainHeight + referenceHeight - 1) / referenceHeight), 1.0f);
             }
             else {
                 resolutionMultiplier = 1.0f;
             }
+#endif
 
             // SSAA renders at the window's scale times the multiplier and downsamples to the window; without this it downsampled below it.
             resolutionMultiplier *= float(ssaaMultiplier);
