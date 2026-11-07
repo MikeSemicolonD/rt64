@@ -9,14 +9,26 @@
 static const float kRippleLoop = 64.0f;
 static const int kRipplePeriod = 8;
 
+// Mobile drops the two finest octaves, which a phone screen barely resolves.
+#ifdef RS64_MOBILE
+static const int kRippleOctaves = 5;
+#else
+static const int kRippleOctaves = 7;
+#endif
+
+// An octave fades out while its cell is under this many pixel footprints wide.
+static const float kRippleFadeFootprints = 4.0f;
+
 float2 rs64RippleGradient(int2 p) {
-    p = ((p % kRipplePeriod) + kRipplePeriod) % kRipplePeriod;
+    // Wrap into the tile with a mask (kRipplePeriod is a power of two): integer modulo is emulated, and slow, on mobile GPUs.
+    p &= kRipplePeriod - 1;
     uint h = uint(p.x) * 73856093u ^ uint(p.y) * 19349663u;
     h ^= h >> 13;
     h *= 0x5bd1e995u;
     h ^= h >> 15;
-    const float a = float(h & 0xFFFFu) * (6.2831853f / 65536.0f);
-    return float2(cos(a), sin(a));
+    // Direction from the hash's two halves, normalized: no sin/cos per lattice corner (28 pairs a pixel), which is slow on mobile GPUs.
+    const float2 v = float2(uint2(h, h >> 16) & 0xFFFFu) * (2.0f / 65535.0f) - 1.0f;
+    return v * rsqrt(max(dot(v, v), 1.0e-6f));
 }
 
 // Gradient noise and its derivative (quintic fade) at x, in lattice cells.
@@ -39,7 +51,7 @@ float3 rs64RippleNoise(float2 x) {
     return float3(v, d);
 }
 
-// Slope (d height / d map x, z) at map point m, time t. An octave fades out while its cell is under three pixel footprints (map units) wide.
+// Slope (d height / d map x, z) at map point m, time t, footprint the pixel's width in map units.
 float2 rs64RippleSlope(float2 m, float t, float footprint) {
     // Cell size (map units), rotation (radians), slope amplitude, whole tile periods scrolled per loop along the rotated x (speed near sqrt(cell), as deep water).
     const float4 octaves[7] = {
@@ -53,9 +65,9 @@ float2 rs64RippleSlope(float2 m, float t, float footprint) {
     };
     float2 g = float2(0.0f, 0.0f);
     [unroll]
-    for (int i = 0; i < 7; i++) {
+    for (int i = 0; i < kRippleOctaves; i++) {
         const float4 o = octaves[i];
-        const float fade = saturate(1.0f - 3.0f * footprint / o.x);
+        const float fade = saturate(1.0f - kRippleFadeFootprints * footprint / o.x);
         if (fade <= 0.0f) {
             continue;
         }
@@ -72,6 +84,10 @@ float2 rs64RippleSlope(float2 m, float t, float footprint) {
 
 // The rippled surface normal in map space (Y down, as the terrain's), its slope scaled by strength.
 float3 rs64RippleNormal(float2 m, float t, float footprint, float strength) {
+    if (strength <= 0.0f) {
+        return float3(0.0f, -1.0f, 0.0f);
+    }
+
     const float2 g = rs64RippleSlope(m, t, footprint) * strength;
     return normalize(float3(-g.x, -1.0f, -g.y));
 }
