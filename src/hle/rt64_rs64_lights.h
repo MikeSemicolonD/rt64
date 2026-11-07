@@ -488,18 +488,11 @@ namespace rs64lights {
     }
 
     // First-pass share of the light slots for each default priority, so one busy kind (a battle's explosions) can't leave the others dark; other
-    // priorities have none and only fill what is left.
+    // priorities have none and only fill what is left. Indexed by priority 0-7; roguesq_video.json's rayTracing.lightLimits sets them.
+    inline size_t g_priorityShare[8] = { 4, 2, 4, 6, 0, 10, 4, 12 };
+
     inline size_t priorityShare(int priority) {
-        switch (priority) {
-            case 7: return 12;
-            case 6: return 4;
-            case 5: return 10;
-            case 3: return 6;
-            case 2: return 4;
-            case 1: return 2;
-            case 0: return 4;
-            default: return 0;
-        }
+        return ((priority >= 0) && (priority < 8)) ? g_priorityShare[priority] : 0;
     }
 
     // In pools by priority (higher first; within one priority, projectiles last), nearest light edge to the camera (origin) first; lights too faint
@@ -1730,6 +1723,16 @@ namespace rs64lights {
             case Feature::Reflections: return c.reflections;
             default: return c.fogShafts;
         }
+    }
+
+    // Returns false (no change) when ROGUESQ_RT_LIGHTS_PROJECTILE_MAX pins it.
+    inline bool setMaxProjectileLights(int n) {
+        const char* e = std::getenv("ROGUESQ_RT_LIGHTS_PROJECTILE_MAX");
+        if ((e != nullptr) && (*e != '\0')) {
+            return false;
+        }
+        mutableConfig().maxProjectileLights = std::clamp(n, 0, (int)MaxLights);
+        return true;
     }
 
     // Returns false (no change) when the env var pins it.
