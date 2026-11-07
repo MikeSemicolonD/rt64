@@ -485,11 +485,33 @@ namespace RT64 {
                     rtWidth = targetWidth;
                     rtHeight = targetHeight;
 
+                    // RS64: a target sized for another configured multiplier (window-integer scale changes with the screen mode) is rebuilt at this
+                    // one. Kept at its old, larger size, the frame would fill only its top-left and the rest would show an older frame. Keyed on the
+                    // configured multiplier, not fixedResScale, so the tall-target halving above can't rebuild a target between pairs of one frame.
+                    const float configScale = float(workloadConfig.resolutionScale.y);
+                    auto dropOnScaleChange = [&](RenderTarget *t) {
+                        if (t == nullptr)
+                        {
+                            return;
+                        }
+
+                        if (!t->isEmpty() && (t->rs64ConfigScale != 0.0f) && (t->rs64ConfigScale != configScale)) {
+                            t->releaseTextures();
+                            t->width = 0;
+                            t->height = 0;
+                        }
+
+                        t->rs64ConfigScale = configScale;
+                    };
+
+                    dropOnScaleChange(colorTarget);
+
                     // The desired size should not be less than the existing size of the color and depth targets.
                     RenderTarget *chosenRt = nullptr;
                     if (depthFb != nullptr) {
                         fbKey.depthTargetKey = RenderTargetKey(depthFb->addressStart, depthFb->width, depthFb->siz, Framebuffer::Type::Depth);
                         depthTarget = &targetManager.get(fbKey.depthTargetKey);
+                        dropOnScaleChange(depthTarget);
                         depthTarget->resolutionScale = fixedResScale;
                         rtWidth = std::max(rtWidth, depthTarget->width);
                         rtHeight = std::max(rtHeight, depthTarget->height);
@@ -510,7 +532,6 @@ namespace RT64 {
                     chosenRt->downsampleMultiplier = downsampleMultiplier;
                     chosenRt->misalignX = targetMisalignX;
                     chosenRt->invMisalignX = (targetMisalignX > 0) ? (std::lround(fixedResScale.y) - targetMisalignX) : 0;
-
                     assert((colorTarget != nullptr) || (depthTarget != nullptr));
                     return true;
                 }
