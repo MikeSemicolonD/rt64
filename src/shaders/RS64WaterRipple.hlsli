@@ -41,23 +41,31 @@ float3 rs64RippleNoise(float2 x) {
 
 // Slope (d height / d map x, z) at map point m, time t. An octave fades out while its cell is under three pixel footprints (map units) wide.
 float2 rs64RippleSlope(float2 m, float t, float footprint) {
-    // Cell size (map units), rotation (radians), slope amplitude; scroll is one tile period per loop along the rotated x.
-    const float3 octaves[4] = {
-        float3(560.0f, 0.4f, 0.05f),
-        float3(310.0f, 2.1f, 0.04f),
-        float3(170.0f, 3.9f, 0.03f),
-        float3(95.0f, 5.3f, 0.022f)
+    // Cell size (map units), rotation (radians), slope amplitude, whole tile periods scrolled per loop along the rotated x (speed near sqrt(cell), as deep water).
+    const float4 octaves[7] = {
+        float4(560.0f, 0.4f, 0.05f, 1.0f),
+        float4(310.0f, 2.1f, 0.04f, 1.0f),
+        float4(170.0f, 3.9f, 0.03f, 2.0f),
+        float4(95.0f, 5.3f, 0.022f, 3.0f),
+        float4(50.0f, 1.2f, 0.018f, 3.0f),
+        float4(28.0f, 4.6f, 0.014f, 4.0f),
+        float4(15.0f, 2.9f, 0.01f, 6.0f)
     };
     float2 g = float2(0.0f, 0.0f);
     [unroll]
-    for (int i = 0; i < 4; i++) {
-        const float3 o = octaves[i];
+    for (int i = 0; i < 7; i++) {
+        const float4 o = octaves[i];
+        const float fade = saturate(1.0f - 3.0f * footprint / o.x);
+        if (fade <= 0.0f) {
+            continue;
+        }
+
         const float c = cos(o.y);
         const float s = sin(o.y);
         const float2 r = float2(c * m.x + s * m.y, -s * m.x + c * m.y) / o.x;
-        const float2 d = rs64RippleNoise(r + float2(float(kRipplePeriod) * t / kRippleLoop, 0.0f)).yz;
+        const float2 d = rs64RippleNoise(r + float2(o.w * float(kRipplePeriod) * t / kRippleLoop, 0.0f)).yz;
         // Back from the rotated frame (transpose).
-        g += float2(c * d.x - s * d.y, s * d.x + c * d.y) * (o.z * saturate(1.0f - 3.0f * footprint / o.x));
+        g += float2(c * d.x - s * d.y, s * d.x + c * d.y) * (o.z * fade);
     }
     return g;
 }

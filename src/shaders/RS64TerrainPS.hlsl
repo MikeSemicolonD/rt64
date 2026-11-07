@@ -10,10 +10,12 @@ float3 texel(uint layer, int2 p) {
     return unpackRGBA8(gTexels[layer * 4096 + p.y * 64 + p.x]).rgb;
 }
 
-// Water strength of the view-angle tint toward the sky (fog colour) and of the sun glint.
+// Water strength of the view-angle tint toward the sky (fog colour), and of the sun glint: a sharp sparkle lobe over a broad sheen.
 static const float kWaterFresnel = 0.6f;
-static const float kWaterGlint = 0.6f;
-static const float kWaterGlintPower = 48.0f;
+static const float kWaterGlint = 1.2f;
+static const float kWaterGlintPower = 320.0f;
+static const float kWaterSheen = 0.2f;
+static const float kWaterSheenPower = 32.0f;
 
 // Cells past the map edge over which the water there fades fully into the fog.
 static const float kEdgeFogCells = 16.0f;
@@ -65,7 +67,8 @@ float4 PSMain(in float4 vPosition : SV_POSITION, in float4 vShade : COLOR0, in f
         }
 
         const float fresnel = pow(1.0f - saturate(dot(n, v)), 5.0f);
-        const float glint = pow(saturate(dot(reflect(-l, n), v)), kWaterGlintPower);
+        const float rv = saturate(dot(reflect(-l, n), v));
+        const float glint = pow(rv, kWaterGlintPower) + (kWaterSheen / kWaterGlint) * pow(rv, kWaterSheenPower);
 
         // Past the map edge (vEdge.x): opaque, the water look as far as its edge cell has it (vEdge.y), and fog that adds a fade by distance past the edge
         // and (from two cells out) toward the far plane, so it meets the map with the same fog. In the map: the shoreline fade and the game's fog.
