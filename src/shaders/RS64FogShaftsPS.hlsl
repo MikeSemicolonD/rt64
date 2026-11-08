@@ -54,6 +54,7 @@ float4 PSMain(in float4 pos : SV_Position, in float2 uv : TEXCOORD0) : SV_TARGET
     const float jitter = interleavedNoise(pos.xy);
     const uint n = gFog.steps;
     float fPrev = 0.0f;
+    float tPrev = 0.0f;
     float lit = 0.0f;
     for (uint i = 0; i < n; i++) {
         const float t = (i + 1 == n) ? 1.0f : (float(i) + 1.0f - jitter) / float(n);
@@ -61,10 +62,11 @@ float4 PSMain(in float4 pos : SV_Position, in float2 uv : TEXCOORD0) : SV_TARGET
         const float f = fogFactor(q);
         const float df = f - fPrev;
         if (df > 0.0f) {
-            // Mirrors rs64lights::fogVisT.
-            lit += sunVisible(p * (t * (1.0f - gFog.visBias))) * df;
+            // Mirrors rs64lights::fogVisT, sampled at the step's middle. The last step, next to the receiver, carries most of the game's fog and counts as lit: its rays only traced the shape of the rock into the fog.
+            lit += ((i + 1 == n) ? 1.0f : sunVisible(p * (0.5f * (tPrev + t) * (1.0f - gFog.visBias)))) * df;
         }
         fPrev = f;
+        tPrev = t;
     }
 
     if (debug) {
