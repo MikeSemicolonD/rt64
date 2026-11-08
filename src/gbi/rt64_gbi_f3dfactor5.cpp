@@ -1435,7 +1435,8 @@ namespace RT64 {
                 return false;
             }
             const int32_t waterLevel = (int32_t)rd_be_u32(ram, 0x801375C0u);
-            const uint64_t h = rs64lights::terrainMapKey(tiles.data(), tiles.size(), ram + (tab & 0x00FFFFFFu), tableBytes, tab, W, H) ^ (uint64_t(uint32_t(waterLevel)) * 0x9E3779B97F4A7C15ull);
+            // The renderer choice counts: the whole-map pass needs colours a map built for legacy terrain does not have.
+            const uint64_t h = rs64lights::terrainMapKey(tiles.data(), tiles.size(), ram + (tab & 0x00FFFFFFu), tableBytes, tab, W, H) ^ (uint64_t(uint32_t(waterLevel)) * 0x9E3779B97F4A7C15ull) ^ (f5_static_terrain_enabled() ? 0x517CC1B727220A95ull : 0ull);
             if (!s_terrain_map || (h != s_terrain_hash)) {
                 auto m = std::make_shared<rs64lights::TerrainMap>();
                 m->width = W;
