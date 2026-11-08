@@ -22,6 +22,11 @@ namespace rs64hud {
     constexpr uint32_t kAimElementsBegin = 0x8010CA30u;
     constexpr uint32_t kAimElementsEnd = kAimElementsBegin + 2u * 0x278u;
 
+    // A rect as tall as the scissor (the mission-end wipe panel) is a screen transition, never an edge-anchored element. All values in quarter pixels.
+    inline bool spansHeight(int32_t uly, int32_t lry, int32_t scissorUly, int32_t scissorLry) {
+        return (uly <= scissorUly + 4) && (lry + 4 >= scissorLry);
+    }
+
     // item is the element's address, x its upper-left from the screen centre in native pixels, screenWidth the game's view width (512). The middle third stays put.
     inline Side classify(uint32_t item, float x, uint32_t flags, float screenWidth) {
         if ((flags & kTextFlag) || ((item >= kAimElementsBegin) && (item < kAimElementsEnd))) {

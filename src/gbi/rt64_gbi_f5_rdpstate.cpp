@@ -389,7 +389,14 @@ namespace RT64 {
 
         // Draws one texrect of an edge-anchored HUD element with its side as the rect and scissor origins; both edges share it, so the rect moves without stretching.
         template <class Draw>
-        static void with_hud_side(State *state, Draw draw) {
+        static void with_hud_side(State *state, const DisplayList *dl, Draw draw) {
+            const FixedRect &sc = state->rdp->scissorRectStack[state->rdp->scissorStackSize - 1];
+
+            if (rs64hud::spansHeight(int32_t(dl->w1 & 0xFFFu), int32_t(dl->w0 & 0xFFFu), sc.uly, sc.lry)) {
+                draw();
+                return;
+            }
+
             const rs64hud::Side side = (s_hud_task == state->displayListCounter) ? s_hud_side : rs64hud::None;            if (side == rs64hud::None) {
                 draw();
                 return;
@@ -613,7 +620,7 @@ namespace RT64 {
                 (*dl)++;
                 return;
             }
-            with_hud_side(state, [&] { GBI_RDP::texrectLLE(state, dl); });
+            with_hud_side(state, *dl, [&] { GBI_RDP::texrectLLE(state, dl); });
             // The ucode consumes all 16 bytes. Left in the stream, the S/T/DsDx/DtDy word runs as a command whenever S >= 0x100 (e.g. 0x0D = SETOTHERMODE_H forcing copy mode: the white flash on the game-over fade).
             (*dl)++;
         }
@@ -624,7 +631,7 @@ namespace RT64 {
                 return;
             }
             dlh_followup(*dl);
-            with_hud_side(state, [&] { GBI_RDP::texrectFlipLLE(state, dl); });
+            with_hud_side(state, *dl, [&] { GBI_RDP::texrectFlipLLE(state, dl); });
             (*dl)++;
         }
 
