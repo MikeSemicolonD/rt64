@@ -754,12 +754,13 @@ namespace rs64lights {
 
     // Cutout flags: a translucent draw (a World Devastator's foot beam) is alpha-tested for water reflection rays only, and never casts.
     constexpr uint32_t CutoutTranslucent = 1u;
-    // The draw's colour combiner reads prim; a prim it ignores (a beam fading in sets it red) must not tint the reflection.
-    constexpr uint32_t CutoutUsesPrim = 2u;
+    // The sky dome: only water reflection rays looking for the sky off screen meet it (RS64CutoutAlpha.hlsli rs64TracedSky).
+    constexpr uint32_t CutoutSky = 2u;
 
-    // Average vertex colour of up to 16 of a draw's triangles' first vertices, as rgb8 in bits 8-31 of the cutout flags (the colour of an untextured translucent draw).
+    // Average vertex colour of up to 16 of a draw's triangles' first vertices: rgb8 in bits 8-31 of the cutout flags, alpha in bits 2-7 (6 bits).
+    // The shade input of a translucent draw's colour combiner in reflections.
     inline uint32_t packCutoutShade(const std::vector<uint32_t> &faceIndices, const std::vector<uint8_t> &normColBytes, uint32_t start, uint32_t triangleCount) {
-        uint32_t sum[3] = {};
+        uint32_t sum[4] = {};
         uint32_t n = 0;
         const uint32_t step = std::max<uint32_t>(1, triangleCount / 16) * 3;
         for (uint32_t k = 0; (k < triangleCount * 3) && (size_t(start) + k < faceIndices.size()); k += step) {
@@ -768,15 +769,16 @@ namespace rs64lights {
                 sum[0] += normColBytes[v * 4 + 0];
                 sum[1] += normColBytes[v * 4 + 1];
                 sum[2] += normColBytes[v * 4 + 2];
+                sum[3] += normColBytes[v * 4 + 3];
                 ++n;
             }
         }
 
         if (n == 0) {
-            return 0xFFFFFF00u;
+            return 0xFFFFFFFCu;
         }
 
-        return ((sum[0] / n) << 8) | ((sum[1] / n) << 16) | ((sum[2] / n) << 24);
+        return ((sum[0] / n) << 8) | ((sum[1] / n) << 16) | ((sum[2] / n) << 24) | (((sum[3] / n) >> 2) << 2);
     }
 
     struct CutoutRange {
@@ -825,13 +827,6 @@ namespace rs64lights {
             }
         }
         return uint32_t(lo);
-    }
-
-    // Self-lit surfaces (the briefing room's light strips): emitters for GI and reflections, never casters.
-    inline bool emissiveSurface(const char* meshKey) {
-        static const char kName[] = "lights";
-        const size_t n = sizeof(kName) - 1;
-        return (meshKey != nullptr) && (std::strncmp(meshKey, kName, n) == 0) && (meshKey[n] == '#');
     }
 
     // Light-source glow cards are cutouts that must never cast.
@@ -1133,6 +1128,18 @@ namespace rs64lights {
     // Hit colours for buildTerrainMesh's triangles, in its cell order: header (triangles per ground cell, first water triangle or 0, ground cells, the
     // drawn water surface's map-space y as float bits), then one rgba8 per ground cell and per water quad: the cell's texture average (texAvg, rgb8 per
     // cell) times its average vertex colour.
+    // buildTerrainMesh's first water triangle (after every ground cell's triangles), or 0 without water.
+    inline uint32_t terrainWaterPrim(const TerrainMap& m, int sub) {
+        uint32_t ground = 0;
+        for (size_t c = 0; c < size_t(m.width) * m.height; ++c) {
+            ground += ((c < m.present.size()) && m.present[c] && ((c + 1) * 25 <= m.heights.size())) ? 1u : 0u;
+        }
+
+        bool water = false;
+        forEachTerrainWaterCell(m, [&](int32_t, int32_t, size_t) { water = true; });
+        return water ? ground * uint32_t(2 * (4 * sub) * (4 * sub)) : 0u;
+    }
+
     inline void terrainHitColors(const TerrainMap& m, int sub, const std::vector<uint32_t>& texAvg, std::vector<uint32_t>& out) {
         const uint32_t per = uint32_t(2 * (4 * sub) * (4 * sub));
         out.assign(4, 0);
@@ -1159,14 +1166,12 @@ namespace rs64lights {
             ++ground;
         }
 
-        bool water = false;
         forEachTerrainWaterCell(m, [&](int32_t, int32_t, size_t c) {
             out.push_back(cellColor(c));
-            water = true;
         });
 
         out[0] = per;
-        out[1] = water ? ground * per : 0;
+        out[1] = terrainWaterPrim(m, sub);
         out[2] = ground;
         const float surfaceY = (float(m.waterLevel * 16) - TerrainWaterLift) * m.heightScale;
         memcpy(&out[3], &surfaceY, sizeof(float));

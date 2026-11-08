@@ -9,7 +9,7 @@
 #ifdef HLSL_CPU
 namespace interop {
 #endif
-    // Mirrors rs64lights::CutoutEntry: first triangle of the draw in the cutout BLAS, its call index, RDP tile and flags (1 translucent, 2 combiner reads prim, bits 8-31 average vertex rgb8).
+    // Mirrors rs64lights::CutoutEntry: first triangle of the draw in the cutout BLAS, its call index, RDP tile and flags (1 translucent, 2 sky dome, bits 2-7 average vertex alpha, 8-31 average vertex rgb8).
     struct RS64CutoutDraw {
         uint firstTriangle;
         uint instanceIndex;

@@ -224,6 +224,8 @@ namespace RT64 {
         // The first drawn part of the F1 Lights tab's picked mesh preset (its transform and view), for that preset's gizmo view; UINT32_MAX = none.
         uint32_t rs64MeshPickTransform = UINT32_MAX;
         uint32_t rs64MeshPickView = 0;
+        // Light-preset mesh key of each transform a registered model part drew with (the MCP's get_draw / list_draws mesh_key).
+        std::unordered_map<uint32_t, std::string> rs64MeshKeys;
         // The light-preset level code of a front-end frame (PresetLights::BriefingRoom / Hangar), else PresetLights::NoLevel (-1).
         int rs64PresetScene = -1;
         rs64lights::Sun rs64Sun;

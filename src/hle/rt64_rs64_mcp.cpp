@@ -157,13 +157,21 @@ namespace RT64 {
                 hashes.push_back(hex(drawData.callTiles[call.tileIndex + t].tmemHashOrID));
             }
 
-            return {
+            json row = {
                 { "fb", f }, { "proj", p }, { "call", d }, { "tris", call.triangleCount }, { "tiles", call.tileCount }, { "tmem_hashes", hashes },
                 { "combiner", { hex(call.colorCombiner.L), hex(call.colorCombiner.H) } }, { "other_mode", { hex(call.otherMode.L), hex(call.otherMode.H) } },
                 { "geometry_mode", hex(call.geometryMode) }, { "min_world", call.minWorldMatrix }, { "max_world", call.maxWorldMatrix },
                 { "min_world_addr", hex(drawData.worldTransformPhysicalAddresses[call.minWorldMatrix]) },
                 { "prim", { call.rdpParams.primColor[0], call.rdpParams.primColor[1], call.rdpParams.primColor[2], call.rdpParams.primColor[3] } }
             };
+
+            // The light-preset key of the model part drawn with this transform, for mesh and emissive presets.
+            const auto key = workload.rs64MeshKeys.find(call.minWorldMatrix);
+            if (key != workload.rs64MeshKeys.end()) {
+                row["mesh_key"] = key->second;
+            }
+
+            return row;
         }
 
         static json handleListDraws(State &state, const json &params) {

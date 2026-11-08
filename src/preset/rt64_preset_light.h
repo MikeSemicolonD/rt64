@@ -47,6 +47,9 @@ namespace RT64 {
         // RS64: a mesh preset on one of the game's blinking lamps (a glw hardpoint): each light shines only while a lamp is drawn at its
         // spot on screen this frame, in that lamp's colour and fade, so it blinks and turns with it.
         bool lamp = false;
+        // RS64: the matched mesh parts are self-lit (an exhaust, light strips): never casters, bright in bounce light and reflections, and left
+        // unshadowed where they are drawn. Works with or without lights of its own.
+        bool emissive = false;
         // RS64: rank for the 32 light slots, higher kept first; -1 = the light's type default (rs64lights::PriorityMesh etc.).
         int priority = -1;
 

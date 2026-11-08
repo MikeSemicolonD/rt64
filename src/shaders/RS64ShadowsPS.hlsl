@@ -16,12 +16,16 @@ static const float kWaterReflStrength = 1.5f;
 static const float kWaterLift = 16.0f;
 Texture2D<float> gDepth : register(t2, space3);
 
-// The game's vertex fog at camera-space point p (RSPProcessCS): 0 clear, 1 fully fogged; 0 when the scene has no fog.
+// The game's vertex fog at camera-space point p (RSPProcessCS): 0 clear, 1 fully fogged; 0 when the scene has no fog. A point behind the camera
+// (a reflected walker overhead) takes the fog of the point as far in front: fully fogged, it reflected as a bright haze patch with a hard edge.
 float rs64FogAlpha(float3 p) {
     if (gShadows.fogParams.z <= 0.0f) {
         return 0.0f;
     }
-    const float4 c = mul(gShadows.screenFromView, float4(p, 1.0f));
+    float4 c = mul(gShadows.screenFromView, float4(p, 1.0f));
+    if (c.w <= 0.0f) {
+        c = mul(gShadows.screenFromView, float4(-p, 1.0f));
+    }
     return (c.w > 0.0f) ? saturate(((max(c.z, 0.0f) / c.w) * gShadows.fogParams.x + gShadows.fogParams.y) / 255.0f) : 1.0f;
 }
 
@@ -257,13 +261,14 @@ bool rs64ScreenHit(float3 q, out float3 rgb) {
 
 // The drawn sky in direction d (camera space), with the horizon haze the game fogs it with; off screen it takes the nearest screen edge. Where something
 // is drawn in front of the sky there (a craft the ray passed), it takes the first sky pixel above. With no sky pixel on that edge (a camera looking down
-// at the sea), the haze the game draws along that edge (the fog colour; the dome average without fog): giving up there cut the water's reflection
+// at the sea), the traced dome (rs64TracedSky), or without one the haze the game draws along that edge (the fog colour; the dome average without fog): giving up there cut the water's reflection
 // off along a hard line.
 // The direction meets the dome where the game drew it (skyDome, slid down as the camera climbs), not at its point at infinity: projecting that
 // shifted the reflected sky with altitude and lost it below the dome's edge.
+// Without a drawn or traced dome (the game culls it while the camera looks down), the frame's sky bands by the direction's height over the water (up).
 static const uint kSkySearchSteps = 8;
-bool rs64ScreenSky(float3 d, out float3 rgb) {
-    rgb = (gShadows.fogParams.z > 0.0f) ? gShadows.fogColor.rgb : gShadows.skyHorizon.rgb;
+bool rs64ScreenSky(float3 d, float3 up, out float3 rgb) {
+    rgb = lerp(gShadows.skyHorizon.rgb, gShadows.skyZenith.rgb, saturate(dot(d, up)));
     float4 c = mul(gShadows.screenFromView, float4(d, 0.0f));
 
     // Cast from the camera, not the water point: casting from each water point gave the reflection depth, like a bowl.
@@ -276,14 +281,19 @@ bool rs64ScreenSky(float3 d, out float3 rgb) {
             c = mul(gShadows.screenFromView, float4(d * t, 1.0f));
         }
     }
+    // Behind the camera (looking down at the water) or off screen, the traced dome, as the game textures it; without one, the bands.
+    float3 traced;
+    const bool hasTraced = rs64TracedSky(d, gShadows.cutoutDrawCount, traced);
     if (c.w <= 0.0f) {
+        rgb = hasTraced ? traced : rgb;
         return true;
     }
 
-    // Past the screen edge the clamped sample would smear edge clouds over the water, so it fades to the dome average (overhead past the top).
+    // Past the screen edge the clamped sample would smear edge clouds over the water, so it fades to the traced dome (or the dome average).
     const float2 dir = c.xy / c.w;
     const float off = saturate((max(abs(dir.x), dir.y) - 1.0f) * 2.0f);
-    const float3 offSky = lerp(rgb, gShadows.skyZenith.rgb, saturate((dir.y - 1.0f) * 2.0f));
+    const float3 offSky = hasTraced ? traced : rgb;
+    rgb = hasTraced ? traced : rgb;
 
     c.xy = clamp(dir, -1.0f, 1.0f);
     c.w = 1.0f;
@@ -303,9 +313,32 @@ bool rs64ScreenSky(float3 d, out float3 rgb) {
     return true;
 }
 
+// Debug 10's hit instance colour: red drawn, green terrain, blue cutout, white emissive, grey history (water also shows yellow translucent hits).
+float3 rs64HitIdColor(uint id) {
+    return (id == 0) ? float3(1, 0, 0) : (id == 1) ? float3(0, 1, 0) : (id == 2) ? float3(0, 0, 1) : (id == 7) ? float3(1, 1, 1) : float3(0.5f, 0.5f, 0.5f);
+}
+
+// The pixel shows an emissive draw (an emissive light preset, a glow card): the camera's ray meets the emissive instance (7, mask 0x80) at the
+// pixel's own depth. Those keep their drawn colour, with no shadow, AO or bounce light.
+bool rs64EmissiveReceiver(RS64Receiver rc) {
+    if (gShadows.hitParams.y == 0) {
+        return false;
+    }
+
+    RayDesc r;
+    r.Origin = float3(0.0f, 0.0f, 0.0f);
+    r.Direction = rc.p / rc.dist;
+    r.TMin = rc.dist * 0.98f;
+    r.TMax = rc.dist * 1.02f;
+    RayQuery<RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH | RAY_FLAG_SKIP_PROCEDURAL_PRIMITIVES> q;
+    q.TraceRayInline(gScene, RAY_FLAG_NONE, 0x80, r);
+    q.Proceed();
+    return (q.CommittedStatus() == COMMITTED_TRIANGLE_HIT);
+}
+
 // What water reflection ray r meets past a translucent hit at t (water point p), translucent draws aside: the next hit as the frame draws it or its
 // hit colour, or the drawn sky.
-bool rs64WaterBehind(RayDesc r, float t, float3 p, out float3 rgb) {
+bool rs64WaterBehind(RayDesc r, float t, float3 p, float3 up, out float3 rgb) {
     rgb = float3(0.0f, 0.0f, 0.0f);
     RayDesc next = r;
     next.TMin = t * 1.001f + gShadows.tMin;
@@ -321,7 +354,7 @@ bool rs64WaterBehind(RayDesc r, float t, float3 p, out float3 rgb) {
         return true;
     }
 
-    return (gShadows.skyZenith.w > 0.0f) && rs64ScreenSky(next.Direction, rgb);
+    return (gShadows.skyZenith.w > 0.0f) && rs64ScreenSky(next.Direction, up, rgb);
 }
 
 // Floor-facing receivers (hangar deck); mirrors rs64lights::receiverSkipped / reflectionReceiver.
@@ -342,7 +375,7 @@ RS64TraceOut PSMain(in float4 pos : SV_Position, in float2 uv : TEXCOORD0) {
     RS64TraceOut o;
     o.mask = float4(0.0f, 0.0f, rc.sky ? 65000.0f : (rc.dist / 64.0f), 0.0f);
     o.indirect = float4(0.0f, 0.0f, 0.0f, 0.0f);
-    if (rc.sky) {
+    if (rc.sky || rs64EmissiveReceiver(rc)) {
         return o;
     }
     const float3 p = rc.p;
@@ -485,7 +518,7 @@ RS64TraceOut PSMain(in float4 pos : SV_Position, in float2 uv : TEXCOORD0) {
         if (!hitAny) {
             // Water whose ray hits nothing reflects the sky as the frame draws it there (the dome is not traced), or the haze where none is drawn.
             float3 sky;
-            if (isRefl && waterRefl && (gShadows.skyZenith.w > 0.0f) && rs64ScreenSky(r.Direction, sky)) {
+            if (isRefl && waterRefl && (gShadows.skyZenith.w > 0.0f) && rs64ScreenSky(r.Direction, n, sky)) {
                 waterR = sky;
                 waterF = saturate(rs64Schlick(saturate(dot(-v, n)), 0.02f) * kWaterReflStrength) * rc.waterCover * gShadows.skyZenith.w;
                 if (gShadows.debugMode == 9) {
@@ -509,7 +542,7 @@ RS64TraceOut PSMain(in float4 pos : SV_Position, in float2 uv : TEXCOORD0) {
                 // A translucent draw is not in the frame yet (drawn after this pass): its texel over what the ray meets behind it, by the texel's alpha.
                 const float3 glow = lerp(glass.rgb, gShadows.fogColor.rgb, max(rs64FogAlpha(hitP), rs64FogAlpha(p)));
                 float3 behind;
-                if (rs64WaterBehind(r, t, p, behind)) {
+                if (rs64WaterBehind(r, t, p, n, behind)) {
                     waterR = lerp(behind, glow, glass.a);
                 }
                 else {
@@ -524,14 +557,16 @@ RS64TraceOut PSMain(in float4 pos : SV_Position, in float2 uv : TEXCOORD0) {
             if (gShadows.debugMode == 9) {
                 refl += waterR;
             }
+            else if (gShadows.debugMode == 10) {
+                refl += (glass.a > 0.0f) ? float3(1, 1, 0) : rs64HitIdColor(id);
+            }
         }
         else if (isRefl) {
             // Rough matte deck: ordinary hits fade out by their height above the deck, emissive ones (lights, glow cards) give the broad sheen.
             const float range = max(rs64Range(gShadows.reflParams.y, dist), gShadows.tMin * 2.0f);
             const float fade = (hc.a > 0.5f) ? 1.0f : pow(saturate(1.0f - (t * rise - deckSkip) / range), 2.0f);
-            // Debug 9: the raw hit colour; 10: the hit instance (red drawn, green terrain, blue cutout, white emissive, grey history).
-            const float3 idColor = (id == 0) ? float3(1, 0, 0) : (id == 1) ? float3(0, 1, 0) : (id == 2) ? float3(0, 0, 1) : (id == 7) ? float3(1, 1, 1) : float3(0.5f, 0.5f, 0.5f);
-            refl += (gShadows.debugMode == 10) ? idColor : (gShadows.debugMode == 9) ? hc.rgb : hc.rgb * fade * rs64Schlick(saturate(dot(-v, n)), 0.04f) * gShadows.reflParams.z;
+            // Debug 9: the raw hit colour; 10: the hit instance.
+            refl += (gShadows.debugMode == 10) ? rs64HitIdColor(id) :(gShadows.debugMode == 9) ? hc.rgb : hc.rgb * fade * rs64Schlick(saturate(dot(-v, n)), 0.04f) * gShadows.reflParams.z;
         }
         else if (hc.a > 0.5f) {
             gi += hc.rgb * gShadows.reflParams.w;
@@ -569,7 +604,7 @@ RS64TraceOut PSMain(in float4 pos : SV_Position, in float2 uv : TEXCOORD0) {
 
     // Water mixes dst * (1 - F) + R * F: the compose keeps 1 - F of the drawn water (alpha carries -F) and a second, additive draw adds R * F (rgb).
     // The colour target is UNORM, so a ratio against the water's colour clipped every reflection brighter than the water to the same value.
-    const bool waterMix = (waterF > 0.0f) && (gShadows.debugMode != 9);
+    const bool waterMix = (waterF > 0.0f) && (gShadows.debugMode != 9) && (gShadows.debugMode != 10);
     if (waterMix) {
         radius = max(radius, gShadows.terrainParams.y);
     }
@@ -594,8 +629,8 @@ float4 PSMain(in float4 pos : SV_Position, in float2 uv : TEXCOORD0) : SV_TARGET
     if (rc.sky) {
         return debug ? float4(0.2f, 0.4f, 1.0f, 1.0f) : float4(1.0f, 1.0f, 1.0f, 1.0f);
     }
-    // Floor-facing receivers keep the game's painted shadow (hangar). Debug: cyan.
-    if (rs64FloorReceiver(rc.n)) {
+    // Floor-facing receivers keep the game's painted shadow (hangar). Debug: cyan. Emissive draws stay unshadowed.
+    if (rs64FloorReceiver(rc.n) || rs64EmissiveReceiver(rc)) {
         return debug ? float4(0.0f, 0.8f, 0.8f, 1.0f) : float4(1.0f, 1.0f, 1.0f, 1.0f);
     }
     const float3 L = gShadows.sunDir.xyz;

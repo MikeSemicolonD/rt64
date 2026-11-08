@@ -219,6 +219,9 @@ namespace RT64 {
             uint64_t cutoutIndexGpuCapacity = 0, cutoutTableGpuCapacity = 0, cutoutIndexBytes = 0, cutoutTableBytes = 0;
             const RenderBuffer *texCoords = nullptr;
             uint64_t texCoordsSize = 0;
+            // RSPProcessCS's shaded vertex colours (float4, fog in alpha): the traced sky dome's shade and haze.
+            const RenderBuffer *shadedCols = nullptr;
+            uint64_t shadedColsSize = 0;
             const RenderBuffer *worldPos = nullptr;
             uint32_t vertexCount = 0;
             std::unique_ptr<RenderBuffer> indexBuffer, blasBuffer, tlasBuffer, blasScratch, tlasScratch, instancesBuffer;

@@ -1119,6 +1119,9 @@ namespace RT64 {
             // Per mesh: its meshdef, and whether its chunk heads currently fail the ownership check (f5_mesh_registry).
             std::vector<uint32_t> md;
             std::vector<uint8_t> stale;
+            // Per mesh: whether an emissive light preset names it, as of emissiveGen (State::rs64EmissiveGeneration).
+            std::vector<uint8_t> emissive;
+            std::vector<uint32_t> emissiveGen;
             uint64_t sig = 0;
             uint64_t task = ~0ull;
         };
@@ -1155,6 +1158,8 @@ namespace RT64 {
             p.craft.clear();
             p.md.clear();
             p.stale.clear();
+            p.emissive.clear();
+            p.emissiveGen.clear();
             for (uint32_t b = 0; b < 25; ++b) {
                 uint32_t idx = rd_be_u16(ram, 0x801394B0u + b * 2);
                 for (int hops = 0; (idx != 0xFFFFu) && (hops < 1024); ++hops) {
@@ -1182,7 +1187,7 @@ namespace RT64 {
                                 char key[64];
                                 std::snprintf(key, sizeof key, "%s#s%u.p%u.%u", name, si, part, j);
                                 p.names.emplace_back(key);
-                                p.noCast.push_back((rs64lights::laserBolt(key) || rs64lights::emissiveSurface(key)) ? 1 : (rs64lights::cutoutDenied(key) ? 2 : 0));
+                                p.noCast.push_back(rs64lights::laserBolt(key) ? 1 : (rs64lights::cutoutDenied(key) ? 2 : 0));
                                 p.craft.push_back(rs64lights::movingCraft(key) ? 1 : 0);
                                 p.md.push_back(md);
                                 p.stale.push_back(0);
@@ -1754,6 +1759,7 @@ namespace RT64 {
             s_lastKey = key;
             s_lastTransform = ti;
             s_lastTask = state->displayListCounter;
+            state->ext.workloadQueue->workloads[state->ext.workloadQueue->writeCursor].rs64MeshKeys[ti] = key;
             for (const auto& it : state->lightsLibrary.presetMap) {
                 const PresetLights& preset = it.second;
                 if (!preset.enabled || !preset.appliesTo(inspector.currentLevel) || !PresetLights::meshMatches(preset.mesh, key)) {
@@ -2049,6 +2055,31 @@ namespace RT64 {
             f5_next_chunk(state, dl);
         }
 
+        // Mesh i's no-cast mark: the registry's (laser bolts 1, glow cards 2), or 1 when an enabled emissive light preset names its key.
+        static uint8_t f5_mesh_nocast(State* state, F5MeshRegistry& reg, uint32_t i) {
+            if ((reg.noCast[i] != 0) || state->rs64EmissiveMeshes.empty()) {
+                return reg.noCast[i];
+            }
+            if (reg.emissiveGen.size() < reg.names.size()) {
+                reg.emissiveGen.resize(reg.names.size(), UINT32_MAX);
+                reg.emissive.resize(reg.names.size(), 0);
+            }
+            if (reg.emissiveGen[i] != state->rs64EmissiveGeneration) {
+                reg.emissiveGen[i] = state->rs64EmissiveGeneration;
+                reg.emissive[i] = 0;
+                for (const std::string& mesh : state->rs64EmissiveMeshes) {
+                    if (PresetLights::meshMatches(mesh, reg.names[i])) {
+                        reg.emissive[i] = 1;
+                        if (rs64lights::config().log) {
+                            std::fprintf(stderr, "[rt-lights] emissive mesh %s\n", reg.names[i].c_str());
+                        }
+                        break;
+                    }
+                }
+            }
+            return reg.emissive[i];
+        }
+
         // A call or branch into a registered mesh chunk arms its no-cast mark, and its mesh key for light presets unless the part's own modelview load
         // (op_01) named one: a chunk address can belong to another model in the hangar, which put engine lights on the wrong transform.
         static void f5_arm_mesh_emitters(State* state, uint32_t target) {
@@ -2061,7 +2092,7 @@ namespace RT64 {
             if ((it == reg.chunkMesh.end()) || reg.stale[it->second]) {
                 return;
             }
-            s_pending_nocast = reg.noCast[it->second];
+            s_pending_nocast = f5_mesh_nocast(state, reg, it->second);
             s_pending_craft = (reg.craft[it->second] != 0);
             if (s_pending_mesh.empty()) {
                 s_pending_mesh = reg.names[it->second];
@@ -3008,7 +3039,7 @@ namespace RT64 {
                 const auto mi = (md != 0) ? reg.md1Mesh.find(md) : reg.md1Mesh.end();
                 if (mi != reg.md1Mesh.end()) {
                     s_pending_craft = (reg.craft[mi->second] != 0);
-                    s_pending_nocast = reg.noCast[mi->second];
+                    s_pending_nocast = f5_mesh_nocast(state, reg, mi->second);
                     s_pending_mesh = reg.names[mi->second];
                     s_pending_mesh_task = state->displayListCounter;
                     s_pending_mesh_src = "node";

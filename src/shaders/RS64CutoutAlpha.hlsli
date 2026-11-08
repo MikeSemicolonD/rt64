@@ -6,12 +6,15 @@
 
 // Sets 0-2 are RT64's raster common and bindless texture sets (TextureSampler.hlsli); RS64 traced resources live in set 3.
 #include "TextureSampler.hlsli"
+#include "shared/rt64_color_combiner.h"
 #include "shared/rt64_rs64_cutout.h"
 
 RaytracingAccelerationStructure gScene : register(t3, space3);
 StructuredBuffer<RS64CutoutDraw> gCutoutDraws : register(t4, space3);
 ByteAddressBuffer gCutoutIndices : register(t5, space3);
 ByteAddressBuffer gTexCoords : register(t6, space3);
+// RSPProcessCS's shaded vertex colours (float4 per vertex, the fog in alpha when the draw fogs).
+ByteAddressBuffer gShadedCols : register(t13, space3);
 // Hit colour tables (rs64lights::HitColorEntry: first BLAS triangle, rgba8; a = 255 emissive) for the opaque casters (instance 0) and emissive draws (7).
 StructuredBuffer<uint2> gHitColors : register(t9, space3);
 StructuredBuffer<uint2> gEmissiveColors : register(t10, space3);
@@ -41,49 +44,100 @@ float2 rs64TexCoord(uint vertexIndex) {
 
 // Translucent cutouts (flags bit 0: foot beams, foam) are hits only while this is set, for water reflection rays; they never cast.
 static bool gRs64TranslucentRays = false;
-// A translucent texel blocks a water reflection ray from this alpha.
+// A translucent draw blocks a water reflection ray from this combined alpha.
 static const float kTranslucentAlphaMin = 0.2f;
 
-// Texel 0 at a cutout hit; white for an untextured draw.
-float4 rs64CutoutTexel(RS64CutoutDraw d, uint prim, float2 bary) {
+// Texels 0 and 1 (the draw's next tile; texel 0 again unless both is set) at a cutout hit, white for a texture the draw does not use. One sampler
+// in a loop: every inlined copy of sampleTexture in the ray query loops grew the shader until DXC overflowed.
+void rs64CutoutTexels(RS64CutoutDraw d, uint prim, float2 bary, bool both, out float4 texel0, out float4 texel1) {
     const RenderParams rp = DynamicRenderParams[d.instanceIndex];
-    if (!renderFlagUsesTexture0(rp.flags)) {
-        return float4(1.0f, 1.0f, 1.0f, 1.0f);
-    }
     const uint i0 = gCutoutIndices.Load((prim * 3 + 0) * 4);
     const uint i1 = gCutoutIndices.Load((prim * 3 + 1) * 4);
     const uint i2 = gCutoutIndices.Load((prim * 3 + 2) * 4);
     const float2 uv = rs64TexCoord(i0) * (1.0f - bary.x - bary.y) + rs64TexCoord(i1) * bary.x + rs64TexCoord(i2) * bary.y;
     const OtherMode otherMode = { rp.omL, rp.omH };
-    RDPTile rdpTile = RDPTiles[d.tileIndex];
-    if (!renderFlagDynamicTiles(rp.flags)) {
-        rdpTile.cms = renderCMS0(rp.flags);
-        rdpTile.cmt = renderCMT0(rp.flags);
-        rdpTile.nativeSampler = renderFlagNativeSampler0(rp.flags);
+    float4 texels[2] = { float4(1.0f, 1.0f, 1.0f, 1.0f), float4(1.0f, 1.0f, 1.0f, 1.0f) };
+    [loop]
+    for (uint k = 0; k < (both ? 2u : 1u); k++) {
+        const bool second = (k == 1);
+        if (!(second ? renderFlagUsesTexture1(rp.flags) : renderFlagUsesTexture0(rp.flags))) {
+            continue;
+        }
+        RDPTile rdpTile = RDPTiles[d.tileIndex + k];
+        if (!renderFlagDynamicTiles(rp.flags)) {
+            rdpTile.cms = second ? renderCMS1(rp.flags) : renderCMS0(rp.flags);
+            rdpTile.cmt = second ? renderCMT1(rp.flags) : renderCMT0(rp.flags);
+            rdpTile.nativeSampler = second ? renderFlagNativeSampler1(rp.flags) : renderFlagNativeSampler0(rp.flags);
+        }
+        const GPUTile gpuTile = GPUTiles[d.tileIndex + k];
+        // Mirrors rs64lights::cutoutMipGradient: gradients that land on mip 0 (zero gradients give log2(0) = NaN on mipmapped replacements).
+        const float2 g = 1.18920712f / gpuTile.tcScale;
+        texels[k] = sampleTexture(otherMode, rp.flags, uv, float2(g.x, 0.0f), float2(0.0f, g.y), rdpTile, gpuTile, false);
     }
-    const GPUTile gpuTile = GPUTiles[d.tileIndex];
-    // Mirrors rs64lights::cutoutMipGradient: gradients that land on mip 0 (zero gradients give log2(0) = NaN on mipmapped replacements).
-    const float2 g = 1.18920712f / gpuTile.tcScale;
-    return sampleTexture(otherMode, rp.flags, uv, float2(g.x, 0.0f), float2(0.0f, g.y), rdpTile, gpuTile, false);
+    texel0 = texels[0];
+    texel1 = both ? texels[1] : texels[0];
+}
+
+// A translucent cutout's colour and opacity at a hit as its colour combiner makes them, from both textures (texel 0 again in 1-cycle, as RasterPS)
+// and the draw's average vertex colour as shade (flags bits 8-31 rgb, 2-7 alpha). Effect sprites take their shape from a second tile's alpha mask
+// over an opaque colour tile: texel 0 alone reflected them as solid dark rectangles.
+bool rs64TwoTexels(RS64CutoutDraw d) {
+    const OtherMode otherMode = { DynamicRenderParams[d.instanceIndex].omL, DynamicRenderParams[d.instanceIndex].omH };
+    return ((d.flags & 3u) != 0u) && (otherMode.cycleType() != G_CYC_1CYCLE);
+}
+
+// The draw's average vertex colour from its cutout flags.
+float4 rs64CutoutShade(RS64CutoutDraw d) {
+    return float4(float3((d.flags >> 8) & 0xFFu, (d.flags >> 16) & 0xFFu, (d.flags >> 24) & 0xFFu) / 255.0f, float((d.flags >> 2) & 0x3Fu) / 63.0f);
+}
+
+float4 rs64TranslucentCombined(RS64CutoutDraw d, float4 texel0, float4 texel1, float4 shade) {
+    const RenderParams rp = DynamicRenderParams[d.instanceIndex];
+    const ColorCombiner colorCombiner = { rp.ccL, rp.ccH };
+    const OtherMode otherMode = { rp.omL, rp.omH };
+    ColorCombiner::Inputs ccInputs;
+    ccInputs.otherMode = otherMode;
+    ccInputs.alphaOnly = false;
+    ccInputs.texVal0 = texel0;
+    ccInputs.texVal1 = texel1;
+    ccInputs.primColor = instanceRDPParams[d.instanceIndex].primColor;
+    ccInputs.shadeColor = shade;
+    ccInputs.envColor = instanceRDPParams[d.instanceIndex].envColor;
+    ccInputs.keyCenter = instanceRDPParams[d.instanceIndex].keyCenter;
+    ccInputs.keyScale = instanceRDPParams[d.instanceIndex].keyScale;
+    ccInputs.lodFraction = 0.0f;
+    ccInputs.primLodFrac = instanceRDPParams[d.instanceIndex].primLOD.x;
+    ccInputs.noise = 0.5f;
+    ccInputs.K4 = (instanceRDPParams[d.instanceIndex].convertK[4] / 255.0f);
+    ccInputs.K5 = (instanceRDPParams[d.instanceIndex].convertK[5] / 255.0f);
+    float4 combined;
+    float alphaCompare;
+    colorCombiner.run(ccInputs, combined, alphaCompare);
+    return combined;
 }
 
 // Texel-0 alpha at the hit against the draw's alpha-compare threshold (mirrors rs64lights::cutoutThreshold); untextured cutouts block.
+// A translucent cutout tests its combined alpha instead.
 bool rs64CutoutBlocks(uint prim, float2 bary, uint count) {
     const RS64CutoutDraw d = gCutoutDraws[rs64CutoutDrawFor(prim, count)];
-    if ((d.flags & 1u) != 0u) {
-        return gRs64TranslucentRays && (rs64CutoutTexel(d, prim, bary).a >= kTranslucentAlphaMin);
+    const bool translucent = ((d.flags & 1u) != 0u);
+    if ((translucent && !gRs64TranslucentRays) || ((d.flags & 2u) != 0u)) {
+        return false;
     }
 
-    if (!renderFlagUsesTexture0(DynamicRenderParams[d.instanceIndex].flags)) {
-        return true;
+    float4 texel0;
+    float4 texel1;
+    rs64CutoutTexels(d, prim, bary, rs64TwoTexels(d), texel0, texel1);
+    if (translucent) {
+        return rs64TranslucentCombined(d, texel0, texel1, rs64CutoutShade(d)).a >= kTranslucentAlphaMin;
     }
 
     const OtherMode otherMode = { DynamicRenderParams[d.instanceIndex].omL, DynamicRenderParams[d.instanceIndex].omH };
     const float threshold = (otherMode.alphaCompare() == G_AC_THRESHOLD) ? instanceRDPParams[d.instanceIndex].blendColor.a : 0.5f;
-    return rs64CutoutTexel(d, prim, bary).a >= threshold;
+    return texel0.a >= threshold;
 }
 
-// A translucent cutout hit's colour (texel 0, or the draw's average vertex colour untextured, times prim when the combiner reads it) and opacity; a = 0 otherwise.
+// A translucent cutout hit's combined colour and opacity; a = 0 otherwise.
 float4 rs64TranslucentHit(uint instanceId, uint prim, float2 bary, uint count) {
     if ((instanceId != 2) || (count == 0)) {
         return float4(0.0f, 0.0f, 0.0f, 0.0f);
@@ -94,12 +148,57 @@ float4 rs64TranslucentHit(uint instanceId, uint prim, float2 bary, uint count) {
         return float4(0.0f, 0.0f, 0.0f, 0.0f);
     }
 
-    const float4 texel = rs64CutoutTexel(d, prim, bary);
-    const bool textured = renderFlagUsesTexture0(DynamicRenderParams[d.instanceIndex].flags);
-    const float3 shade = float3((d.flags >> 8) & 0xFFu, (d.flags >> 16) & 0xFFu, (d.flags >> 24) & 0xFFu) / 255.0f;
-    const float3 base = textured ? texel.rgb : shade;
-    const float3 rgb = ((d.flags & 2u) != 0u) ? base * instanceRDPParams[d.instanceIndex].primColor.rgb : base;
-    return float4(saturate(rgb), max(saturate(texel.a), 1.0e-3f));
+    float4 texel0;
+    float4 texel1;
+    rs64CutoutTexels(d, prim, bary, rs64TwoTexels(d), texel0, texel1);
+    const float4 c = rs64TranslucentCombined(d, texel0, texel1, rs64CutoutShade(d));
+    return float4(saturate(c.rgb), max(saturate(c.a), 1.0e-3f));
+}
+
+// The sky dome in camera-space direction d as the game textures it: a ray from the camera meets the dome's traced triangles (cutouts flagged 2).
+// Only the flag is tested in the query loop and the texture is sampled once, at the hit.
+bool rs64TracedSky(float3 d, uint count, out float3 rgb) {
+    rgb = float3(0.0f, 0.0f, 0.0f);
+    if (count == 0) {
+        return false;
+    }
+
+    RayDesc r;
+    r.Origin = float3(0.0f, 0.0f, 0.0f);
+    r.Direction = d;
+    r.TMin = 0.0f;
+    r.TMax = 1.0e30f;
+    RayQuery<RAY_FLAG_SKIP_PROCEDURAL_PRIMITIVES> q;
+    q.TraceRayInline(gScene, RAY_FLAG_NONE, 0x04, r);
+    while (q.Proceed()) {
+        if ((q.CandidateType() == CANDIDATE_NON_OPAQUE_TRIANGLE) && ((gCutoutDraws[rs64CutoutDrawFor(q.CandidatePrimitiveIndex(), count)].flags & 2u) != 0u)) {
+            q.CommitNonOpaqueTriangleHit();
+        }
+    }
+    if (q.CommittedStatus() != COMMITTED_TRIANGLE_HIT) {
+        return false;
+    }
+
+    const uint prim = q.CommittedPrimitiveIndex();
+    const float2 bary = q.CommittedTriangleBarycentrics();
+    const RS64CutoutDraw sky = gCutoutDraws[rs64CutoutDrawFor(prim, count)];
+    float4 texel0;
+    float4 texel1;
+    rs64CutoutTexels(sky, prim, bary, rs64TwoTexels(sky), texel0, texel1);
+
+    // The hit's own shaded colour: the dome's vertex colours carry its horizon haze, which one average for the draw lost.
+    const float4 c0 = asfloat(gShadedCols.Load4(gCutoutIndices.Load((prim * 3 + 0) * 4) * 16));
+    const float4 c1 = asfloat(gShadedCols.Load4(gCutoutIndices.Load((prim * 3 + 1) * 4) * 16));
+    const float4 c2 = asfloat(gShadedCols.Load4(gCutoutIndices.Load((prim * 3 + 2) * 4) * 16));
+    const float4 shade = saturate(c0 * (1.0f - bary.x - bary.y) + c1 * bary.x + c2 * bary.y);
+    rgb = saturate(rs64TranslucentCombined(sky, texel0, texel1, shade).rgb);
+
+    // The blender's fog (first cycle fog colour x shade alpha), as the game draws the dome.
+    const uint blender = DynamicRenderParams[sky.instanceIndex].omL >> 16;
+    if ((((blender >> 14) & 3u) == 3u) && (((blender >> 10) & 3u) == 2u)) {
+        rgb = lerp(rgb, instanceRDPParams[sky.instanceIndex].fogColor.rgb, shade.a);
+    }
+    return true;
 }
 
 // TLAS instance id of the last committed caster hit (2 = cutout BLAS); read by the shadow pass's debug mode 3.

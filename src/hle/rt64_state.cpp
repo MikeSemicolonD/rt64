@@ -1952,6 +1952,22 @@ namespace RT64 {
             }
         }
 
+        thread_local std::vector<std::string> emissiveMeshes;
+        emissiveMeshes.clear();
+        for (const auto &it : lightsLibrary.presetMap) {
+            if (it.second.enabled && it.second.emissive && !it.second.mesh.empty() && it.second.appliesTo(presetLevel)) {
+                emissiveMeshes.push_back(it.second.mesh);
+            }
+        }
+
+        if (emissiveMeshes != rs64EmissiveMeshes) {
+            rs64EmissiveMeshes = emissiveMeshes;
+            rs64EmissiveGeneration++;
+            if (rs64lights::config().log) {
+                fprintf(stderr, "[rt-lights] emissive presets: %zu mesh keys (generation %u)\n", rs64EmissiveMeshes.size(), rs64EmissiveGeneration);
+            }
+        }
+
         // Add any lights to the workload from the presets that are activated.
         for (const auto &it : lightsLibrary.presetMap) {
             // Mesh and sprite presets are emitted per drawn part / sprite by the F5 GBI instead.

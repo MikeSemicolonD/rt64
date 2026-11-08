@@ -556,6 +556,7 @@ namespace RT64 {
         uint32_t gTerrainColors;
         // The frame's colour target for screen-space water reflections (shadow pass only; the other passes bind their depth here).
         uint32_t gColor;
+        uint32_t gShadedCols;
 
         RS64TracedDescriptorSet(RenderDevice *device = nullptr) {
             builder.begin();
@@ -571,6 +572,7 @@ namespace RT64 {
             gEmissiveColors = builder.addStructuredBuffer(10);
             gTerrainColors = builder.addByteAddressBuffer(11);
             gColor = builder.addTexture(12);
+            gShadedCols = builder.addByteAddressBuffer(13);
             builder.end();
 
             if (device != nullptr) {

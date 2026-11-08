@@ -75,6 +75,7 @@ namespace RT64 {
         mesh = jsonObj.value("mesh", std::string());
         cameraUnits = jsonObj.value("cameraUnits", false);
         lamp = jsonObj.value("lamp", false);
+        emissive = jsonObj.value("emissive", false);
         priority = jsonObj.value("priority", -1);
         sprite = jsonObj.value("sprite", std::string());
 
@@ -86,6 +87,8 @@ namespace RT64 {
             return false;
         }
 
+        // Always written: readJson needs it, and an emissive preset can have no lights.
+        jsonObj["lights"] = json::array();
         for (const auto &it : lightMap) {
             json jlight;
             jlight["name"] = it.first;
@@ -108,6 +111,10 @@ namespace RT64 {
 
         if (lamp) {
             jsonObj["lamp"] = true;
+        }
+
+        if (emissive) {
+            jsonObj["emissive"] = true;
         }
 
         if (priority >= 0) {
@@ -206,6 +213,7 @@ namespace RT64 {
                 ImGui::BeginDisabled(!meshScoped);
                 ImGui::Checkbox("Radius in camera units", &presetIt->second.cameraUnits);
                 ImGui::Checkbox("Follows the game's blinking lamp", &presetIt->second.lamp);
+                ImGui::Checkbox("Emissive (self-lit, never shadowed)", &presetIt->second.emissive);
                 ImGui::EndDisabled();
                 ImGui::SliderInt("Priority (-1 = by type)", &presetIt->second.priority, -1, 9);
 

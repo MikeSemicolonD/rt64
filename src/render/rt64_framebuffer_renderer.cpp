@@ -2589,6 +2589,11 @@ namespace RT64 {
                 rs64Shadow.terrainOriginX = terrainOx;
                 rs64Shadow.terrainOriginZ = terrainOz;
                 rs64Shadow.terrainMap = tf.map;
+                // The trace pass's constants are filled before the scene build sets this for a new map, so a level's first frame had no water.
+                if (rs64Shadow.terrainBuiltVersion != tf.map->version) {
+                    rs64Shadow.terrainWaterPrim = rs64lights::terrainWaterPrim(*tf.map, lightsCfg.shadowTerrainSub);
+                }
+
                 rs64lights::terrainInstanceTransform(rs64ToMat4(terrainWorld[tf.transformIndex]), terrainOx, terrainOz, rs64Shadow.terrainTransform);
             }
             const bool hitColors = !newView && (lightsCfg.gi || lightsCfg.reflections || (rs64Shadow.terrainWaterPrim > 0));
@@ -2628,13 +2633,18 @@ namespace RT64 {
                     if (hitColors && cm.primDepth && (cullBoth != 0) && ((call.callDesc.geometryMode & cullBoth) == cullBoth) && !cm.fillOrCopy) {
                         rs64Shadow.skyRanges.push_back({ call.meshDesc.faceIndicesStart, call.callDesc.triangleCount });
                         rs64Shadow.skyCalls.push_back(call.callDesc.callIndex);
+                        // Traced too, so water reflects the dome where it is off screen (looking down) instead of a flat haze.
+                        if (lightsCfg.reflections && !newView) {
+                            const uint32_t shade = rs64lights::packCutoutShade(p.curWorkload->drawData.faceIndices, p.curWorkload->drawData.normColBytes, call.meshDesc.faceIndicesStart, call.callDesc.triangleCount);
+                            rs64Shadow.cutoutRanges.push_back({ { call.meshDesc.faceIndicesStart, call.callDesc.triangleCount }, call.callDesc.callIndex, call.callDesc.tileIndex, rs64lights::CutoutSky | shade });
+                        }
                         if (!rs64Shadow.skyWorldValid && oneTransform && (call.callDesc.minWorldMatrix < terrainWorld.size())) {
                             rs64Shadow.skyWorld = rs64ToMat4(terrainWorld[call.callDesc.minWorldMatrix]);
                             rs64Shadow.skyWorldValid = true;
                         }
                     }
 
-                    if (hitColors && (emissive || glowCard) && !cm.fillOrCopy) {
+                    if (!newView && (emissive || glowCard) && !cm.fillOrCopy) {
                         rs64Shadow.emissiveRanges.push_back({ call.meshDesc.faceIndicesStart, call.callDesc.triangleCount });
                         rs64Shadow.emissiveCalls.push_back(call.callDesc.callIndex);
                     }
@@ -2642,11 +2652,8 @@ namespace RT64 {
                     // Translucent world draws (a World Devastator's foot beams, foam) join the cutouts flagged translucent: water reflections alpha-test them.
                     const bool translucent = !newView && lightsCfg.reflections && cm.xlu && !cm.primDepth && !cm.fillOrCopy && (cc == rs64lights::CasterNone) && !emissive && !glowCard;
                     if (translucent && !drawnTerrain) {
-                        const auto &callTex = p.curWorkload->rs64CallTex;
-                        const uint32_t ci = call.callDesc.callIndex;
-                        const bool usesPrim = (ci < callTex.size()) && ((uint32_t((float)callTex[ci].w) & 2u) != 0);
                         const uint32_t shade = rs64lights::packCutoutShade(p.curWorkload->drawData.faceIndices, p.curWorkload->drawData.normColBytes, call.meshDesc.faceIndicesStart, call.callDesc.triangleCount);
-                        rs64Shadow.cutoutRanges.push_back({ { call.meshDesc.faceIndicesStart, call.callDesc.triangleCount }, ci, call.callDesc.tileIndex, rs64lights::CutoutTranslucent | (usesPrim ? rs64lights::CutoutUsesPrim : 0u) | shade });
+                        rs64Shadow.cutoutRanges.push_back({ { call.meshDesc.faceIndicesStart, call.callDesc.triangleCount }, call.callDesc.callIndex, call.callDesc.tileIndex, rs64lights::CutoutTranslucent | shade });
                     }
                     if (!drawnTerrain) {
                         const auto &craftTi = p.curWorkload->rs64Craft;
@@ -2703,6 +2710,8 @@ namespace RT64 {
             rs64Shadow.worldPos = worldPosRes;
             rs64Shadow.texCoords = tcRes;
             rs64Shadow.texCoordsSize = outputBuffers.genTexCoordBuffer.allocatedSize;
+            rs64Shadow.shadedCols = outputBuffers.shadedColBuffer.buffer.get();
+            rs64Shadow.shadedColsSize = outputBuffers.shadedColBuffer.allocatedSize;
             rs64Shadow.vertexCount = drawData.vertexCount();
             const bool sceneHasCasters = !rs64Shadow.indices.empty() || !rs64Shadow.cutoutIndices.empty() || !rs64Shadow.craftIndices.empty() || rs64Shadow.terrainActive;
             // Hangar: the largest draw (the ship, resting level) gives the world up; floor-facing receivers keep the game's painted shadow.
@@ -2744,7 +2753,8 @@ namespace RT64 {
                     sun.skip[3] = lightsCfg.hangarFloorCos;
                 }
             }
-            if (hitColors) {
+            // Emissive draws need their table without GI or reflections too: the shadow pass finds them on screen to leave them unshadowed.
+            if (hitColors || !rs64Shadow.emissiveRanges.empty()) {
                 buildRS64HitColors(p, terrainCalls, (sun.fromModel && (sun.skip[3] > 0.0f)) ? sun.skip : nullptr);
             }
             // The frame's fog, for the shafts and for fogging what water reflects. The game fogs only terrain and a few models, and terrain often draws
@@ -3518,8 +3528,11 @@ namespace RT64 {
 
         float skyH[3] = {}, skyZ[3] = {};
         const bool sky = rs64lights::skyBands(skySamples.data(), skySamples.size(), skyH, skyZ);
-        s.skyHorizon = hlslpp::float4(skyH[0], skyH[1], skyH[2], sky ? 1.0f : 0.0f);
-        s.skyZenith = hlslpp::float4(skyZ[0], skyZ[1], skyZ[2], sky ? 1.0f : 0.0f);
+        // The game culls the dome while the camera looks down (a death spiral): the last frame's bands keep the water reflecting the sky.
+        if (sky || (s.skyZenith.w <= 0.0f) || !s.terrainActive) {
+            s.skyHorizon = hlslpp::float4(skyH[0], skyH[1], skyH[2], sky ? 1.0f : 0.0f);
+            s.skyZenith = hlslpp::float4(skyZ[0], skyZ[1], skyZ[2], sky ? 1.0f : 0.0f);
+        }
         s.emissiveIndices.clear();
         rs64lights::gatherCasterIndices(fi.data(), fi.size(), s.emissiveRanges.data(), s.emissiveRanges.size(), s.emissiveIndices);
         const double n = double(std::max<size_t>(s.hitTable.size(), 1));
@@ -3713,6 +3726,12 @@ namespace RT64 {
             set.setBuffer(set.gCutoutDraws, rs64CutoutPlaceholder.get(), 64, RenderBufferStructuredView(sizeof(rs64lights::CutoutEntry)));
             set.setBuffer(set.gCutoutIndices, rs64CutoutPlaceholder.get(), 64);
             set.setBuffer(set.gTexCoords, rs64CutoutPlaceholder.get(), 64);
+        }
+        if (have && (s.shadedCols != nullptr)) {
+            set.setBuffer(set.gShadedCols, const_cast<RenderBuffer *>(s.shadedCols), s.shadedColsSize);
+        }
+        else {
+            set.setBuffer(set.gShadedCols, rs64CutoutPlaceholder.get(), 64);
         }
         const RenderBufferStructuredView hitView(sizeof(rs64lights::HitColorEntry));
         if ((s.hitCount > 0) && s.hitTableGpu) {

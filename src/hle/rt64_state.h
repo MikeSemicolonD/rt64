@@ -105,6 +105,9 @@ namespace RT64 {
         VIHistory viHistory;
         PresetDrawCallLibrary drawCallLibrary;
         PresetLightsLibrary lightsLibrary;
+        // RS64: mesh keys of the enabled emissive light presets for the current level, rebuilt each frame; the generation changes with the list.
+        std::vector<std::string> rs64EmissiveMeshes;
+        uint32_t rs64EmissiveGeneration = 0;
         PresetMaterialLibrary materialLibrary;
         PresetSceneLibrary sceneLibrary;
         PresetDrawCallLibraryInspector drawCallLibraryInspector;
