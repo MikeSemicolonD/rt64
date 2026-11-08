@@ -348,6 +348,36 @@ bool rs64SunHit(RayDesc ray, uint cutoutCount, out float hitT, out uint instance
 
 // For a static terrain receiver: the terrain itself blocks only from terrainSkip along the ray. The coarse heightfield's own bumps a few metres off
 // shadowed it in saw-tooth spikes under a low sun; mountains across a valley and every other caster still shadow it.
+bool rs64TerrainBlocksPastSkip(RayDesc ray, uint cutoutCount, float terrainSkip, out float hitT, out uint instanceId) {
+    RayQuery<RAY_FLAG_SKIP_PROCEDURAL_PRIMITIVES | RAY_FLAG_FORCE_OPAQUE> q;
+    q.TraceRayInline(gScene, RAY_FLAG_NONE, 0x02u, ray);
+    while (q.Proceed()) {
+    }
+
+    hitT = ray.TMax;
+    instanceId = 0;
+    if (q.CommittedStatus() != COMMITTED_TRIANGLE_HIT) {
+        return false;
+    }
+
+    const float t = q.CommittedRayT();
+    instanceId = q.CommittedInstanceID();
+    if (q.CommittedTriangleFrontFace()) {
+        hitT = t;
+        return true;
+    }
+
+    // Leaving through a back face means the ray entered the terrain inside the skip. Underground for another skip length is a hill, not a bump it skimmed.
+    if ((t - ray.TMin) >= terrainSkip) {
+        hitT = ray.TMin;
+        return true;
+    }
+
+    RayDesc past = ray;
+    past.TMin = t;
+    return rs64SunHitMasked(past, cutoutCount, 0x02u, hitT, instanceId);
+}
+
 bool rs64SunHitTerrainReceiver(RayDesc ray, uint cutoutCount, float terrainSkip, out float hitT, out uint instanceId) {
     float t0;
     uint id0;
@@ -356,7 +386,7 @@ bool rs64SunHitTerrainReceiver(RayDesc ray, uint cutoutCount, float terrainSkip,
     distant.TMin = max(ray.TMin, terrainSkip);
     float t1 = ray.TMax;
     uint id1 = 0;
-    const bool terrain = (distant.TMin < distant.TMax) && rs64SunHitMasked(distant, cutoutCount, 0x02u, t1, id1);
+    const bool terrain = (distant.TMin < distant.TMax) && rs64TerrainBlocksPastSkip(distant, cutoutCount, terrainSkip, t1, id1);
     hitT = other ? (terrain ? min(t0, t1) : t0) : t1;
     instanceId = (other && (!terrain || (t0 <= t1))) ? id0 : id1;
     gRs64HitInstance = instanceId;
