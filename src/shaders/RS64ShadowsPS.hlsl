@@ -13,6 +13,11 @@ ConstantBuffer<RS64ShadowsCB> gShadows : register(b1, space3);
 // Water reflection: tangent of its blur cone and its strength (the indirect target multiplies the water's colour).
 static const float kWaterReflCone = 0.02f;
 static const float kWaterReflStrength = 1.5f;
+// The sun's glint on the water's ripples, as RS64TerrainPS: a sharp sparkle lobe over a broad sheen, added on top of the reflection where the sun reaches.
+static const float kWaterSunGlint = 1.2f;
+static const float kWaterSunGlintPower = 320.0f;
+static const float kWaterSunSheen = 0.2f;
+static const float kWaterSunSheenPower = 32.0f;
 // Mirrors kWaterLift in RS64Terrain.hlsli: the drawn water sits this far (map units) over the water level and fades out as a shore rises to it.
 static const float kWaterLift = 16.0f;
 Texture2D<float> gDepth : register(t2, space3);
@@ -610,7 +615,16 @@ RS64TraceOut PSMain(in float4 pos : SV_Position, in float2 uv : TEXCOORD0) {
         radius = max(radius, gShadows.terrainParams.y);
     }
 
-    const float3 indirect = waterMix ? (waterR * waterF) : (gi + refl);
+    // The sun's glint: the mirror ray only meets the sky as drawn, which has no sun in it, and the compose keeps little of the drawn water's own glint.
+    float3 glint = float3(0.0f, 0.0f, 0.0f);
+    if (waterMix && (ndl > 0.0f)) {
+        const float sunSeen = (sunCount > 0) ? (1.0f - float(blocked) / float(sunCount)) : 1.0f;
+        const float rv = saturate(dot(reflect(-L, n), -v));
+        const float lobe = pow(rv, kWaterSunGlintPower) + (kWaterSunSheen / kWaterSunGlint) * pow(rv, kWaterSunSheenPower);
+        glint = gShadows.sunColor.rgb * (lobe * kWaterSunGlint * sunSeen * rc.waterCover * (1.0f - fogHere));
+    }
+
+    const float3 indirect = waterMix ? (waterR * waterF + glint) : (gi + refl);
     if (any(gi > 0.0f) || (any(refl != 0.0f) && !rc.water)) {
         radius = max(radius, gShadows.giParams.w);
     }

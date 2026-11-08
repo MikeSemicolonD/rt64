@@ -1800,6 +1800,13 @@ namespace RT64 {
     // ignoreProj: camera-space positions only need the same camera; the player craft is drawn under its own projection (nearer clip) in the same view.
     static bool rs64SameView(const DrawData &drawData, uint32_t a, uint32_t b, bool ignoreProj = false) {
         const size_t n = std::min({ drawData.viewTransforms.size(), drawData.projTransforms.size(), drawData.rspViewports.size() });
+    // Whether the traced passes have terrain normals this frame. The constants are filled before the scene build makes them for a new map, so without the
+    // pending build a map's first frame traced no terrain or water (the opening Calamari cutscene lost its reflections for a frame).
+    template <typename Scene>
+    static bool rs64TerrainNormalsThisFrame(const Scene &s) {
+        return s.terrainNormalGpu || (s.terrainActive && s.terrainMap && (s.terrainBuiltVersion != s.terrainMap->version));
+    }
+
         if ((a >= n) || (b >= n)) {
             return false;
         }
@@ -3140,7 +3147,7 @@ namespace RT64 {
         cb.tMin = cfg.shadowTMin;
         cb.normalBias = cfg.shadowNormalBias;
         cb.terrainTMinScale = cfg.shadowTerrainTMin;
-        cb.shadowParams = { cfg.lightShadowEnd, 0.0f, (cfg.terrainNormals && rs64Shadow.terrainNormalGpu) ? 1.0f : 0.0f, cfg.terrainNormalWindow };
+        cb.shadowParams = { cfg.lightShadowEnd, 0.0f, (cfg.terrainNormals && rs64TerrainNormalsThisFrame(rs64Shadow)) ? 1.0f : 0.0f, cfg.terrainNormalWindow };
         cb.specParams = { cfg.specular, cfg.specularPower, 0.0f, 0.0f };
         // Flicker runs on wall time, so it keeps its pace whatever the frame rate.
         static const auto s_flickerStart = std::chrono::steady_clock::now();
@@ -3230,7 +3237,7 @@ namespace RT64 {
         if (rs64lights::inverse(inv, sfv)) {
             memcpy(&cb.screenFromView, &sfv, sizeof(sfv));
         }
-        cb.softParams = { tanAngle, soft ? rs64lights::pixelsPerUnit(viewProj, framebuffer.viewport.height) : 0.0f, maxRadius, (cfg.terrainNormals && rs64Shadow.terrainNormalGpu) ? (cfg.terrainTerminator ? 2.0f : 1.0f) : 0.0f };
+        cb.softParams = { tanAngle, soft ? rs64lights::pixelsPerUnit(viewProj, framebuffer.viewport.height) : 0.0f, maxRadius, (cfg.terrainNormals && rs64TerrainNormalsThisFrame(rs64Shadow)) ? (cfg.terrainTerminator ? 2.0f : 1.0f) : 0.0f };
 
         void *bytes = framebuffer.rs64ShadowsBuffer->map();
         memcpy(bytes, &cb, sizeof(cb));
