@@ -49,7 +49,7 @@ uint chunkLod(int2 c) {
 }
 
 // The terrain draw: one instance per visible chunk of this draw's LOD (chunkCells * 4 * sub >> lod quads per edge), two triangles per quad (no
-// index buffer), in fine units (sub per lattice step); an edge vertex next to a coarser chunk lies on that chunk's edge segment, so no T-junction opens.
+// index buffer), in fine units (sub per lattice step); an edge vertex next to a coarser chunk collapses onto one of that chunk's own vertices, so both sides compute identical positions and no T-junction opens.
 // The water draw (gTerrain.water): one flat quad per water or shore cell at the water level; where the ground rises above it, the depth test cuts the shore.
 // Positions follow RSPProcessCS (world then view-projection, N64 viewport) and RasterVS (screen to clip, the anchor draw's screen scale/offset).
 void VSMain(uint vertexId : SV_VertexID, uint instanceId : SV_InstanceID,
@@ -71,6 +71,7 @@ void VSMain(uint vertexId : SV_VertexID, uint instanceId : SV_InstanceID,
     uint2 cell;
     float2 cellOrigin;
     float2 f;
+    float2 uvLattice = float2(0.0f, 0.0f);
     float h;
     float3 c;
     bool outside = false;
@@ -135,28 +136,25 @@ void VSMain(uint vertexId : SV_VertexID, uint instanceId : SV_InstanceID,
             return;
         }
 
-        const float sub = float(gTerrain.sub);
-        f = float2(F) / sub;
-        float4 hc = surfacePoint(f, latticeW, latticeH);
         const uint2 local = F - chunkBase;
+        uint2 S = F;
         if ((local.x == 0) || (local.x == chunkFine)) {
             const uint nl = chunkLod(int2(chunk) + int2((local.x == 0) ? -1 : 1, 0));
-            const uint coarse = 1u << nl;
-            if ((nl != 0xFF) && (nl > gTerrain.lod) && ((F.y % coarse) != 0)) {
-                const uint z0 = (F.y / coarse) * coarse;
-                hc = lerp(surfacePoint(float2(F.x, z0) / sub, latticeW, latticeH), surfacePoint(float2(F.x, z0 + coarse) / sub, latticeW, latticeH), float(F.y - z0) / float(coarse));
+            if ((nl != 0xFF) && (nl > gTerrain.lod)) {
+                S.y = (F.y >> nl) << nl;
             }
         }
 
         if ((local.y == 0) || (local.y == chunkFine)) {
             const uint nl = chunkLod(int2(chunk) + int2(0, (local.y == 0) ? -1 : 1));
-            const uint coarse = 1u << nl;
-            if ((nl != 0xFF) && (nl > gTerrain.lod) && ((F.x % coarse) != 0)) {
-                const uint x0 = (F.x / coarse) * coarse;
-                hc = lerp(surfacePoint(float2(x0, F.y) / sub, latticeW, latticeH), surfacePoint(float2(x0 + coarse, F.y) / sub, latticeW, latticeH), float(F.x - x0) / float(coarse));
+            if ((nl != 0xFF) && (nl > gTerrain.lod)) {
+                S.x = (F.x >> nl) << nl;
             }
         }
 
+        uvLattice = float2(F) / float(gTerrain.sub);
+        f = float2(S) / float(gTerrain.sub);
+        const float4 hc = surfacePoint(f, latticeW, latticeH);
         h = hc.x;
         c = hc.yzw;
     }
@@ -199,7 +197,7 @@ void VSMain(uint vertexId : SV_VertexID, uint instanceId : SV_InstanceID,
     p.xy = (p.xy * gTerrain.screenScale) + gTerrain.screenOffset * p.w;
 
     // Texture rows run opposite to the cell's z, as the game maps its terrain tiles.
-    const float2 inCell = f * 0.25f - cellOrigin;
+    const float2 inCell = (gTerrain.water ? f : uvLattice) * 0.25f - cellOrigin;
     oPosition = p;
     oShade = float4(c, fogAlpha);
     oUV = float2(inCell.x, 1.0f - inCell.y);
