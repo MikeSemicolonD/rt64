@@ -25,6 +25,8 @@ namespace interop {
         float4 prevViewport;
         // History valid (0/1), distance tolerance (fraction), weight of the new frame, unused.
         float4 temporal;
+        // Horizon mirror: the water's up axis in camera space (xyz) and the mirror's strength (w, 0 = off).
+        float4 mirrorUp;
     };
 #ifdef HLSL_CPU
 };

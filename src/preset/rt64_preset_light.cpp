@@ -28,6 +28,10 @@ namespace interop {
             { "flickerIntensity", l.flickerIntensity },
             { "groupBits", l.groupBits }
         };
+
+        if ((l.rectSize.x > 0.0f) && (l.rectSize.y > 0.0f)) {
+            j["rectSize"] = { float(l.rectSize.x), float(l.rectSize.y) };
+        }
     }
 
     void from_json(const json &j, PointLight &l) {
@@ -43,6 +47,8 @@ namespace interop {
         l.attenuationExponent = j.value("attenuationExponent", 1.0f);
         l.flickerIntensity = j.value("flickerIntensity", 0.0f);
         l.groupBits = j.value("groupBits", 1UL);
+        const std::array<float, 2> rect = j.value("rectSize", std::array<float, 2>{ 0.0f, 0.0f });
+        l.rectSize = hlslpp::float2(rect[0], rect[1]);
     }
 };
 
@@ -445,6 +451,7 @@ namespace RT64 {
         ImGui::DragFloat3("Diffuse color", &lightDesc.diffuseColor.x, 0.01f);
         ImGui::DragFloat("Attenuation radius", &lightDesc.attenuationRadius, 1.0f, 0.0f, FLT_MAX);
         ImGui::DragFloat("Point radius", &lightDesc.pointRadius, 1.0f, 0.0f, FLT_MAX);
+        ImGui::DragFloat2("Panel size", &lightDesc.rectSize.x, 1.0f, 0.0f, FLT_MAX);
         ImGui::DragFloat("Spot maximum cosine", &lightDesc.spotMaxCosine, 0.005f, -1.0f, 1.0f);
         ImGui::DragFloat("Spot falloff cosine", &lightDesc.spotFalloffCosine, 0.005f, -1.0f, lightDesc.spotMaxCosine);
         ImGui::DragFloat3("Specular color", &lightDesc.specularColor.x, 0.01f);

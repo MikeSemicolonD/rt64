@@ -272,8 +272,11 @@ bool rs64ScreenHit(float3 q, out float3 rgb) {
 // The direction meets the dome where the game drew it (skyDome, slid down as the camera climbs), not at its point at infinity: projecting that
 // shifted the reflected sky with altitude and lost it below the dome's edge.
 // Without a drawn or traced dome (the game culls it while the camera looks down), the frame's sky bands by the direction's height over the water (up).
+// at: where the direction meets the screen (final ndc, before the search for sky above), w = 1 when it is on screen; the horizon mirror looks it up
+// again in the finished frame.
 static const uint kSkySearchSteps = 8;
-bool rs64ScreenSky(float3 d, float3 up, out float3 rgb) {
+bool rs64ScreenSkyAt(float3 d, float3 up, out float3 rgb, out float3 at) {
+    at = float3(0.0f, 0.0f, 0.0f);
     rgb = lerp(gShadows.skyHorizon.rgb, gShadows.skyZenith.rgb, saturate(dot(d, up)));
     float4 c = mul(gShadows.screenFromView, float4(d, 0.0f));
 
@@ -303,6 +306,7 @@ bool rs64ScreenSky(float3 d, float3 up, out float3 rgb) {
 
     c.xy = clamp(dir, -1.0f, 1.0f);
     c.w = 1.0f;
+    at = float3(c.xy, (off <= 0.0f) ? 1.0f : 0.0f);
     const float stepY = (1.0f - c.y) / float(kSkySearchSteps);
     [loop]
     for (uint k = 0; k <= kSkySearchSteps; k++) {
@@ -317,6 +321,11 @@ bool rs64ScreenSky(float3 d, float3 up, out float3 rgb) {
 
     rgb = lerp(rgb, offSky, off);
     return true;
+}
+
+bool rs64ScreenSky(float3 d, float3 up, out float3 rgb) {
+    float3 at;
+    return rs64ScreenSkyAt(d, up, rgb, at);
 }
 
 // Debug 10's hit instance colour: red drawn, green terrain, blue cutout, white emissive, grey history (water also shows yellow translucent hits).
@@ -371,9 +380,12 @@ bool rs64FloorReceiver(float3 n) {
 #ifdef RS64_SHADOW_SOFT
 
 // Mask (shadow, blur radius px, view distance code = distance / 64 or 65000 for sky, AO) and indirect light (GI + reflection rgb, reflection luminance).
+// The third target is the horizon mirror's: for water whose reflection ray missed, where its sky was looked up on screen (final ndc xy), its weight in
+// the water and that sky colour (rgb8 as an integer-valued float). RS64WaterMirrorPS swaps it for what the finished frame draws there.
 struct RS64TraceOut {
     float4 mask : SV_TARGET0;
     float4 indirect : SV_TARGET1;
+    float4 mirror : SV_TARGET2;
 };
 
 RS64TraceOut PSMain(in float4 pos : SV_Position, in float2 uv : TEXCOORD0) {
@@ -381,6 +393,7 @@ RS64TraceOut PSMain(in float4 pos : SV_Position, in float2 uv : TEXCOORD0) {
     RS64TraceOut o;
     o.mask = float4(0.0f, 0.0f, rc.sky ? 65000.0f : (rc.dist / 64.0f), 0.0f);
     o.indirect = float4(0.0f, 0.0f, 0.0f, 0.0f);
+    o.mirror = float4(0.0f, 0.0f, 0.0f, 0.0f);
     if (rc.sky || rs64EmissiveReceiver(rc)) {
         return o;
     }
@@ -504,6 +517,8 @@ RS64TraceOut PSMain(in float4 pos : SV_Position, in float2 uv : TEXCOORD0) {
     float3 refl = float3(0.0f, 0.0f, 0.0f);
     float3 waterR = float3(0.0f, 0.0f, 0.0f);
     float waterF = 0.0f;
+    float3 missAt = float3(0.0f, 0.0f, 0.0f);
+    float3 missSky = float3(0.0f, 0.0f, 0.0f);
     [loop]
     for (uint g = 0; g < giCount + reflCount; g++) {
         const bool isRefl = (g >= giCount);
@@ -524,8 +539,9 @@ RS64TraceOut PSMain(in float4 pos : SV_Position, in float2 uv : TEXCOORD0) {
         if (!hitAny) {
             // Water whose ray hits nothing reflects the sky as the frame draws it there (the dome is not traced), or the haze where none is drawn.
             float3 sky;
-            if (isRefl && waterRefl && (gShadows.skyZenith.w > 0.0f) && rs64ScreenSky(r.Direction, n, sky)) {
+            if (isRefl && waterRefl && (gShadows.skyZenith.w > 0.0f) && rs64ScreenSkyAt(r.Direction, n, sky, missAt)) {
                 waterR = sky;
+                missSky = sky;
                 waterF = saturate(rs64Schlick(saturate(dot(-v, n)), 0.02f) * kWaterReflStrength) * rc.waterCover * gShadows.skyZenith.w;
                 if (gShadows.debugMode == 9) {
                     refl += sky;
@@ -632,6 +648,11 @@ RS64TraceOut PSMain(in float4 pos : SV_Position, in float2 uv : TEXCOORD0) {
 
     // Negative alpha marks a water mix and carries its -F; otherwise it is the reflection luminance (debug 8).
     o.indirect = float4(indirect, waterMix ? -max(waterF, 1.0e-4f) : dot(refl, float3(0.3f, 0.59f, 0.11f)));
+    if (waterMix && (missAt.z > 0.0f)) {
+        const uint3 s8 = uint3(saturate(missSky) * 255.0f + 0.5f);
+        o.mirror = float4(missAt.xy, waterF * (1.0f - fogHere), float(s8.r | (s8.g << 8) | (s8.b << 16)));
+    }
+
     return o;
 }
 

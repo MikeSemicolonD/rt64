@@ -22,6 +22,8 @@ namespace interop {
         float attenuationExponent;
         float flickerIntensity;
         uint groupBits;
+        // RS64: width and height of a glowing panel facing along direction; 0 = a point light.
+        float2 rectSize;
     };
 #ifdef HLSL_CPU
 };

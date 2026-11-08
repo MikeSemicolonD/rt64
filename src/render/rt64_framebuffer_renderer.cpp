@@ -1770,6 +1770,10 @@ namespace RT64 {
                         rs64TimingMark(worker, RS64TimeLights);
                     }
                 }
+
+                if (framebuffer.rs64MirrorOn && framebuffer.rs64ShadowsOn && rs64Shadow.ready && (targetDrawCall.rs64MirrorAfterScene == static_cast<int32_t>(pair.first))) {
+                    recordRS64Mirror(worker, framebuffer, depthState);
+                }
             }
         }
     }
@@ -1796,10 +1800,6 @@ namespace RT64 {
         return r;
     }
 
-    // Two projections show the same 3D view when their raw view and projection matrices and their N64 viewport match (the radar shares the matrices but not the viewport).
-    // ignoreProj: camera-space positions only need the same camera; the player craft is drawn under its own projection (nearer clip) in the same view.
-    static bool rs64SameView(const DrawData &drawData, uint32_t a, uint32_t b, bool ignoreProj = false) {
-        const size_t n = std::min({ drawData.viewTransforms.size(), drawData.projTransforms.size(), drawData.rspViewports.size() });
     // Whether the traced passes have terrain normals this frame. The constants are filled before the scene build makes them for a new map, so without the
     // pending build a map's first frame traced no terrain or water (the opening Calamari cutscene lost its reflections for a frame).
     template <typename Scene>
@@ -1807,6 +1807,10 @@ namespace RT64 {
         return s.terrainNormalGpu || (s.terrainActive && s.terrainMap && (s.terrainBuiltVersion != s.terrainMap->version));
     }
 
+    // Two projections show the same 3D view when their raw view and projection matrices and their N64 viewport match (the radar shares the matrices but not the viewport).
+    // ignoreProj: camera-space positions only need the same camera; the player craft is drawn under its own projection (nearer clip) in the same view.
+    static bool rs64SameView(const DrawData &drawData, uint32_t a, uint32_t b, bool ignoreProj = false) {
+        const size_t n = std::min({ drawData.viewTransforms.size(), drawData.projTransforms.size(), drawData.rspViewports.size() });
         if ((a >= n) || (b >= n)) {
             return false;
         }
@@ -1838,6 +1842,8 @@ namespace RT64 {
             framebufferVector.back().descDummyFbSet = std::make_unique<FramebufferRendererDescriptorFramebufferSet>(p.worker->device);
             framebufferVector.back().rs64LightsBuffer = p.worker->device->createBuffer(RenderBufferDesc::UploadBuffer(sizeof(interop::RS64LightsCB), RenderBufferFlag::CONSTANT));
             framebufferVector.back().rs64LightsSet = std::make_unique<RS64LightsDescriptorSet>(p.worker->device);
+            framebufferVector.back().rs64PanelsBuffer = p.worker->device->createBuffer(RenderBufferDesc::UploadBuffer(sizeof(interop::RS64LightsCB), RenderBufferFlag::CONSTANT));
+            framebufferVector.back().rs64PanelsSet = std::make_unique<RS64LightsDescriptorSet>(p.worker->device);
             if (p.worker->device->getCapabilities().rayQuery) {
                 framebufferVector.back().rs64ShadowsBuffer = p.worker->device->createBuffer(RenderBufferDesc::UploadBuffer(sizeof(interop::RS64ShadowsCB), RenderBufferFlag::CONSTANT));
                 framebufferVector.back().rs64ShadowsSet = std::make_unique<RS64TracedDescriptorSet>(p.worker->device);
@@ -1847,6 +1853,7 @@ namespace RT64 {
                 framebufferVector.back().rs64BlurHSet = std::make_unique<RS64ShadowBlurDescriptorSet>(p.worker->device);
                 framebufferVector.back().rs64BlurVSet = std::make_unique<RS64ShadowBlurDescriptorSet>(p.worker->device);
                 framebufferVector.back().rs64TemporalSet = std::make_unique<RS64ShadowTemporalDescriptorSet>(p.worker->device);
+                framebufferVector.back().rs64MirrorSet = std::make_unique<RS64WaterMirrorDescriptorSet>(p.worker->device);
                 framebufferVector.back().rs64BlurHBuffer = p.worker->device->createBuffer(RenderBufferDesc::UploadBuffer(sizeof(interop::RS64ShadowBlurCB), RenderBufferFlag::CONSTANT));
                 framebufferVector.back().rs64BlurVBuffer = p.worker->device->createBuffer(RenderBufferDesc::UploadBuffer(sizeof(interop::RS64ShadowBlurCB), RenderBufferFlag::CONSTANT));
             }
@@ -1930,6 +1937,7 @@ namespace RT64 {
 
         targetDrawCall.rasterScenes.clear();
         targetDrawCall.rs64LightsAfterScene = -1;
+        targetDrawCall.rs64MirrorAfterScene = -1;
 
 #   if RT_ENABLED
         RaytracingScene rtScene;
@@ -2136,6 +2144,7 @@ namespace RT64 {
         }
         bool lightsSawPersp = false;
         bool lightsSplit = false;
+        bool mirrorSplit = false;
         bool lightsHaveProj = false;
         uint32_t lightsTransformsIndex = 0;
         hlslpp::float2 lightsScreenScale = { 1.0f, 1.0f };
@@ -2150,6 +2159,13 @@ namespace RT64 {
                 checkRasterScene(rasterScene);
                 targetDrawCall.rs64LightsAfterScene = static_cast<int32_t>(targetDrawCall.rasterScenes.size()) - 1;
                 lightsSplit = true;
+            }
+
+            // The horizon mirror goes after the view's last fragment, once its effect sprites and late craft are drawn.
+            if (lightsSplit && !mirrorSplit && (pr > lightsLastIndex)) {
+                checkRasterScene(rasterScene);
+                targetDrawCall.rs64MirrorAfterScene = static_cast<int32_t>(targetDrawCall.rasterScenes.size()) - 1;
+                mirrorSplit = true;
             }
             lightsSawPersp = lightsSawPersp || (pr == lightsProjIndex);
 
@@ -2557,6 +2573,10 @@ namespace RT64 {
         if (postWanted && lightsSawPersp && !lightsSplit) {
             targetDrawCall.rs64LightsAfterScene = static_cast<int32_t>(targetDrawCall.rasterScenes.size()) - 1;
         }
+
+        if (!mirrorSplit) {
+            targetDrawCall.rs64MirrorAfterScene = static_cast<int32_t>(targetDrawCall.rasterScenes.size()) - 1;
+        }
         const int32_t lightsScene = targetDrawCall.rs64LightsAfterScene;
         const bool lightsFilled = lightsWanted && (lightsScene >= 0) && lightsHaveProj && fillRS64Lights(p, framebuffer, lightsTransformsIndex, lightsScreenScale, lightsScreenOffset);
         bool shadowsFilled = false;
@@ -2820,6 +2840,10 @@ namespace RT64 {
         framebuffer.rs64Target = p.fbStorage->colorTarget;
         if (!lightsFilled && !shadowsFilled && !fogFilled) {
             targetDrawCall.rs64LightsAfterScene = -1;
+        }
+
+        if (!shadowsFilled) {
+            framebuffer.rs64MirrorOn = false;
         }
         if (lightsCfg.log) {
             static uint32_t s_n[2] = {};
@@ -3097,6 +3121,37 @@ namespace RT64 {
             }
             r.spotMaxCos = l.spotMaxCosine;
             r.spotFalloffCos = l.spotFalloffCosine;
+
+            // A panel: width along the horizontal axis across its facing (X when it faces straight up or down), height across both.
+            if ((l.rectSize.x > 0.0f) && (l.rectSize.y > 0.0f) && (dirLen > 1e-12f)) {
+                const float dl = std::sqrt(d[0] * d[0] + d[1] * d[1] + d[2] * d[2]);
+                const float n[3] = { d[0] / dl, d[1] / dl, d[2] / dl };
+                float u[3] = { -n[2], 0.0f, n[0] };
+                const float ul = std::sqrt(u[0] * u[0] + u[2] * u[2]);
+
+                if (ul < 1e-4f) {
+                    u[0] = 1.0f;
+                    u[2] = 0.0f;
+                }
+                else {
+                    u[0] /= ul;
+                    u[2] /= ul;
+                }
+
+                const float v[3] = { n[1] * u[2] - n[2] * u[1], n[2] * u[0] - n[0] * u[2], n[0] * u[1] - n[1] * u[0] };
+                const float hw = l.rectSize.x * 0.5f;
+                const float hh = l.rectSize.y * 0.5f;
+
+                for (int j = 0; j < 3; ++j) {
+                    const float a[3] = { u[0] * hw, u[1] * hw, u[2] * hw };
+                    const float b[3] = { v[0] * hh, v[1] * hh, v[2] * hh };
+                    r.rectU[j] = originKnown ? (mapToCamera[j][0] * a[0] + mapToCamera[j][1] * a[1] + mapToCamera[j][2] * a[2]) : a[j];
+                    r.rectV[j] = originKnown ? (mapToCamera[j][0] * b[0] + mapToCamera[j][1] * b[1] + mapToCamera[j][2] * b[2]) : b[j];
+                }
+
+                r.spotMaxCos = 1.0f;
+            }
+
             r.flicker = l.flickerIntensity;
             // A level light's flicker sequence follows its place (stable while it isn't moved).
             r.seed = uint32_t(rs64lights::fnv1a64(reinterpret_cast<const uint8_t *>(m), sizeof(m)));
@@ -3158,6 +3213,8 @@ namespace RT64 {
             cb.lightColor[i] = { c.color[0], c.color[1], c.color[2], c.intensity * rs64lights::flickerGain(c.flicker, c.seed, flickerT) };
             cb.lightParams[i] = { c.falloff, c.shadowStart, c.spotMaxCos, c.spotFalloffCos };
             cb.lightSpot[i] = { c.dir[0], c.dir[1], c.dir[2], 0.0f };
+            cb.lightRectU[i] = { c.rectU[0], c.rectU[1], c.rectU[2], 0.0f };
+            cb.lightRectV[i] = { c.rectV[0], c.rectV[1], c.rectV[2], 0.0f };
         }
 
         void *bytes = framebuffer.rs64LightsBuffer->map();
@@ -3171,6 +3228,18 @@ namespace RT64 {
             framebuffer.rs64LightsShadowedSet->setTexture(framebuffer.rs64LightsShadowedSet->gColor, p.fbStorage->depthTarget->texture.get(), RenderTextureLayout::DEPTH_READ, p.fbStorage->depthTarget->textureView.get());
         }
         framebuffer.rs64LightsDebug = (cfg.debugMode != 0);
+
+        framebuffer.rs64Panels = (cfg.debugMode == 0) && std::any_of(chosen, chosen + count, [](const rs64lights::Resolved &r) { return (r.rectU[0] != 0.0f) || (r.rectU[1] != 0.0f) || (r.rectU[2] != 0.0f); });
+
+        if (framebuffer.rs64Panels) {
+            cb.debugMode = RS64_LIGHTS_PANEL_FACES;
+            bytes = framebuffer.rs64PanelsBuffer->map();
+            memcpy(bytes, &cb, sizeof(cb));
+            framebuffer.rs64PanelsBuffer->unmap();
+            framebuffer.rs64PanelsSet->setBuffer(framebuffer.rs64PanelsSet->gLights, framebuffer.rs64PanelsBuffer.get(), sizeof(interop::RS64LightsCB));
+            framebuffer.rs64PanelsSet->setTexture(framebuffer.rs64PanelsSet->gDepth, p.fbStorage->depthTarget->texture.get(), RenderTextureLayout::DEPTH_READ, p.fbStorage->depthTarget->textureView.get());
+        }
+
         return true;
     }
 
@@ -3262,6 +3331,13 @@ namespace RT64 {
             bcb.params = { cfg.shadows ? cfg.shadowStrength : 0.0f, 0.02f, (cfg.shadowsDebug >= 5) ? 1.0f : 0.0f, blurMax };
             bcb.aoParams = { cfg.aoStrength, (cfg.shadowsDebug >= 5) ? float(cfg.shadowsDebug) : 0.0f, 0.0f, 0.0f };
             fillRS64Temporal(p, framebuffer, transformsIndex, inv, bcb);
+            float waterUp[3];
+            framebuffer.rs64MirrorOn = (cfg.reflMirror > 0.0f) && !framebuffer.rs64NewView && (cfg.shadowsDebug == 0) && rs64Shadow.terrainActive
+                && (rs64Shadow.terrainWaterPrim > 0) && rs64lights::affinePlaneNormalY(rs64Shadow.terrainTransform, waterUp);
+            if (framebuffer.rs64MirrorOn) {
+                bcb.mirrorUp = { waterUp[0], waterUp[1], waterUp[2], cfg.reflMirror };
+            }
+
             bcb.texelDir = { 1.0f, 0.0f };
             memcpy(framebuffer.rs64BlurHBuffer->map(), &bcb, sizeof(bcb));
             framebuffer.rs64BlurHBuffer->unmap();
@@ -3288,6 +3364,24 @@ namespace RT64 {
             vs.setBuffer(vs.gBlur, framebuffer.rs64BlurVBuffer.get(), sizeof(interop::RS64ShadowBlurCB));
             vs.setTexture(vs.gDepth, p.fbStorage->depthTarget->texture.get(), RenderTextureLayout::DEPTH_READ, p.fbStorage->depthTarget->textureView.get());
             vs.setTexture(vs.gMask, framebuffer.rs64SoftPing.get(), RenderTextureLayout::SHADER_READ);
+            if (framebuffer.rs64MirrorOn) {
+                const RenderTarget *ct = p.fbStorage->colorTarget;
+                if (!framebuffer.rs64MirrorLate || (framebuffer.rs64MirrorW != ct->width) || (framebuffer.rs64MirrorH != ct->height) || (framebuffer.rs64MirrorFormat != ct->format)) {
+                    framebuffer.rs64MirrorLate = p.worker->device->createTexture(RenderTextureDesc::ColorTarget(ct->width, ct->height, ct->format));
+                    framebuffer.rs64MirrorW = ct->width;
+                    framebuffer.rs64MirrorH = ct->height;
+                    framebuffer.rs64MirrorFormat = ct->format;
+                }
+
+                RS64WaterMirrorDescriptorSet &ms = *framebuffer.rs64MirrorSet;
+                ms.setBuffer(ms.gBlur, framebuffer.rs64BlurVBuffer.get(), sizeof(interop::RS64ShadowBlurCB));
+                ms.setTexture(ms.gDepth, p.fbStorage->depthTarget->texture.get(), RenderTextureLayout::DEPTH_READ, p.fbStorage->depthTarget->textureView.get());
+                ms.setTexture(ms.gMirror, framebuffer.rs64SoftMirror.get(), RenderTextureLayout::SHADER_READ);
+                ms.setTexture(ms.gLate, framebuffer.rs64MirrorLate.get(), RenderTextureLayout::SHADER_READ);
+            }
+        }
+        else {
+            framebuffer.rs64MirrorOn = false;
         }
         return true;
     }
@@ -3586,9 +3680,10 @@ namespace RT64 {
         framebuffer.rs64SoftPing = worker->device->createTexture(RenderTextureDesc::ColorTarget(width, height, RenderFormat::R16G16B16A16_FLOAT));
         framebuffer.rs64SoftIndirect = worker->device->createTexture(RenderTextureDesc::ColorTarget(width, height, RenderFormat::R16G16B16A16_FLOAT));
         framebuffer.rs64SoftIndirectPing = worker->device->createTexture(RenderTextureDesc::ColorTarget(width, height, RenderFormat::R16G16B16A16_FLOAT));
-        const RenderTexture *maskTargets[] = { framebuffer.rs64SoftMask.get(), framebuffer.rs64SoftIndirect.get() };
+        framebuffer.rs64SoftMirror = worker->device->createTexture(RenderTextureDesc::ColorTarget(width, height, RenderFormat::R32G32B32A32_FLOAT));
+        const RenderTexture *maskTargets[] = { framebuffer.rs64SoftMask.get(), framebuffer.rs64SoftIndirect.get(), framebuffer.rs64SoftMirror.get() };
         const RenderTexture *pingTargets[] = { framebuffer.rs64SoftPing.get(), framebuffer.rs64SoftIndirectPing.get() };
-        framebuffer.rs64SoftMaskFb = worker->device->createFramebuffer(RenderFramebufferDesc(maskTargets, 2));
+        framebuffer.rs64SoftMaskFb = worker->device->createFramebuffer(RenderFramebufferDesc(maskTargets, 3));
         framebuffer.rs64SoftPingFb = worker->device->createFramebuffer(RenderFramebufferDesc(pingTargets, 2));
         for (uint32_t k = 0; k < 2; k++) {
             framebuffer.rs64HistFb[k].reset();
@@ -3628,12 +3723,14 @@ namespace RT64 {
             // The trace reads the colour target for screen-space water reflections; it is written again by the compose.
             RenderTexture *color = targetDrawCall.fbStorage->colorTarget->texture.get();
             const RenderTextureBarrier toMask[] = {
-                RenderTextureBarrier(mask, RenderTextureLayout::COLOR_WRITE), RenderTextureBarrier(ind, RenderTextureLayout::COLOR_WRITE), RenderTextureBarrier(color, RenderTextureLayout::SHADER_READ)
+                RenderTextureBarrier(mask, RenderTextureLayout::COLOR_WRITE), RenderTextureBarrier(ind, RenderTextureLayout::COLOR_WRITE), RenderTextureBarrier(color, RenderTextureLayout::SHADER_READ),
+                RenderTextureBarrier(framebuffer.rs64SoftMirror.get(), RenderTextureLayout::COLOR_WRITE)
             };
             worker->commandList->barriers(RenderBarrierStage::GRAPHICS, toMask, uint32_t(std::size(toMask)));
             worker->commandList->setFramebuffer(framebuffer.rs64SoftMaskFb.get());
             worker->commandList->clearColor(0, RenderColor(0.0f, 0.0f, 0.0f, 0.0f));
             worker->commandList->clearColor(1, RenderColor(0.0f, 0.0f, 0.0f, 0.0f));
+            worker->commandList->clearColor(2, RenderColor(0.0f, 0.0f, 0.0f, 0.0f));
             worker->commandList->setViewports(v);
             worker->commandList->setScissors(sc);
             worker->commandList->setPipeline(shaderLibrary->rs64ShadowsSoft.pipeline.get());
@@ -3803,6 +3900,7 @@ namespace RT64 {
         cb.strength = cfg.fogShaftsStrength;
         cb.fogMul = fog.mul;
         cb.fogOffset = fog.offset;
+        cb.fogTail = fog.tailEnd;
         cb.tMin = cfg.shadowTMin;
         cb.tMax = cfg.shadowTMax;
         cb.terrainTMinScale = cfg.shadowTerrainTMin;
@@ -3817,6 +3915,40 @@ namespace RT64 {
         framebuffer.rs64FogSet->setTexture(framebuffer.rs64FogSet->gColor, p.fbStorage->depthTarget->texture.get(), RenderTextureLayout::DEPTH_READ, p.fbStorage->depthTarget->textureView.get());
         framebuffer.rs64FogDebug = (cfg.fogShaftsDebug != 0);
         return true;
+    }
+
+    // Horizon mirror: copies the colour target after the view's last draw, then swaps the sky missed water rays reflected for what is drawn there now.
+    void FramebufferRenderer::recordRS64Mirror(RenderWorker *worker, const Framebuffer &framebuffer, bool &depthState) {
+
+        const RenderTargetDrawCall &targetDrawCall = framebuffer.renderTargetDrawCall;
+        RenderTexture *color = targetDrawCall.fbStorage->colorTarget->texture.get();
+        RenderTexture *copy = framebuffer.rs64MirrorLate.get();
+        const RenderTextureBarrier toCopy[] = { RenderTextureBarrier(color, RenderTextureLayout::COPY_SOURCE), RenderTextureBarrier(copy, RenderTextureLayout::COPY_DEST) };
+
+        worker->commandList->barriers(RenderBarrierStage::COPY, toCopy, uint32_t(std::size(toCopy)));
+        worker->commandList->copyTexture(copy, color);
+
+        const RenderTextureBarrier toDraw[] = {
+            RenderTextureBarrier(color, RenderTextureLayout::COLOR_WRITE), RenderTextureBarrier(copy, RenderTextureLayout::SHADER_READ),
+            RenderTextureBarrier(framebuffer.rs64SoftMirror.get(), RenderTextureLayout::SHADER_READ)
+        };
+
+        worker->commandList->barriers(RenderBarrierStage::GRAPHICS, toDraw, uint32_t(std::size(toDraw)));
+        submitDepthAccess(worker, targetDrawCall.fbStorage, true, depthState);
+        worker->commandList->setFramebuffer(targetDrawCall.fbStorage->colorWriteDepthRead.get());
+
+        const RenderViewport &v = framebuffer.viewport;
+
+        worker->commandList->setViewports(v);
+        worker->commandList->setScissors(RenderRect(int32_t(v.x), int32_t(v.y), int32_t(v.x + v.width), int32_t(v.y + v.height)));
+        worker->commandList->setVertexBuffers(0, nullptr, 0, nullptr);
+
+        for (const ShaderRecord *rec : { &shaderLibrary->rs64WaterMirror, &shaderLibrary->rs64WaterMirrorNeg }) {
+            worker->commandList->setPipeline(rec->pipeline.get());
+            worker->commandList->setGraphicsPipelineLayout(rec->pipelineLayout.get());
+            worker->commandList->setGraphicsDescriptorSet(framebuffer.rs64MirrorSet->get(), 0);
+            worker->commandList->drawInstanced(3, 1, 0, 0);
+        }
     }
 
     void FramebufferRenderer::recordRS64FogShafts(RenderWorker *worker, const Framebuffer &framebuffer, bool &depthState) {
@@ -3853,7 +3985,6 @@ namespace RT64 {
     // Texture packs for the terrain pass: a layer the loaded pack replaces goes to the texture cache under RT64's own hash (the cache
     // finds and streams the replacement), then each frame takes the replacement's texture index (the pass samples it in RS64TerrainPS).
     void FramebufferRenderer::rs64TerrainTextures(TextureCache *textureCache, uint64_t submissionFrame) {
-        cb.fogTail = fog.tailEnd;
         RS64TerrainGPU &g = rs64TerrainGpu;
         g.layerReplaced.assign(g.layerHash.size(), UINT32_MAX);
         if (textureSlots || !textureCacheReplacementMapEnabled || g.layerHash.empty()) {
@@ -4667,6 +4798,13 @@ namespace RT64 {
         }
         worker->commandList->setVertexBuffers(0, nullptr, 0, nullptr);
         worker->commandList->drawInstanced(3, 1, 0, 0);
+
+        if (framebuffer.rs64Panels) {
+            worker->commandList->setPipeline(shaderLibrary->rs64LightsDebug.pipeline.get());
+            worker->commandList->setGraphicsPipelineLayout(shaderLibrary->rs64LightsDebug.pipelineLayout.get());
+            worker->commandList->setGraphicsDescriptorSet(framebuffer.rs64PanelsSet->get(), 0);
+            worker->commandList->drawInstanced(3, 1, 0, 0);
+        }
     }
 
     void FramebufferRenderer::endFramebuffers(RenderWorker *worker, const DrawBuffers *drawBuffers, const OutputBuffers *outputBuffers, bool rtEnabled) {

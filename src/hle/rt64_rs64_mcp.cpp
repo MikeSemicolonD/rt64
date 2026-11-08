@@ -546,6 +546,9 @@ namespace RT64 {
                 if (r.projectile) l["projectile"] = true;
                 if (r.lampGated) l["lamp_gated"] = true;
                 if (r.flicker > 0.0f) l["flicker"] = r.flicker;
+                if ((r.rectU[0] != 0.0f) || (r.rectU[1] != 0.0f) || (r.rectU[2] != 0.0f)) {
+                    l["panel"] = { { "half_u", { r.rectU[0], r.rectU[1], r.rectU[2] } }, { "half_v", { r.rectV[0], r.rectV[1], r.rectV[2] } }, { "facing", { r.dir[0], r.dir[1], r.dir[2] } } };
+                }
                 if (r.spotMaxCos < 1.0f) {
                     l["spot"] = { { "dir", { r.dir[0], r.dir[1], r.dir[2] } }, { "max_cos", r.spotMaxCos }, { "falloff_cos", r.spotFalloffCos } };
                 }

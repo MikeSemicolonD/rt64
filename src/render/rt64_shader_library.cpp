@@ -23,6 +23,8 @@
 #   include "shaders/RS64ShadowBlurVPS.hlsl.spirv.h"
 #   include "shaders/RS64ShadowBlurWaterPS.hlsl.spirv.h"
 #   include "shaders/RS64ShadowTemporalPS.hlsl.spirv.h"
+#   include "shaders/RS64WaterMirrorPS.hlsl.spirv.h"
+#   include "shaders/RS64WaterMirrorNegPS.hlsl.spirv.h"
 #endif
 #include "shaders/FbChangesDrawDepthPS.hlsl.spirv.h"
 #include "shaders/FbReadAnyChangesCS.hlsl.spirv.h"
@@ -83,6 +85,8 @@
 #   include "shaders/RS64ShadowBlurVPS.hlsl.dxil.h"
 #   include "shaders/RS64ShadowBlurWaterPS.hlsl.dxil.h"
 #   include "shaders/RS64ShadowTemporalPS.hlsl.dxil.h"
+#   include "shaders/RS64WaterMirrorPS.hlsl.dxil.h"
+#   include "shaders/RS64WaterMirrorNegPS.hlsl.dxil.h"
 #   include "shaders/FbChangesDrawDepthPS.hlsl.dxil.h"
 #   include "shaders/FbReadAnyChangesCS.hlsl.dxil.h"
 #   include "shaders/FbReadAnyFullCS.hlsl.dxil.h"
@@ -982,16 +986,19 @@ namespace RT64 {
             std::unique_ptr<RenderShader> softShader = device->createShader(CREATE_SHADER_INPUTS(RS64ShadowsSoftPSBlobDXIL, RS64ShadowsSoftPSBlobSPIRV, RS64ShadowsSoftPSBlobSPIRV, "PSMain", shaderFormat));
             RenderGraphicsPipelineDesc maskDesc = pipelineDesc;
             maskDesc.pixelShader = softShader.get();
-            // Two targets: mask (shadow, radius, distance code, AO) and indirect light (GI + reflections rgb).
-            maskDesc.renderTargetCount = 2;
+            // Three targets: mask (shadow, radius, distance code, AO), indirect light (GI + reflections rgb) and the horizon mirror's (RS64TraceOut).
+            maskDesc.renderTargetCount = 3;
             maskDesc.renderTargetFormat[0] = RenderFormat::R16G16B16A16_FLOAT;
             maskDesc.renderTargetFormat[1] = RenderFormat::R16G16B16A16_FLOAT;
+            maskDesc.renderTargetFormat[2] = RenderFormat::R32G32B32A32_FLOAT;
             maskDesc.multisampling = RenderMultisampling();
             maskDesc.depthTargetFormat = RenderFormat::UNKNOWN;
             maskDesc.renderTargetBlend[0] = RenderBlendDesc::Copy();
             maskDesc.renderTargetBlend[1] = RenderBlendDesc::Copy();
+            maskDesc.renderTargetBlend[2] = RenderBlendDesc::Copy();
             maskDesc.pipelineLayout = rs64ShadowsSoft.pipelineLayout.get();
             rs64ShadowsSoft.pipeline = device->createGraphicsPipeline(maskDesc);
+            maskDesc.renderTargetCount = 2;
 
             RS64ShadowBlurDescriptorSet blurSet;
             auto blurLayout = [&]() {
@@ -1047,6 +1054,29 @@ namespace RT64 {
             compDesc.renderTargetBlend[0] = RenderBlendDesc::Copy();
             compDesc.pipelineLayout = rs64ShadowBlurVDebug.pipelineLayout.get();
             rs64ShadowBlurVDebug.pipeline = device->createGraphicsPipeline(compDesc);
+
+            // Horizon mirror after the view's late draws: the signed difference as an add (dst + src) and a reverse subtract (dst - src), alpha kept.
+            RS64WaterMirrorDescriptorSet mirrorSet;
+            auto mirrorLayout = [&]() {
+                layoutBuilder.begin();
+                layoutBuilder.addDescriptorSet(mirrorSet);
+                layoutBuilder.end();
+                return layoutBuilder.create(device);
+            };
+            rs64WaterMirror.pipelineLayout = mirrorLayout();
+            rs64WaterMirrorNeg.pipelineLayout = mirrorLayout();
+            std::unique_ptr<RenderShader> mirrorShader = device->createShader(CREATE_SHADER_INPUTS(RS64WaterMirrorPSBlobDXIL, RS64WaterMirrorPSBlobSPIRV, RS64WaterMirrorPSBlobSPIRV, "PSMain", shaderFormat));
+            std::unique_ptr<RenderShader> mirrorNegShader = device->createShader(CREATE_SHADER_INPUTS(RS64WaterMirrorNegPSBlobDXIL, RS64WaterMirrorNegPSBlobSPIRV, RS64WaterMirrorNegPSBlobSPIRV, "PSMain", shaderFormat));
+            compDesc.pixelShader = mirrorShader.get();
+            compDesc.renderTargetBlend[0] = add;
+            compDesc.pipelineLayout = rs64WaterMirror.pipelineLayout.get();
+            rs64WaterMirror.pipeline = device->createGraphicsPipeline(compDesc);
+            RenderBlendDesc subtract = add;
+            subtract.blendOp = RenderBlendOperation::REV_SUBTRACT;
+            compDesc.pixelShader = mirrorNegShader.get();
+            compDesc.renderTargetBlend[0] = subtract;
+            compDesc.pipelineLayout = rs64WaterMirrorNeg.pipelineLayout.get();
+            rs64WaterMirrorNeg.pipeline = device->createGraphicsPipeline(compDesc);
 
             // Shadowed point lights: the light pass with one RayQuery per ranked light, same blends as rs64Lights.
             rs64LightsShadowed.pipelineLayout = tracedLayout();

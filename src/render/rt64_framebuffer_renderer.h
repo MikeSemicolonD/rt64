@@ -53,6 +53,8 @@ namespace RT64 {
         std::vector<RasterScene> rasterScenes;
         std::vector<SceneIndexPair> sceneIndices;
         int32_t rs64LightsAfterScene = -1;
+        // The horizon mirror runs after this scene (the view's last), once its effect sprites and late craft are drawn.
+        int32_t rs64MirrorAfterScene = -1;
 #   if RT_ENABLED
         std::vector<RaytracingScene> rtScenes;
 #   endif
@@ -158,6 +160,10 @@ namespace RT64 {
             RenderViewport viewport;
             std::unique_ptr<RenderBuffer> rs64LightsBuffer;
             std::unique_ptr<RS64LightsDescriptorSet> rs64LightsSet;
+            // Glowing panel faces: the lights CB in faces-only mode, drawn over the frame (the lights pass itself only tints it).
+            std::unique_ptr<RenderBuffer> rs64PanelsBuffer;
+            std::unique_ptr<RS64LightsDescriptorSet> rs64PanelsSet;
+            bool rs64Panels = false;
             bool rs64LightsDebug = false;
             std::unique_ptr<RenderBuffer> rs64ShadowsBuffer;
             std::unique_ptr<RS64TracedDescriptorSet> rs64ShadowsSet;
@@ -186,6 +192,14 @@ namespace RT64 {
             std::unique_ptr<RenderBuffer> rs64BlurHBuffer;
             std::unique_ptr<RenderBuffer> rs64BlurVBuffer;
             bool rs64ShadowsSoft = false;
+            // Horizon mirror: the trace's third target (where missed water rays found their sky, weight, sky colour) and the colour target after the view's last draw.
+            std::unique_ptr<RenderTexture> rs64SoftMirror;
+            std::unique_ptr<RenderTexture> rs64MirrorLate;
+            std::unique_ptr<RS64WaterMirrorDescriptorSet> rs64MirrorSet;
+            bool rs64MirrorOn = false;
+            uint32_t rs64MirrorW = 0;
+            uint32_t rs64MirrorH = 0;
+            RenderFormat rs64MirrorFormat = RenderFormat::UNKNOWN;
             // Temporal AO / indirect history (mask + indirect), two sets alternating: the pass writes rs64HistWrite and reads the other.
             std::unique_ptr<RenderTexture> rs64HistMask[2];
             std::unique_ptr<RenderTexture> rs64HistIndirect[2];
@@ -390,6 +404,7 @@ namespace RT64 {
         bool fillRS64Shadows(const DrawParams &p, Framebuffer &framebuffer, uint32_t transformsIndex, hlslpp::float2 screenScale, hlslpp::float2 screenOffset, const rs64lights::Sun &sun, const rs64lights::FogParams &fog);
         void fillRS64Temporal(const DrawParams &p, Framebuffer &framebuffer, uint32_t transformsIndex, const rs64lights::Mat4 &viewFromScreen, interop::RS64ShadowBlurCB &bcb);
         void recordRS64Shadows(RenderWorker *worker, const Framebuffer &framebuffer, bool &depthState);
+        void recordRS64Mirror(RenderWorker *worker, const Framebuffer &framebuffer, bool &depthState);
         void ensureRS64SoftTargets(RenderWorker *worker, Framebuffer &framebuffer, uint32_t width, uint32_t height);
         void buildRS64HitColors(const DrawParams &p, const std::vector<std::pair<rs64lights::IndexRange, uint32_t>> &terrainCalls, const float *floorUp);
         bool rs64ViewProj(const DrawParams &p, uint32_t transformsIndex, rs64lights::Mat4 &out);

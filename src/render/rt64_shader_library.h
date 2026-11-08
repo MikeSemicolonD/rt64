@@ -47,6 +47,8 @@ namespace RT64 {
         ShaderRecord rs64ShadowBlurVDebug;
         ShaderRecord rs64ShadowBlurWater;
         ShaderRecord rs64ShadowTemporal;
+        ShaderRecord rs64WaterMirror;
+        ShaderRecord rs64WaterMirrorNeg;
         ShaderRecord rs64LightsShadowed;
         ShaderRecord rs64LightsShadowedDebug;
         ShaderRecord rs64FogShafts;

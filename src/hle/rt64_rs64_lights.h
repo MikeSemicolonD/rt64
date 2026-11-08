@@ -75,6 +75,9 @@ namespace rs64lights {
         bool engine = false;
         // As Candidate, with dir in camera space.
         float dir[3] = { 0.0f, -1.0f, 0.0f };
+        // A glowing panel's half-width and half-height axes in camera space (it faces along dir); zero = a point light.
+        float rectU[3] = {};
+        float rectV[3] = {};
         float spotMaxCos = 1.0f;
         float spotFalloffCos = 1.0f;
         float flicker = 0.0f;
@@ -1601,6 +1604,8 @@ namespace rs64lights {
         float reflSky;
         // Blur radius (pixels at native resolution) of water reflections: one jittered ray per pixel speckles at reflection edges.
         float reflWaterBlurPx;
+        // Strength of the horizon mirror: water shows what is drawn after the trace (effect sprites, late craft) where it lies mirrored about the horizon.
+        float reflMirror;
         // Cast shadow strength on water (1 = as on ground): what the water reflects stays lit in a shadow.
         float waterShadow;
         // Slope strength of the water's wind ripples (0 = flat water).
@@ -1684,6 +1689,7 @@ namespace rs64lights {
             envFloat("ROGUESQ_RT_REFL_STRENGTH", 3.0f),
             std::max(envFloat("ROGUESQ_RT_REFL_SKY", 1.0f), 0.0f),
             std::max(envFloat("ROGUESQ_RT_REFL_WATER_BLUR", 3.0f), 0.0f),
+            std::clamp(envFloat("ROGUESQ_RT_REFL_MIRROR", 0.0f), 0.0f, 1.0f),
             std::clamp(envFloat("ROGUESQ_RT_WATER_SHADOW", 0.5f), 0.0f, 1.0f),
             std::clamp(envFloat("ROGUESQ_RT_WATER_RIPPLE", 1.0f), 0.0f, 4.0f),
             std::clamp(envFloat("ROGUESQ_RT_SUN_MIN_ELEVATION", 25.0f), 0.0f, 89.0f),
@@ -1931,9 +1937,6 @@ namespace rs64lights {
         return true;
     }
 
-    // RSPProcessCS vertex fog at a camera-space point; clip.w == 0 (the eye) takes the max(z, 0) == 0 limit. Mirrored by RS64FogShaftsPS.
-    inline float fogFactor(const Mat4& viewProj, const float q[3], float mul, float offset, float tailEnd = 0.0f) {
-        const float v[4] = { q[0], q[1], q[2], 1.0f };
     // Fog alpha from the linear fog value x (depth * mul + offset, over 255). With tailEnd past the knee the fog follows x to the knee, then thins
     // to full at x = tailEnd, for a fog-limited level drawn further than stock; 0 keeps the stock ramp. Mirrored by rs64FogCurve (rt64_rsp_fog.h).
     inline float fogCurve(float x, float tailEnd) {
@@ -1944,6 +1947,9 @@ namespace rs64lights {
         return std::clamp(x, 0.0f, 1.0f);
     }
 
+    // RSPProcessCS vertex fog at a camera-space point; clip.w == 0 (the eye) takes the max(z, 0) == 0 limit. Mirrored by RS64FogShaftsPS.
+    inline float fogFactor(const Mat4& viewProj, const float q[3], float mul, float offset, float tailEnd = 0.0f) {
+        const float v[4] = { q[0], q[1], q[2], 1.0f };
         float c[4];
         transform(v, viewProj, c);
         const float a = (c[3] > 1e-6f) ? ((std::max(c[2], 0.0f) / c[3]) * mul + offset) : offset;
@@ -2334,6 +2340,23 @@ namespace rs64lights {
         return m ? back : (p ? fwd : 0.0f);
     }
 
+    // The unit normal of the source's y = const plane under a 3x4 affine (TLAS layout): cofactor * (0, 1, 0) = column 2 x column 0, either sign.
+    inline bool affinePlaneNormalY(const float m[3][4], float out[3]) {
+        const float c0[3] = { m[0][0], m[1][0], m[2][0] };
+        const float c2[3] = { m[0][2], m[1][2], m[2][2] };
+        const float n[3] = { c2[1] * c0[2] - c2[2] * c0[1], c2[2] * c0[0] - c2[0] * c0[2], c2[0] * c0[1] - c2[1] * c0[0] };
+        const float len = std::sqrt(n[0] * n[0] + n[1] * n[1] + n[2] * n[2]);
+        if (len <= 0.0f) {
+            return false;
+        }
+
+        for (int i = 0; i < 3; ++i) {
+            out[i] = n[i] / len;
+        }
+
+        return true;
+    }
+
     // 3x4 affine (TLAS layout, out = M * [v, 1]) inverse; false when singular.
     inline bool affineInverse(const float m[3][4], float out[3][4]) {
         const float a = m[0][0], b = m[0][1], c = m[0][2];
@@ -2439,6 +2462,7 @@ namespace rs64lights {
         uint32_t tris = 0;
         float mul = 0.0f;
         float offset = 0.0f;
+        float tailEnd = 0.0f;
         float color[3] = {};
     };
 
@@ -2451,6 +2475,7 @@ namespace rs64lights {
         best.tris = tris;
         best.mul = mul;
         best.offset = offset;
+        best.tailEnd = tailEnd;
         best.color[0] = color[0];
         best.color[1] = color[1];
         best.color[2] = color[2];
@@ -2459,7 +2484,6 @@ namespace rs64lights {
     struct FogCache {
         uint64_t workloadId = UINT64_MAX;
         FogParams params;
-        float tailEnd = 0.0f;
     };
 
     // One fog per workload across its framebuffer pairs; a pair without a fogged main draw reuses the pick.
@@ -2472,7 +2496,6 @@ namespace rs64lights {
             c.params = pairPick;
         }
         return c.params;
-        best.tailEnd = tailEnd;
     }
 
     // Insertion of the k smallest distances, ascending; mirrored by RS64LightsPS.

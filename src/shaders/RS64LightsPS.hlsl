@@ -50,7 +50,37 @@ float4 PSMain(in float4 pos : SV_Position, in float2 uv : TEXCOORD0) : SV_TARGET
     }
 
     // Sky and cleared depth: the game pins the sky dome at depth 0x7FBF (~0.99805), just below the clear value.
-    if (depth >= 0.9980f) {
+    const bool sky = depth >= 0.9980f;
+
+    // Glowing panel faces (their own alpha-blended draw): seen from the front, where the view ray meets one before the scene.
+    if (gLights.debugMode == RS64_LIGHTS_PANEL_FACES) {
+        float3 glow = float3(0.0f, 0.0f, 0.0f);
+        float cover = 0.0f;
+        // The game's depths sit near 1 (a mid value can unproject behind the camera), so the view ray comes from one in that range.
+        const float3 eye = normalize(viewFromPixel(pos.xy, min(depth, 0.997f)));
+        const float sceneDist = sky ? 1e30f : length(p);
+        for (uint g = 0; g < gLights.lightCount; g++) {
+            const float3 ru = gLights.lightRectU[g].xyz;
+            const float3 rv = gLights.lightRectV[g].xyz;
+            const float3 face = gLights.lightSpot[g].xyz;
+            const float facing = dot(eye, face);
+            if ((dot(ru, ru) <= 0.0f) || (facing >= 0.0f)) {
+                continue;
+            }
+
+            const float3 c = gLights.lightPosRadius[g].xyz;
+            const float t = dot(c, face) / facing;
+            const float3 h = eye * t - c;
+            if ((t > 0.0f) && (t < sceneDist) && (abs(dot(h, ru)) <= dot(ru, ru)) && (abs(dot(h, rv)) <= dot(rv, rv))) {
+                glow += gLights.lightColor[g].rgb * gLights.lightColor[g].w;
+                cover = 1.0f;
+            }
+        }
+
+        return float4(saturate(glow), cover);
+    }
+
+    if (sky) {
         return float4(0.0f, 0.0f, 0.0f, 0.0f);
     }
 
@@ -104,7 +134,17 @@ float4 PSMain(in float4 pos : SV_Position, in float2 uv : TEXCOORD0) : SV_TARGET
     }
 #endif
     for (uint i = 0; i < gLights.lightCount; i++) {
-        const float3 toLight = gLights.lightPosRadius[i].xyz - p;
+        // A panel lights from its nearest point, one-sided along its facing.
+        const float3 ru = gLights.lightRectU[i].xyz;
+        const float3 rv = gLights.lightRectV[i].xyz;
+        const bool panel = dot(ru, ru) > 0.0f;
+        float3 lp = gLights.lightPosRadius[i].xyz;
+        if (panel) {
+            const float3 rel = p - lp;
+            lp += ru * clamp(dot(rel, ru) / dot(ru, ru), -1.0f, 1.0f) + rv * clamp(dot(rel, rv) / dot(rv, rv), -1.0f, 1.0f);
+        }
+
+        const float3 toLight = lp - p;
         const float dist = length(toLight);
         const float radius = gLights.lightPosRadius[i].w;
         if (dist >= radius) {
@@ -128,7 +168,10 @@ float4 PSMain(in float4 pos : SV_Position, in float2 uv : TEXCOORD0) : SV_TARGET
         // Spot cone as RT64's Lights.hlsli: lit where dot(surface -> light, beam) <= max cosine, fading out from the falloff cosine to it.
         float spot = 1.0f;
         const float maxCos = gLights.lightParams[i].z, fallCos = gLights.lightParams[i].w;
-        if (maxCos < 1.0f) {
+        if (panel) {
+            spot = saturate(dot(-toLight / max(dist, 1e-4f), gLights.lightSpot[i].xyz));
+        }
+        else if (maxCos < 1.0f) {
             const float d = dot(toLight / max(dist, 1e-4f), gLights.lightSpot[i].xyz);
             spot = (d > maxCos) ? 0.0f : ((maxCos - fallCos) > 1e-5f ? 1.0f - saturate((d - fallCos) / (maxCos - fallCos)) : 1.0f);
         }

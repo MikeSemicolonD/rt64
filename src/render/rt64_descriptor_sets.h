@@ -625,6 +625,26 @@ namespace RT64 {
         }
     };
 
+    struct RS64WaterMirrorDescriptorSet : RenderDescriptorSetBase {
+        uint32_t gBlur;
+        uint32_t gDepth;
+        uint32_t gMirror;
+        uint32_t gLate;
+
+        RS64WaterMirrorDescriptorSet(RenderDevice *device = nullptr) {
+            builder.begin();
+            gBlur = builder.addConstantBuffer(0);
+            gDepth = builder.addTexture(1);
+            gMirror = builder.addTexture(3);
+            gLate = builder.addTexture(4);
+            builder.end();
+
+            if (device != nullptr) {
+                create(device);
+            }
+        }
+    };
+
     struct RSPModifyDescriptorSet : RenderDescriptorSetBase {
         uint32_t srcModifyPos;
         uint32_t screenPos;
