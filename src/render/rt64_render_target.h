@@ -42,8 +42,8 @@ namespace RT64 {
         Framebuffer::Type type = Framebuffer::Type::None;
         hlslpp::float2 resolutionScale = { 1.0f, 1.0f };
 
-        // RS64: the configured resolution multiplier the target was last sized for (0 = not yet).
-        float rs64ConfigScale = 0.0f;
+        // RS64: the configured resolution scale the target was last sized for, x including the widescreen widening (0 = not yet).
+        hlslpp::float2 rs64ConfigScale = { 0.0f, 0.0f };
         uint32_t downsampleMultiplier = 1;
         int32_t misalignX = 0;
         int32_t invMisalignX = 0;

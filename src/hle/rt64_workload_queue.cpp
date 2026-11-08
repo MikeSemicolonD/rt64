@@ -490,17 +490,21 @@ namespace RT64 {
                     rtWidth = targetWidth;
                     rtHeight = targetHeight;
 
-                    // RS64: a target sized for another configured multiplier (window-integer scale changes with the screen mode) is rebuilt at this
-                    // one. Kept at its old, larger size, the frame would fill only its top-left and the rest would show an older frame. Keyed on the
-                    // configured multiplier, not fixedResScale, so the tall-target halving above can't rebuild a target between pairs of one frame.
-                    const float configScale = float(workloadConfig.resolutionScale.y);
+                    // RS64: a target sized for another configured scale (window-integer scale changes with the screen mode; x also carries the widescreen
+                    // widening, which drops from the boot intro's to 1.0 in the letterboxed cutscenes) is rebuilt at this one. Kept at its old, larger size,
+                    // the frame would fill only part of it and the rest would show an older frame. Keyed on the configured scale, not fixedResScale, so the
+                    // tall-target halving above can't rebuild a target between pairs of one frame.
+                    const hlslpp::float2 configScale = workloadConfig.resolutionScale;
                     auto dropOnScaleChange = [&](RenderTarget *t) {
                         if (t == nullptr)
                         {
                             return;
                         }
 
-                        if (!t->isEmpty() && (t->rs64ConfigScale != 0.0f) && (t->rs64ConfigScale != configScale)) {
+                        const bool sized = (float(t->rs64ConfigScale.y) != 0.0f);
+                        const bool changed = (float(t->rs64ConfigScale.x) != float(configScale.x)) || (float(t->rs64ConfigScale.y) != float(configScale.y));
+
+                        if (!t->isEmpty() && sized && changed) {
                             t->releaseTextures();
                             t->width = 0;
                             t->height = 0;
