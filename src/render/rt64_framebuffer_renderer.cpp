@@ -4069,7 +4069,7 @@ namespace RT64 {
             }
         }
 
-        // Low 16 bits: texture layer; bits 16-17: water kind (0 ground, 1 water, 2 shore).
+        // Low 16 bits: texture layer; bits 16-17: water kind (0 ground, 1 water, 2 shore); bits 18+: the water draw's layer.
         cellLayers.assign(size_t(m.width) * m.height, 0);
         for (size_t c = 0; (c < cellLayers.size()) && (c < m.waterKind.size()); ++c) {
             cellLayers[c] = uint32_t(m.waterKind[c]) << 16;
@@ -4140,6 +4140,34 @@ namespace RT64 {
                     }
                 }
             }
+        }
+
+        // Bits 18+: the water draw's layer. Shore tiles paint sand and water into one texture, which showed as square sand patches on the flat water, so shore cells take a nearby open-water cell's.
+        const int32_t mapW = int32_t(m.width), mapH = int32_t(m.height);
+        const auto openWaterLayer = [&](int32_t col, int32_t row, uint32_t own) {
+            for (int32_t r = 1; r <= 3; ++r) {
+                for (int32_t dz = -r; dz <= r; ++dz) {
+                    for (int32_t dx = -r; dx <= r; ++dx) {
+                        const int32_t x = col + dx, z = row + dz;
+                        if ((std::max(std::abs(dx), std::abs(dz)) != r) || (x < 0) || (z < 0) || (x >= mapW) || (z >= mapH)) {
+                            continue;
+                        }
+
+                        const size_t n = size_t(z) * m.width + x;
+                        if ((n < m.waterKind.size()) && (m.waterKind[n] == 1)) {
+                            return cellLayers[n] & 0xFFFFu;
+                        }
+                    }
+                }
+            }
+
+            return own;
+        };
+
+        for (size_t c = 0; c < cellLayers.size(); ++c) {
+            const uint32_t own = cellLayers[c] & 0xFFFFu;
+            const bool shore = (c < m.waterKind.size()) && (m.waterKind[c] == 2);
+            cellLayers[c] |= (shore ? openWaterLayer(int32_t(c % m.width), int32_t(c / m.width), own) : own) << 18;
         }
 
         if (texels.empty()) {

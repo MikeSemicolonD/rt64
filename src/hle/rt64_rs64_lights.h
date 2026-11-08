@@ -2100,9 +2100,19 @@ namespace rs64lights {
 
     // Alpha-weighted average colour of a tile in TMEM (see tmemTexel). coverage = mean alpha; false when nothing is visible.
     inline bool tmemAverage(const uint8_t* tmem, uint8_t fmt, uint8_t siz, uint32_t tmemWord, uint32_t lineWords, uint32_t width, uint32_t height, uint8_t palette, float out[3], float& coverage) {
-        if ((siz > 2) || (fmt == 1) || (width == 0) || (height == 0)) {
+        if ((siz > 3) || (fmt == 1) || ((siz == 3) && (fmt != 0)) || (width == 0) || (height == 0)) {
             return false;
         }
+
+        // RGBA32 keeps red and green in the low half of TMEM and blue and alpha at the same offset in the high half.
+        const auto rgba32 = [&](uint32_t x, uint32_t y, float c[4]) {
+            const uint32_t half = ((tmemWord + y * lineWords) * 8 + x * 2) & 0x7FF;
+            c[0] = float(tmem[half]) / 255.0f;
+            c[1] = float(tmem[(half + 1) & 0x7FF]) / 255.0f;
+            c[2] = float(tmem[half | 0x800]) / 255.0f;
+            c[3] = float(tmem[((half + 1) & 0x7FF) | 0x800]) / 255.0f;
+        };
+
         // At most 8x8 samples: it runs per draw call while recording.
         const uint32_t stepX = std::max<uint32_t>(1, width / 8);
         const uint32_t stepY = std::max<uint32_t>(1, height / 8);
@@ -2112,9 +2122,13 @@ namespace rs64lights {
         for (uint32_t y = 0; y < height; y += stepY) {
             for (uint32_t x = 0; x < width; x += stepX) {
                 float c[4] = {};
-                if (!tmemTexel(tmem, fmt, siz, tmemWord, lineWords, palette, x, y, c)) {
+                if (siz == 3) {
+                    rgba32(x, y, c);
+                }
+                else if (!tmemTexel(tmem, fmt, siz, tmemWord, lineWords, palette, x, y, c)) {
                     return false;
                 }
+
                 sum[0] += c[0] * c[3];
                 sum[1] += c[1] * c[3];
                 sum[2] += c[2] * c[3];

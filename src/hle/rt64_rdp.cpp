@@ -479,6 +479,34 @@ namespace RT64 {
         }
     }
 
+    void RDP::applyPassLoads(const std::vector<LoadOperation> &ops, size_t passFirst, TMEMSnapshot &saved) {
+        memcpy(saved.TMEM, TMEM, sizeof(saved.TMEM));
+        memcpy(saved.tags, tmemWordTags, sizeof(saved.tags));
+        saved.loadTag = tmemLoadTag;
+
+        const size_t first = std::max<size_t>(passFirst, (ops.size() > 16) ? (ops.size() - 16) : 0);
+        for (size_t i = first; i < ops.size(); ++i) {
+            const LoadOperation &op = ops[i];
+            switch (op.type) {
+            case LoadOperation::Type::Block:
+                loadBlockOperation(op.tile, op.texture, false);
+                break;
+            case LoadOperation::Type::Tile:
+                loadTileOperation(op.tile, op.texture, false);
+                break;
+            case LoadOperation::Type::TLUT:
+                loadTLUTOperation(op.tile, op.texture, false);
+                break;
+            }
+        }
+    }
+
+    void RDP::restoreTMEM(const TMEMSnapshot &saved) {
+        memcpy(TMEM, saved.TMEM, sizeof(saved.TMEM));
+        memcpy(tmemWordTags, saved.tags, sizeof(saved.tags));
+        tmemLoadTag = saved.loadTag;
+    }
+
     void RDP::loadTileOperation(const LoadTile &loadTile, const LoadTexture &loadTexture, bool deferred) {
         const uint32_t bytesOffset = (loadTile.uls >> 2) << loadTexture.siz >> 1;
         const uint32_t bytesPerRow = loadTexture.width << loadTexture.siz >> 1;

@@ -1605,36 +1605,12 @@ namespace RT64 {
             const rs64lights::TmemTile color = toTile(state->rdp->tiles[tile]);
             const rs64lights::TmemTile mask = toTile(state->rdp->tiles[(tile + 1) & 7u]);
 
-            // Loads are deferred until the framebuffer pair syncs, so TMEM still holds an earlier pass: replay this pass's latest loads (the sprite's own), read, restore.
             RDP& rdp = *state->rdp;
             const Workload& wl = state->ext.workloadQueue->workloads[state->ext.workloadQueue->writeCursor];
-            const auto& ops = wl.drawData.loadOperations;
-            const size_t first = std::max<size_t>(wl.drawRanges.loadOperations.first, (ops.size() > 16) ? (ops.size() - 16) : 0);
-            uint64_t tmemSaved[RDP_TMEM_WORDS];
-            uint32_t tagsSaved[RDP_TMEM_WORDS];
-            const uint32_t tagSaved = rdp.tmemLoadTag;
-            memcpy(tmemSaved, rdp.TMEM, sizeof(tmemSaved));
-            memcpy(tagsSaved, rdp.tmemWordTags, sizeof(tagsSaved));
-            for (size_t i = first; i < ops.size(); ++i) {
-                const LoadOperation& op = ops[i];
-                switch (op.type) {
-                case LoadOperation::Type::Block:
-                    rdp.loadBlockOperation(op.tile, op.texture, false);
-                    break;
-                case LoadOperation::Type::Tile:
-                    rdp.loadTileOperation(op.tile, op.texture, false);
-                    break;
-                case LoadOperation::Type::TLUT:
-                    rdp.loadTLUTOperation(op.tile, op.texture, false);
-                    break;
-                }
-            }
-
+            RDP::TMEMSnapshot saved;
+            rdp.applyPassLoads(wl.drawData.loadOperations, wl.drawRanges.loadOperations.first, saved);
             const float emission = rs64lights::spriteEmission(reinterpret_cast<const uint8_t*>(rdp.TMEM), color, masked ? &mask : nullptr);
-
-            memcpy(rdp.TMEM, tmemSaved, sizeof(tmemSaved));
-            memcpy(rdp.tmemWordTags, tagsSaved, sizeof(tagsSaved));
-            rdp.tmemLoadTag = tagSaved;
+            rdp.restoreTMEM(saved);
             return emission;
         }
         // Light presets keyed by this sprite: their lights at the sprite (at: its placement), radius x its camera size (capped as the automatic light's), brightness x its PRIM

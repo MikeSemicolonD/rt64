@@ -91,7 +91,7 @@ void VSMain(uint vertexId : SV_VertexID, uint instanceId : SV_InstanceID,
 
         const int2 signedCell = int2(spanCell) - margin;
         cell = uint2(clamp(signedCell, int2(0, 0), int2(gTerrain.mapWidth - 1, gTerrain.mapHeight - 1)));
-        const uint kind = gCellLayers[cell.y * gTerrain.mapWidth + cell.x] >> 16;
+        const uint kind = (gCellLayers[cell.y * gTerrain.mapWidth + cell.x] >> 16) & 3u;
         outside = any(signedCell != int2(cell));
         if ((kind == 0) && !outside) {
             oPosition = float4(2.0f, 2.0f, 2.0f, 1.0f);
@@ -177,7 +177,7 @@ void VSMain(uint vertexId : SV_VertexID, uint instanceId : SV_InstanceID,
         oNormal = mul((float3x3)world, float3(0.0f, -1.0f, 0.0f));
         oSunDir = mul((float3x3)world, -gFrame[2].xyz);
     }
-    else if ((cellWord >> 16) != 0) {
+    else if (((cellWord >> 16) & 3u) != 0) {
         // Ground in a water or shore cell under the drawn water surface takes the water's view tint (oEdge.y), fading in over the waterline band.
         static const float kWaterlineBand = 2.0f;
         oViewPos = mul(world, float4(pos, 1.0f)).xyz;
@@ -203,6 +203,6 @@ void VSMain(uint vertexId : SV_VertexID, uint instanceId : SV_InstanceID,
     oPosition = p;
     oShade = float4(c, fogAlpha);
     oUV = float2(inCell.x, 1.0f - inCell.y);
-    const uint layer = cellWord & 0xFFFF;
+    const uint layer = gTerrain.water ? (cellWord >> 18) : (cellWord & 0xFFFF);
     oLayer = uint(gFrame[3 + layer / 4][layer % 4]);
 }

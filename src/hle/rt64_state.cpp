@@ -587,14 +587,20 @@ namespace RT64 {
         drawCall.drawStatusChanges = drawStatus.changed;
         drawCall.callIndex = workload.gameCallCount++;
 
-        // Hit colours for ray-traced bounce light and reflections: the render tile's TMEM average while it is still loaded, only when the combiner samples it
-        // (TMEM still holds whatever was loaded last, e.g. the menu font).
+        // Hit colours for ray-traced bounce light and reflections: the render tile's TMEM average, only when the combiner samples it.
         if (rs64lights::config().gi || rs64lights::config().reflections) {
             const LoadTile &t0 = rdp->tiles[0];
             float tex[3] = {};
             float cov = 0.0f;
             const bool sampled = drawCall.colorCombiner.usesTexture(drawCall.otherMode, 0, drawCall.otherMode.cycleType() == G_CYC_1CYCLE);
-            const bool ok = sampled && rs64lights::tmemAverage(reinterpret_cast<const uint8_t *>(rdp->TMEM), t0.fmt, t0.siz, t0.tmem, t0.line, uint32_t(((t0.lrs - t0.uls) >> 2) + 1), uint32_t(((t0.lrt - t0.ult) >> 2) + 1), t0.palette, tex, cov);
+            bool ok = false;
+            if (sampled) {
+                RDP::TMEMSnapshot saved;
+                rdp->applyPassLoads(workload.drawData.loadOperations, workload.drawRanges.loadOperations.first, saved);
+                ok = rs64lights::tmemAverage(reinterpret_cast<const uint8_t *>(rdp->TMEM), t0.fmt, t0.siz, t0.tmem, t0.line, uint32_t(((t0.lrs - t0.uls) >> 2) + 1), uint32_t(((t0.lrt - t0.ult) >> 2) + 1), t0.palette, tex, cov);
+                rdp->restoreTMEM(saved);
+            }
+
             // w: bit 0 the texture average is valid, bit 1 the colour combiner reads prim (a prim it ignores must not tint the hit colour).
             bool prim = false;
             for (uint32_t i = 0; i < 4; i++) {
