@@ -10,6 +10,24 @@ float3 texel(uint layer, int2 p) {
     return unpackRGBA8(gTexels[layer * 4096 + p.y * 64 + p.x]).rgb;
 }
 
+float3 texelWrapped(uint layer, int2 p) {
+    p &= 63;
+    return unpackRGBA8(gTexels[layer * 4096 + p.y * 64 + p.x]).rgb;
+}
+
+// The layer bilinear at map point m (map units, 8 per base texel) repeated `repeat` times per cell.
+float3 texelRepeated(uint layer, float2 m, float repeat) {
+    const float2 s = m * (repeat / 8.0f) - 0.5f;
+    const int2 p0 = int2(floor(s));
+    const float2 t = s - float2(p0);
+    return lerp(lerp(texelWrapped(layer, p0), texelWrapped(layer, p0 + int2(1, 0)), t.x), lerp(texelWrapped(layer, p0 + int2(0, 1)), texelWrapped(layer, p0 + int2(1, 1)), t.x), t.y);
+}
+
+// Water detail where the base texture is magnified (up close): the layer again at a power-of-2 repeat whose texels stay near one a pixel, blended
+// between neighbouring repeats so no band shows. Its difference from the base is added at up to kWaterDetail (over 1: the textures are low contrast).
+static const float kWaterDetail = 2.5f;
+static const float kWaterDetailMaxLod = 4.0f;
+
 // Water strength of the view-angle tint toward the sky (fog colour), and of the sun glint: a sharp sparkle lobe over a broad sheen.
 static const float kWaterFresnel = 0.6f;
 static const float kWaterGlint = 1.2f;
@@ -56,6 +74,15 @@ float4 PSMain(in float4 vPosition : SV_POSITION, in float4 vShade : COLOR0, in f
         // Lattice steps are a quarter cell (128 map units).
         const float2 m = vLattice * 128.0f;
         const float footprint = max(length(ddx(m)), length(ddy(m)));
+
+        // lod = log2 of the base magnification (8 map units a texel); repeats 2^(k-1) and 2^k keep detail texels at half to one a pixel.
+        const float lod = min(log2(8.0f / max(footprint, 1e-3f)), kWaterDetailMaxLod);
+        const float detailWeight = kWaterDetail * saturate(lod);
+        if (detailWeight > 0.0f) {
+            const float k = floor(lod);
+            const float3 detail = lerp(texelRepeated(vLayer, m, exp2(k - 1.0f)), texelRepeated(vLayer, m, exp2(k)), lod - k);
+            color = saturate(tex + (detail - tex) * detailWeight) * vShade.rgb;        }
+
         const float3 nMap = rs64RippleNormal(m, gTerrain.rippleTime, footprint, gTerrain.rippleStrength);
         float3 n = normalize(mul((float3x3)gWorldTransforms[gTerrain.worldIndex], nMap));
         float3 l = normalize(vSunDir);
