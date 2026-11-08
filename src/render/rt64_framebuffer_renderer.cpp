@@ -2750,9 +2750,24 @@ namespace RT64 {
             }
 
             // Level sun: through the (interpolated) terrain transform, the same frame the terrain casters use, so it stays fixed to the world.
-            if (sun.levelWorld && rs64Shadow.terrainActive && rs64lights::viewRotation(rs64ToMat4(terrainWorld[tf.transformIndex]), viewR)) {
-                sun.valid = rs64lights::sunCameraDir(sun.world, viewR, sun.dir, std::tan(lightsCfg.sunMinElevationDeg * 3.14159265f / 180.0f));
+            // Boot sequence passes with no terrain drawn keep the last terrain rotation; the authored sun points elsewhere, so the lit faces of the 3D logo flipped.
+            static float s_introViewR[9];
+            static bool s_introViewKnown = false;
+            const float sunMinTanElev = std::tan(lightsCfg.sunMinElevationDeg * 3.14159265f / 180.0f);
+
+            if (!sun.levelWorld) {
+                s_introViewKnown = false;
             }
+
+            if (sun.levelWorld && rs64Shadow.terrainActive && rs64lights::viewRotation(rs64ToMat4(terrainWorld[tf.transformIndex]), viewR)) {
+                sun.valid = rs64lights::sunCameraDir(sun.world, viewR, sun.dir, sunMinTanElev);
+                memcpy(s_introViewR, viewR, sizeof(viewR));
+                s_introViewKnown = true;
+            }
+            else if (sun.levelWorld && sun.worldAuthored && s_introViewKnown) {
+                sun.valid = rs64lights::sunCameraDir(sun.world, s_introViewR, sun.dir, sunMinTanElev);
+            }
+
             if (sun.fromModel) {
                 // World up by triangle-weighted vote over the main view's draws: the single largest draw alternates between tilted props in the fly-in.
                 const Projection &mainProj = fbPair.projections[lightsProjIndex];
