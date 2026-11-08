@@ -1,6 +1,4 @@
-//
-// RT64
-//
+// RT64 - F3DFACTOR5 GBI profile entry point
 
 #pragma once
 

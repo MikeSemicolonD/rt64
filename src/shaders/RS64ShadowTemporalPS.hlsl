@@ -1,6 +1,4 @@
-//
-// RT64
-//
+// RT64 - Accumulates the traced ambient occlusion and indirect light over frames
 
 #include "shared/rt64_rs64_shadow_blur_cb.h"
 

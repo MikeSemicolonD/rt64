@@ -1,6 +1,4 @@
-//
-// RT64
-//
+// RT64 - MCP bridge requests that read RT64 state, run on the gfx thread
 
 #include "rt64_rs64_mcp.h"
 

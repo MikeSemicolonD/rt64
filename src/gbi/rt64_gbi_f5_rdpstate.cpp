@@ -1,19 +1,5 @@
-//
-// RT64 — F3DFACTOR5 RDP-state handlers
-//
-// The Factor 5 GBI module's RDP-state / raster handlers (othermode, scissor,
-// tile, combine, texrect, load-block/tile/TLUT, set-texture/color-image),
-// split out of rt64_gbi_f3dfactor5.cpp for readability. These wrap the base
-// GBI_F3D/GBI_RDP handlers with Factor-5-specific logging, guards, and CI4
-// reinterpretation. Used by BOTH the software-T&L and native render paths
-// (this is where the cinematic's textures get bound), so it stays regardless
-// of which geometry path wins.
-//
-// First increment: the self-contained othermode/scissor setters. The rest of
-// the block (setTile/setCombine/texrect/load*/set*Image + the shared CI4-track
-// state s_ci4_* + clamp_load_subscripts) follows — that cluster is internally
-// coupled but externally clean, so it moves here wholesale.
-//
+// RT64 - F3DFACTOR5 RDP-state handlers
+// Wrap the GBI_F3D/GBI_RDP othermode, scissor, tile, combine, texrect, load and set-image commands with Factor 5 guards, CI4 reinterpretation, logging and HUD edge placement. Used by both the software-T&L and native render paths.
 
 #include "rt64_gbi_f3dfactor5_internal.h"
 

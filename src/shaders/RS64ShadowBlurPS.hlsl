@@ -1,6 +1,4 @@
-//
-// RT64
-//
+// RT64 - Depth-aware blur of the traced shadow mask and indirect light
 
 #include "shared/rt64_rs64_shadow_blur_cb.h"
 

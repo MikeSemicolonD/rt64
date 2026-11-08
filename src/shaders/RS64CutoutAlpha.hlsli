@@ -1,6 +1,4 @@
-//
-// RT64
-//
+// RT64 - Ray-query helpers shared by the RS64 traced passes: bindings, cutout alpha tests, hit colours and sun rays
 
 #pragma once
 

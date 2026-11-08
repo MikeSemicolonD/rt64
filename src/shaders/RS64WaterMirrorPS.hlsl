@@ -1,6 +1,4 @@
-//
-// RT64
-//
+// RT64 - Puts what was drawn after the trace into the water's horizon mirror
 
 #include "shared/rt64_rs64_shadow_blur_cb.h"
 

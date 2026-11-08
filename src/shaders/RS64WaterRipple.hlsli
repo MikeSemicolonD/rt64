@@ -1,6 +1,4 @@
-//
-// RT64
-//
+// RT64 - Tileable wind ripple noise for water
 
 #pragma once
 

@@ -1,6 +1,4 @@
-//
-// RT64
-//
+// RT64 - Whole-map terrain surface from the height lattice, with chunk LOD and the water's outer ring
 
 #include "RS64Terrain.hlsli"
 

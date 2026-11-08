@@ -1,6 +1,4 @@
-//
-// RT64
-//
+// RT64 - Static terrain and instance normals for the traced passes
 
 #pragma once
 

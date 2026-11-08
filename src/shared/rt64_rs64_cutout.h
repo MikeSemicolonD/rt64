@@ -1,6 +1,4 @@
-//
-// RT64
-//
+// RT64 - Cutout draw record shared by C++ and the traced shaders
 
 #pragma once
 

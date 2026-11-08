@@ -1,6 +1,4 @@
-//
-// RT64
-//
+// RT64 - Constant buffer of RS64FogShaftsPS
 
 #pragma once
 

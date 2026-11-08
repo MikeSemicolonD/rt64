@@ -1,29 +1,5 @@
-//
-// RT64
-//
-// HLE GBI module for Factor 5's custom RSP microcode (Rogue Squadron 64,
-// Battle for Naboo, Indiana Jones and the Infernal Machine).
-//
-// Inherits the F3DEX dispatch table and overrides the opcodes Factor 5 reuses.
-// Rebuilt 2026-09-07 from the hardware goldens (Project64 RDRAM dumps of
-// cinematic frames 78/79/120, byte-identical to the recomp's chunk pool) and
-// docs/f5-model-dl-spec.md after the previous working copy was lost.
-//
-// Stream facts this file relies on (all measured on the goldens):
-//  - DL chunks are 0x108 bytes: 8-byte header (op 0x80: next/prev pointers) +
-//    0x100 payload. The ucode never executes a header (0x80 dispatches to IMEM 0),
-//    so a header reached by walking linearly means the sub-DL ran off its chunk.
-//  - B5(0) ends a list (a full chunk has it in the last slot; the bytes after a mid-chunk
-//    B5(0) are stale).
-//  - 0x05: `05 05 .. ..` = 40-byte sprite record, `05 00 .. ..` = 8-byte command.
-//  - 0xBD / 0xBE: 16-byte state commands (payload FFxxxxxx ........).
-//  - 0x03: 24-byte inline lookat/light block (`03 82 ...`), viewport form is 8 bytes.
-//  - 0x01: matrix load, byte1 0x03 = projection (0x8071....), 0x02 = modelview.
-//  - 0x04 / 0x14: vertex batch, n = (w0>>10)&0x3F, 8-byte verts (x,y,z int16, pad).
-//  - 0x02: per-vertex RGBA buffer (4 bytes per vertex, index = vertex index).
-//  - 0xBF: triangle; w1 bytes = indices*5; `w0&2` = 32-byte textured form (indices*5,
-//    indices*4, flags, 3 raw texcoords scaled by 03 82, pad). 0xB4: quad, same 32-byte layout.
-//
+// RT64 - F3DFACTOR5 GBI module
+// HLE for Factor 5's custom RSP microcode: inherits the F3DEX dispatch table and overrides the opcodes Factor 5 reuses. Opcode map and DL grammar: docs/reference/factor5-gbi.md and f5-model-dl-spec.md in the Rogue Squadron 64 Recompiled repo.
 
 #include "rt64_gbi_f3dfactor5.h"
 #include "rt64_gbi_f3dfactor5_internal.h"

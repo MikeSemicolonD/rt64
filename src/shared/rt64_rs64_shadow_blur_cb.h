@@ -1,6 +1,4 @@
-//
-// RT64
-//
+// RT64 - Constant buffer of the RS64 shadow blur, temporal and water mirror passes
 
 #pragma once
 

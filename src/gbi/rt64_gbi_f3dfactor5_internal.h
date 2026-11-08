@@ -1,12 +1,5 @@
-//
-// RT64 — F3DFACTOR5 internal interface
-//
-// Shared declarations for the F3DFACTOR5 HLE GBI module after it was split
-// across files for readability. Holds the small math/byte-read helpers and
-// vertex struct used by both the live software-T&L pipeline and the (default-
-// off) diagnostics, plus the cross-module function declarations. Each module
-// (.cpp) opens `namespace RT64::GBI_F3DFACTOR5` and defines its portion.
-//
+// RT64 - F3DFACTOR5 internal interface
+// Math and byte-read helpers, the vertex struct and cross-file declarations for the module's .cpp files, which each open namespace RT64::GBI_F3DFACTOR5.
 #pragma once
 
 #include <cstdint>

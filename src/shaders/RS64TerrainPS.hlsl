@@ -1,6 +1,4 @@
-//
-// RT64
-//
+// RT64 - Whole-map terrain texturing and shading
 
 #include "RS64Terrain.hlsli"
 #include "RS64WaterRipple.hlsli"

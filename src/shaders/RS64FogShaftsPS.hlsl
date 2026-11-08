@@ -1,6 +1,4 @@
-//
-// RT64
-//
+// RT64 - Sun shafts: stepped in-scatter through the fog along each view ray
 
 #include "shared/rt64_rs64_fog_shafts_cb.h"
 #include "shared/rt64_rsp_fog.h"

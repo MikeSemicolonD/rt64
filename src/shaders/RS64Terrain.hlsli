@@ -1,6 +1,4 @@
-//
-// RT64
-//
+// RT64 - Bindings shared by the whole-map terrain vertex and pixel shaders
 
 #include "shared/rt64_rs64_terrain_cb.h"
 #include "shared/rt64_rsp_fog.h"

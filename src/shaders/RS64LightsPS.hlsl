@@ -1,6 +1,4 @@
-//
-// RT64
-//
+// RT64 - Dynamic lights over the prelit frame, with traced shadows under RS64_LIGHT_SHADOWS
 
 #include "shared/rt64_rs64_lights_cb.h"
 

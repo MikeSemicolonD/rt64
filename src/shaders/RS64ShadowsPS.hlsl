@@ -1,6 +1,4 @@
-//
-// RT64
-//
+// RT64 - Traced sun shadows, ambient occlusion, indirect light and reflections
 
 #include "shared/rt64_rs64_shadows_cb.h"
 #include "shared/rt64_rsp_fog.h"

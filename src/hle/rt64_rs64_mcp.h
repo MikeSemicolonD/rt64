@@ -1,6 +1,4 @@
-//
-// RT64
-//
+// RT64 - MCP bridge requests and frame capture
 
 #pragma once
 

@@ -1,6 +1,4 @@
-//
-// RT64
-//
+// RT64 - Push constants of the RS64 whole-map terrain pass
 
 #pragma once
 
