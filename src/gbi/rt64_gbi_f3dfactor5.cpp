@@ -69,6 +69,7 @@ extern "C" { volatile int g_explosion_hold = 0; }
 extern "C" int rs64_static_terrain_mode(void);
 extern "C" int rs64_terrain_fog_clip(void);
 extern "C" float rs64_fog_dist(void);
+extern "C" float rs64_fog_tail_end(void);
 extern "C" float rs64_draw_dist(void);
 extern "C" int rs64_credits_active(void);
 
@@ -2912,7 +2913,9 @@ namespace RT64 {
 
             state->rsp->fog.mul = (float)(255.0 * m);
             state->rsp->fog.offset = (float)(255.0 * o);
+            state->rsp->fog.tailEnd = rs64_fog_tail_end();
             state->rsp->fogChanged = true;
+            state->updateDrawStatusAttribute(DrawAttribute::FogColor);
         }
 
         // Battle Above Taloraan has no ground: its cloud floor (drawn under the camera's own matrix, ring slot 0, baked around the camera) and its
@@ -3328,7 +3331,7 @@ namespace RT64 {
                         const float cz = (float)c.x * (float)mv[0][2] + (float)c.y * (float)mv[1][2] + (float)c.z * (float)mv[2][2] + (float)mv[3][2];
                         const float cw = (float)c.x * (float)mv[0][3] + (float)c.y * (float)mv[1][3] + (float)c.z * (float)mv[2][3] + (float)mv[3][3];
                         const float fog = (cw > 0.0f) ? ((std::max(cz, 0.0f) / cw) * state->rsp->fog.mul + state->rsp->fog.offset) : 255.0f;
-                        const uint32_t fogA = (uint32_t)std::clamp(fog, 0.0f, 255.0f);
+                        const uint32_t fogA = (uint32_t)(255.0f * rs64lights::fogCurve(fog / 255.0f, state->rsp->fog.tailEnd));
                         state->rdp->setFogColor(((*dl)[1].w0 & 0xFFFFFF00u) | fogA);
                     }
                     // The game blender runs a FOG cycle first (otherL C4104A54); its color tracks the

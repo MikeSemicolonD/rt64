@@ -84,6 +84,7 @@ namespace RT64 {
         vertexColorPDAddress = 0;
         fog.mul = 0.0f;
         fog.offset = 0.0f;
+        fog.tailEnd = 0.0f;
         lookAt.x = { 0.0f, 0.0f, 0.0f };
         lookAt.y = { 0.0f, 0.0f, 0.0f };
         otherModeStack[0].L = 0x0;

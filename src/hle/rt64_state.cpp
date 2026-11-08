@@ -37,6 +37,8 @@
 // Per-frame RT64 workload accumulators feeding the F5 profiler HUD's RDP slots
 // (no real RDP on the PC path). Summed in State::flush(); read-and-cleared by
 // osDpGetCounters_recomp. tris->white(pipe), draws->magenta(cmd), texloads->green(tmem).
+extern "C" float rs64_fog_tail_end(void);
+extern "C" uint32_t rs64_level_fog_rgb(void);
 extern "C" { std::atomic<uint32_t> g_rs64_frame_tris{0}; }
 extern "C" { std::atomic<uint32_t> g_rs64_frame_draws{0}; }
 extern "C" { std::atomic<uint32_t> g_rs64_frame_texloads{0}; }
@@ -165,6 +167,8 @@ namespace RT64 {
         drawCall.rdpParams.envColor = { 0.0f, 0.0f, 0.0f, 0.0f };
         drawCall.rdpParams.fogColor = { 0.0f, 0.0f, 0.0f, 0.0f };
         drawCall.rdpParams.blendColor = { 0.0f, 0.0f, 0.0f, 0.0f };
+        drawCall.rdpParams.modelFog = { 0.0f, 0.0f, 0.0f, 0.0f };
+        drawCall.rdpParams.modelFogColor = { 0.0f, 0.0f, 0.0f, 0.0f };
         drawCall.cullBothMask = 0;
         drawCall.cullFrontMask = 0;
         drawCall.f5Cull = false;
@@ -547,6 +551,20 @@ namespace RT64 {
 
         if (drawStatus.isChanged(DrawAttribute::ExtendedFlags)) {
             drawCall.extendedFlags = rdp->extended.drawExtendedFlags;
+        }
+
+        // A fog-limited level drawn past its stock view fogs the perspective draws the game leaves unfogged (models, effects) like its terrain;
+        // the sky (prim depth) stays clear. Screen z = ndc z * scale.z + translate.z, so the vertex fog becomes a per-pixel screen-depth ramp.
+        drawCall.rdpParams.modelFog = { 0.0f, 0.0f, 0.0f, 0.0f };
+        const float fogTail = rs64_fog_tail_end();
+        const auto &proj = rsp->projMatrixStack[rsp->projectionMatrixStackSize - 1];
+        const interop::RSPViewport &vp = rsp->viewportStack[rsp->viewportStackSize - 1];
+        const bool unfogged = !(rsp->geometryModeStack[rsp->geometryModeStackSize - 1] & G_FOG) && (rdp->otherMode.zSource() != G_ZS_PRIM);
+        if ((fogTail > 0.0f) && unfogged && (rsp->fog.mul != 0.0f) && (proj[3][3] == 0.0f) && (vp.scale.z != 0.0f)) {
+            const float m = rsp->fog.mul / vp.scale.z;
+            const uint32_t rgb = rs64_level_fog_rgb();
+            drawCall.rdpParams.modelFog = { m, rsp->fog.offset - vp.translate.z * m, fogTail, 1.0f };
+            drawCall.rdpParams.modelFogColor = { float((rgb >> 16) & 0xFF) / 255.0f, float((rgb >> 8) & 0xFF) / 255.0f, float(rgb & 0xFF) / 255.0f, 1.0f };
         }
 
         drawStatus.clearChanges();

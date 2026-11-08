@@ -3,6 +3,7 @@
 //
 
 #include "shared/rt64_rs64_fog_shafts_cb.h"
+#include "shared/rt64_rsp_fog.h"
 #include "RS64CutoutAlpha.hlsli"
 
 ConstantBuffer<RS64FogShaftsCB> gFog : register(b1, space3);
@@ -12,7 +13,7 @@ Texture2D<float> gDepth : register(t2, space3);
 float fogFactor(float3 q) {
     const float4 c = mul(gFog.viewProj, float4(q, 1.0f));
     const float a = (c.w > 1e-6f) ? ((max(c.z, 0.0f) / c.w) * gFog.fogMul + gFog.fogOffset) : gFog.fogOffset;
-    return saturate(a / 255.0f);
+    return rs64FogCurve(a / 255.0f, gFog.fogTail);
 }
 
 // Mirrors rs64lights::interleavedNoise.

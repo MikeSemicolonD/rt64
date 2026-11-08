@@ -5,6 +5,7 @@
 #include "shared/rt64_blender.h"
 #include "shared/rt64_color_combiner.h"
 #include "shared/rt64_raster_params.h"
+#include "shared/rt64_rsp_fog.h"
 
 #include "Depth.hlsli"
 #include "FbRendererCommon.hlsli"
@@ -229,6 +230,13 @@ LIBRARY_EXPORT bool RasterPS(const RenderParams rp, float4 vertexPosition, float
     blInputs.shadeAlpha = shadeColor.a;
     resultColor = Blender::run(otherMode, rp.flags, blInputs, combinerColor, false);
     resultAlpha = 1.0f;
+
+    // RS64 fog on a draw the game leaves unfogged (rt64_state.cpp loadDrawState).
+    const float4 modelFog = instanceRDPParams[instanceIndex].modelFog;
+    if ((modelFog.w > 0.0f) && !renderFlagRect(rp.flags)) {
+        const float f = rs64FogCurve((vertexPosition.z * modelFog.x + modelFog.y) / 255.0f, modelFog.z);
+        resultColor.rgb = lerp(resultColor.rgb, instanceRDPParams[instanceIndex].modelFogColor.rgb, f);
+    }
     
     // When using alpha blending, we store the blending factor into the dedicated output so the main one can be used for coverage.
     const bool alphaBlend = (otherMode.cycleType() != G_CYC_COPY) && Blender::usesAlphaBlend(otherMode);

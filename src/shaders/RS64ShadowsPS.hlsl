@@ -3,6 +3,7 @@
 //
 
 #include "shared/rt64_rs64_shadows_cb.h"
+#include "shared/rt64_rsp_fog.h"
 #include "RS64CutoutAlpha.hlsli"
 #include "RS64TerrainNormal.hlsli"
 #include "RS64WaterRipple.hlsli"
@@ -26,7 +27,7 @@ float rs64FogAlpha(float3 p) {
     if (c.w <= 0.0f) {
         c = mul(gShadows.screenFromView, float4(-p, 1.0f));
     }
-    return (c.w > 0.0f) ? saturate(((max(c.z, 0.0f) / c.w) * gShadows.fogParams.x + gShadows.fogParams.y) / 255.0f) : 1.0f;
+    return (c.w > 0.0f) ? rs64FogCurve(((max(c.z, 0.0f) / c.w) * gShadows.fogParams.x + gShadows.fogParams.y) / 255.0f, gShadows.fogParams.w) : 1.0f;
 }
 
 // The fog the terrain pass gives water at camera-space point p: the vertex fog, or past the map edge its fade toward the far plane (farPlaneFade in

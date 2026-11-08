@@ -71,7 +71,7 @@ void CSMain(uint vertexIndex : SV_DispatchThreadID) {
     if (fogIndex > 0) {
         const RSPFog rspFog = rspFogVector[fogIndex - 1];
         const float fogAlpha = ((max(tfPos.z, 0) / tfPos.w) * rspFog.mul + rspFog.offset);
-        vertexColor.a = clamp(fogAlpha / 255.0f, 0.0f, 1.0f);
+        vertexColor.a = rs64FogCurve(fogAlpha / 255.0f, rspFog.tailEnd);
     }
     else {
         vertexColor.a = srcCol[normColIndex + 3] / 255.0f;

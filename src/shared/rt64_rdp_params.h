@@ -19,6 +19,9 @@ namespace interop {
         float3 keyCenter;
         float3 keyScale;
         int convertK[6];
+        // RS64 fog on a draw the game leaves unfogged: screen-depth mul and offset, fog tail end, on (w). See rs64_fog_tail_end.
+        float4 modelFog;
+        float4 modelFogColor;
     };
 #ifdef HLSL_CPU
 };

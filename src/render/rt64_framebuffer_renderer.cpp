@@ -2780,7 +2780,7 @@ namespace RT64 {
                         const interop::RSPFog &rf = drawData.rspFog[fogIndex - 1];
                         const interop::float4 &fc = call.callDesc.rdpParams.fogColor;
                         const float color[3] = { fc.x, fc.y, fc.z };
-                        rs64lights::considerFogCall(fogPick, call.callDesc.triangleCount, rf.mul, rf.offset, color);
+                        rs64lights::considerFogCall(fogPick, call.callDesc.triangleCount, rf.mul, rf.offset, color, rf.tailEnd);
                     }
                 }
             }
@@ -3214,7 +3214,7 @@ namespace RT64 {
         cb.terrainMapHeight = rs64Shadow.terrainMap ? rs64Shadow.terrainMap->height : 0u;
         cb.rippleTime = rs64lights::rippleClock();
         cb.rippleStrength = cfg.waterRipple;
-        cb.fogParams = { fog.mul, fog.offset, fog.valid ? 1.0f : 0.0f, 0.0f };
+        cb.fogParams = { fog.mul, fog.offset, fog.valid ? 1.0f : 0.0f, fog.tailEnd };
         cb.fogColor = { fog.color[0], fog.color[1], fog.color[2], 0.0f };
         const hlslpp::float4 &skyH = rs64Shadow.skyHorizon, &skyZ = rs64Shadow.skyZenith;
         cb.skyHorizon = { (float)skyH.x, (float)skyH.y, (float)skyH.z, cfg.waterShadow };
@@ -3846,6 +3846,7 @@ namespace RT64 {
     // Texture packs for the terrain pass: a layer the loaded pack replaces goes to the texture cache under RT64's own hash (the cache
     // finds and streams the replacement), then each frame takes the replacement's texture index (the pass samples it in RS64TerrainPS).
     void FramebufferRenderer::rs64TerrainTextures(TextureCache *textureCache, uint64_t submissionFrame) {
+        cb.fogTail = fog.tailEnd;
         RS64TerrainGPU &g = rs64TerrainGpu;
         g.layerReplaced.assign(g.layerHash.size(), UINT32_MAX);
         if (textureSlots || !textureCacheReplacementMapEnabled || g.layerHash.empty()) {

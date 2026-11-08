@@ -26,7 +26,7 @@ namespace interop {
         float skyDepth;
         float visBias;
         uint cutoutDrawCount;
-        float pad2;
+        float fogTail;
     };
 #ifdef HLSL_CPU
 };

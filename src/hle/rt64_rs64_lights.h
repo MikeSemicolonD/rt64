@@ -1932,12 +1932,22 @@ namespace rs64lights {
     }
 
     // RSPProcessCS vertex fog at a camera-space point; clip.w == 0 (the eye) takes the max(z, 0) == 0 limit. Mirrored by RS64FogShaftsPS.
-    inline float fogFactor(const Mat4& viewProj, const float q[3], float mul, float offset) {
+    inline float fogFactor(const Mat4& viewProj, const float q[3], float mul, float offset, float tailEnd = 0.0f) {
         const float v[4] = { q[0], q[1], q[2], 1.0f };
+    // Fog alpha from the linear fog value x (depth * mul + offset, over 255). With tailEnd past the knee the fog follows x to the knee, then thins
+    // to full at x = tailEnd, for a fog-limited level drawn further than stock; 0 keeps the stock ramp. Mirrored by rs64FogCurve (rt64_rsp_fog.h).
+    inline float fogCurve(float x, float tailEnd) {
+        const float knee = 0.85f;
+        if ((tailEnd > knee) && (x > knee)) {
+            x = knee + (1.0f - knee) * (x - knee) / (tailEnd - knee);
+        }
+        return std::clamp(x, 0.0f, 1.0f);
+    }
+
         float c[4];
         transform(v, viewProj, c);
         const float a = (c[3] > 1e-6f) ? ((std::max(c[2], 0.0f) / c[3]) * mul + offset) : offset;
-        return std::clamp(a / 255.0f, 0.0f, 1.0f);
+        return fogCurve(a / 255.0f, tailEnd);
     }
 
     // March fractions along camera->receiver: step i ends at (i + 1 - jitter) / n, the last exactly at the receiver.
@@ -2433,7 +2443,7 @@ namespace rs64lights {
     };
 
     // The main view's largest fogged draw sets the fog; ties keep the first.
-    inline void considerFogCall(FogParams& best, uint32_t tris, float mul, float offset, const float color[3]) {
+    inline void considerFogCall(FogParams& best, uint32_t tris, float mul, float offset, const float color[3], float tailEnd = 0.0f) {
         if ((tris == 0) || (best.valid && (tris <= best.tris))) {
             return;
         }
@@ -2449,6 +2459,7 @@ namespace rs64lights {
     struct FogCache {
         uint64_t workloadId = UINT64_MAX;
         FogParams params;
+        float tailEnd = 0.0f;
     };
 
     // One fog per workload across its framebuffer pairs; a pair without a fogged main draw reuses the pick.
@@ -2461,6 +2472,7 @@ namespace rs64lights {
             c.params = pairPick;
         }
         return c.params;
+        best.tailEnd = tailEnd;
     }
 
     // Insertion of the k smallest distances, ascending; mirrored by RS64LightsPS.

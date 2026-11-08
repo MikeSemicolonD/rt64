@@ -78,7 +78,7 @@ float terrainFog(float3 v) {
     const RSPFog fog = gFog[gTerrain.fogIndex - 1];
     const float4x4 proj = gViewProjTransforms[gTerrain.viewProjIndex];
     const float4 clip = mul(proj, float4(v, 1.0f));
-    return (clip.w != 0.0f) ? saturate(((max(clip.z, 0) / clip.w) * fog.mul + fog.offset) / 255.0f) : 0.0f;
+    return (clip.w != 0.0f) ? rs64FogCurve(((max(clip.z, 0) / clip.w) * fog.mul + fog.offset) / 255.0f, fog.tailEnd) : 0.0f;
 }
 
 // The drawn water's lift over the water level (record units; heights grow downward). Mirrors rs64lights::TerrainWaterLift.
