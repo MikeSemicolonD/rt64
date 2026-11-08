@@ -74,6 +74,7 @@ static constexpr uint32_t RS64TerrainChunkCells = 8;
 
 // Host (hook_helpers.cpp): the ROM's terrain texture bank and a level's lv_X_TEX table; 0 when the level has none.
 extern "C" int rs64_terrain_textures(uint32_t level, const uint8_t **bank, uint32_t *bankSize, const uint8_t **ids, uint32_t *idsSize);
+extern "C" int rs64_terrain_tessellation(void);
 
 namespace RT64 {
     // ROGUESQ_LOG_BATCH: per-vertex renderIndex stamp collisions (a vertex stamped
@@ -4202,12 +4203,7 @@ namespace RT64 {
             return;
         }
 
-        // ROGUESQ_F5_STATIC_TERRAIN_SUB (1-8, default 4) quads per lattice step at full detail; ROGUESQ_F5_STATIC_TERRAIN_SMOOTH=0 keeps the bilinear
-        // (creased) surface; ROGUESQ_F5_STATIC_TERRAIN_DEBUG=1 draws vertex colours only.
-        static const uint32_t s_sub = [] {
-            const char *v = std::getenv("ROGUESQ_F5_STATIC_TERRAIN_SUB");
-            return uint32_t(std::clamp((v && *v) ? std::atoi(v) : 4, 1, 8));
-        }();
+        // ROGUESQ_F5_STATIC_TERRAIN_SMOOTH=0 keeps the bilinear (creased) surface; ROGUESQ_F5_STATIC_TERRAIN_DEBUG=1 draws vertex colours only.
         static const uint32_t s_smooth = [] {
             const char *v = std::getenv("ROGUESQ_F5_STATIC_TERRAIN_SMOOTH");
             return uint32_t(!(v && (v[0] == '0')));
@@ -4216,7 +4212,7 @@ namespace RT64 {
             const char *v = std::getenv("ROGUESQ_F5_STATIC_TERRAIN_DEBUG");
             return uint32_t((v && *v) ? std::atoi(v) : 0);
         }();
-        rs64TerrainCB.sub = s_sub;
+        rs64TerrainCB.sub = uint32_t(rs64_terrain_tessellation());
         rs64TerrainCB.smooth = s_smooth;
         rs64TerrainCB.debug = s_debug;
         rs64TerrainCB.chunkCells = RS64TerrainChunkCells;
@@ -4303,6 +4299,22 @@ namespace RT64 {
 
         const float hs = rs64TerrainCB.heightScale;
         constexpr float Guard = 3.0f;
+        const auto boxCulled = [&](float x0, float z0, float span, float y0, float y1) {
+            int outside[5] = {};
+            for (int c = 0; c < 8; ++c) {
+                const hlslpp::float4 p = hlslpp::mul(hlslpp::float4(x0 + ((c & 1) ? span : 0.0f), (c & 2) ? y1 : y0, z0 + ((c & 4) ? span : 0.0f), 1.0f), rs64TerrainMvp);
+                const float px = p.x, py = p.y, pw = p.w;
+                // A box up to a span behind the camera plane stays: interpolated frames draw this list with a blended camera that can see it.
+                outside[0] += (pw <= -span);
+                outside[1] += (px > Guard * pw);
+                outside[2] += (px < -Guard * pw);
+                outside[3] += (py > Guard * pw);
+                outside[4] += (py < -Guard * pw);
+            }
+
+            return std::any_of(std::begin(outside), std::end(outside), [](int n) { return n == 8; });
+        };
+
         for (uint32_t cz = 0; cz < chunksZ; ++cz) {
             for (uint32_t cx = 0; cx < chunksX; ++cx) {
                 const uint32_t k = cz * chunksX + cx;
@@ -4310,19 +4322,7 @@ namespace RT64 {
                 const float z0 = (float(cz * RS64TerrainChunkCells) - rs64TerrainCB.originZ) * 512.0f + rs64TerrainCB.offsetZ;
                 const float span = float(RS64TerrainChunkCells) * 512.0f;
                 const float y0 = std::min(float(g.chunkMinH[k]), float(rs64TerrainFrame.waterLevel) * 16.0f) * hs, y1 = std::max(float(g.chunkMaxH[k]), float(rs64TerrainFrame.waterLevel) * 16.0f) * hs;
-                int outside[5] = {};
-                for (int c = 0; c < 8; ++c) {
-                    const hlslpp::float4 p = hlslpp::mul(hlslpp::float4(x0 + ((c & 1) ? span : 0.0f), (c & 2) ? y1 : y0, z0 + ((c & 4) ? span : 0.0f), 1.0f), rs64TerrainMvp);
-                    const float px = p.x, py = p.y, pw = p.w;
-                    // A chunk up to a span behind the camera plane stays: interpolated frames draw this list with a blended camera that can see it.
-                    outside[0] += (pw <= -span);
-                    outside[1] += (px > Guard * pw);
-                    outside[2] += (px < -Guard * pw);
-                    outside[3] += (py > Guard * pw);
-                    outside[4] += (py < -Guard * pw);
-                }
-
-                if (std::any_of(std::begin(outside), std::end(outside), [](int n) { return n == 8; })) {
+                if (boxCulled(x0, z0, span, y0, y1)) {
                     continue;
                 }
 
@@ -4346,8 +4346,45 @@ namespace RT64 {
             packed.insert(packed.end(), lists[l].begin(), lists[l].end());
         }
 
-        if ((g.chunks == nullptr) || (g.chunksCapacity < packed.size())) {
-            g.chunksCapacity = uint32_t(packed.size());
+        // The water draw in chunk-sized blocks over the map plus its margin. A block inside the map with no water draws nothing; the perimeter reaches past any far plane, so it always stays.
+        const int32_t margin = rs64lights::TerrainWaterMargin;
+        const uint32_t blocksX = (m.width + 2 * margin + RS64TerrainChunkCells - 1) / RS64TerrainChunkCells;
+        const uint32_t blocksZ = (m.height + 2 * margin + RS64TerrainChunkCells - 1) / RS64TerrainChunkCells;
+        const float waterH = float(rs64TerrainFrame.waterLevel) * 16.0f;
+        const float groundMin = float(*std::min_element(g.chunkMinH.begin(), g.chunkMinH.end())), groundMax = float(*std::max_element(g.chunkMaxH.begin(), g.chunkMaxH.end()));
+        const float waterY0 = (std::min(groundMin, waterH) - 16.0f) * hs, waterY1 = (std::max(groundMax, waterH) + 16.0f) * hs;
+        g.waterBase = uint32_t(packed.size());
+        for (uint32_t bz = 0; bz < blocksZ; ++bz) {
+            for (uint32_t bx = 0; bx < blocksX; ++bx) {
+                const int32_t col = int32_t(bx * RS64TerrainChunkCells) - margin, row = int32_t(bz * RS64TerrainChunkCells) - margin;
+                const bool perimeter = (bx == 0) || (bz == 0) || (bx == blocksX - 1) || (bz == blocksZ - 1);
+                const bool insideMap = (col >= 0) && (row >= 0) && ((col + RS64TerrainChunkCells) <= m.width) && ((row + RS64TerrainChunkCells) <= m.height);
+                bool hasWater = !insideMap;
+                for (uint32_t z = 0; insideMap && !hasWater && (z < RS64TerrainChunkCells); ++z) {
+                    for (uint32_t x = 0; (x < RS64TerrainChunkCells) && !hasWater; ++x) {
+                        const size_t cell = size_t(row + z) * m.width + col + x;
+                        hasWater = (cell < m.waterKind.size()) && (m.waterKind[cell] != 0);
+                    }
+                }
+
+                if (!hasWater) {
+                    continue;
+                }
+
+                const float blockX = (float(col) - rs64TerrainCB.originX) * 512.0f + rs64TerrainCB.offsetX;
+                const float blockZ = (float(row) - rs64TerrainCB.originZ) * 512.0f + rs64TerrainCB.offsetZ;
+                if (perimeter || !boxCulled(blockX, blockZ, float(RS64TerrainChunkCells) * 512.0f, waterY0, waterY1)) {
+                    packed.push_back(bz * blocksX + bx);
+                }
+            }
+        }
+
+        g.waterCount = uint32_t(packed.size()) - g.waterBase;
+
+        // Sized for the most any frame can list, so the buffer is not replaced while earlier frames still read it.
+        const uint32_t chunksWorstCase = chunkCount * 2 + blocksX * blocksZ;
+        if ((g.chunks == nullptr) || (g.chunksCapacity < chunksWorstCase)) {
+            g.chunksCapacity = chunksWorstCase;
             g.chunks = worker->device->createBuffer(RenderBufferDesc::UploadBuffer(g.chunksCapacity * sizeof(uint32_t), RenderBufferFlag::STORAGE));
         }
 
@@ -4421,9 +4458,10 @@ namespace RT64 {
         // Runs on every level: besides any water it carries the map's edge cells out past the edge, so a land-only map fogs out instead of ending in a void.
         cb.water = 1;
         cb.waterMargin = uint32_t(rs64lights::TerrainWaterMargin);
+        cb.chunkListBase = g.waterBase;
         worker->commandList->setPipeline((packs ? shaderLibrary->rs64TerrainWaterPacks : shaderLibrary->rs64TerrainWater).pipeline.get());
         worker->commandList->setGraphicsPushConstants(0, &cb);
-        worker->commandList->drawInstanced((cb.mapWidth + 2 * cb.waterMargin) * (cb.mapHeight + 2 * cb.waterMargin) * 6, 1, 0, 0);
+        worker->commandList->drawInstanced(RS64TerrainChunkCells * RS64TerrainChunkCells * 6, g.waterCount, 0, 0);
     }
 
     void FramebufferRenderer::recordRS64TerrainBLAS(RenderWorker *worker) {

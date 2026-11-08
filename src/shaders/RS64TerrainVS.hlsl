@@ -79,7 +79,17 @@ void VSMain(uint vertexId : SV_VertexID, uint instanceId : SV_InstanceID,
         // Past the map edge every cell is drawn, so the map never ends in a void.
         const int margin = int(gTerrain.waterMargin);
         const uint spanW = gTerrain.mapWidth + 2 * gTerrain.waterMargin;
-        const int2 signedCell = int2((vertexId / 6) % spanW, (vertexId / 6) / spanW) - margin;
+        const uint spanH = gTerrain.mapHeight + 2 * gTerrain.waterMargin;
+        const uint blocksX = (spanW + gTerrain.chunkCells - 1) / gTerrain.chunkCells;
+        const uint block = gChunks[gTerrain.chunkListBase + instanceId];
+        const uint quadInBlock = vertexId / 6;
+        const uint2 spanCell = uint2(block % blocksX, block / blocksX) * gTerrain.chunkCells + uint2(quadInBlock % gTerrain.chunkCells, quadInBlock / gTerrain.chunkCells);
+        if ((spanCell.x >= spanW) || (spanCell.y >= spanH)) {
+            oPosition = float4(2.0f, 2.0f, 2.0f, 1.0f);
+            return;
+        }
+
+        const int2 signedCell = int2(spanCell) - margin;
         cell = uint2(clamp(signedCell, int2(0, 0), int2(gTerrain.mapWidth - 1, gTerrain.mapHeight - 1)));
         const uint kind = gCellLayers[cell.y * gTerrain.mapWidth + cell.x] >> 16;
         outside = any(signedCell != int2(cell));

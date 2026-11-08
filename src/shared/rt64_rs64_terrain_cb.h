@@ -33,8 +33,8 @@ namespace interop {
         uint lod;
         uint chunkListBase;
         uint chunkCount;
-        // 1: the water draw, one flat quad per water or shore cell at the water level (vertex id / 6 = cell), over the map plus waterMargin cells
-        // each side, where the edge cell carries on outward and the outer ring reaches past any far plane.
+        // 1: the water draw, one flat quad per water or shore cell at the water level (one instance per visible block of chunkCells square), over the map
+        // plus waterMargin cells each side, where the edge cell carries on outward and the outer ring reaches past any far plane.
         uint water;
         uint waterMargin;
         // 1: a cutscene that keeps the game's view distance, where land fades out toward the fog end so the sky shows there as with the game's own terrain.

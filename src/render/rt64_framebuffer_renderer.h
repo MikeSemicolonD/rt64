@@ -338,6 +338,8 @@ namespace RT64 {
             uint32_t chunksCapacity = 0;
             static constexpr uint32_t MaxLods = 8;
             uint32_t lodBase[MaxLods] = {}, lodCount[MaxLods] = {};
+            // The water draw's visible blocks in gChunks.
+            uint32_t waterBase = 0, waterCount = 0;
             // Per chunk: ground height range (record units), for frustum culling.
             std::vector<int32_t> chunkMinH, chunkMaxH;
             std::unique_ptr<RS64TerrainDescriptorSet> set;
