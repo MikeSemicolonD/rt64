@@ -138,11 +138,28 @@ static const float kTerrainSelfSkipCells = 1.0f;
 // How far past side-on (-N.L) a model face turned away from the sun reaches full shadow.
 static const float kModelTerminatorBand = 0.15f;
 
+// A drawn caster or cutout lies at this pixel's view distance.
+bool rs64OnDrawnCaster(float3 p, float dist) {
+    RayDesc ray;
+    ray.Origin = float3(0.0f, 0.0f, 0.0f);
+    ray.Direction = p / dist;
+    ray.TMin = dist * 0.98f;
+    ray.TMax = dist * 1.02f;
+    RayQuery<RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH | RAY_FLAG_SKIP_PROCEDURAL_PRIMITIVES | RAY_FLAG_FORCE_OPAQUE> q;
+    q.TraceRayInline(gScene, RAY_FLAG_NONE, 0x05, ray);
+    q.Proceed();
+    return q.CommittedStatus() == COMMITTED_TRIANGLE_HIT;
+}
+
 // A model face turned away from the sun is in its own shadow, as dark as a cast one (rs64lights::Config::modelTerminator). Only with the static
-// terrain lookup on, which tells terrain apart: drawn terrain's facets would saw-tooth.
+// terrain lookup on, which tells terrain apart: drawn terrain's facets would saw-tooth. Ridges of the smooth terrain can miss that coarser lookup, so the pixel must also be on a drawn model.
 bool rs64ModelTerminator(RS64Receiver rc, bool deck) {
     const uint f = gShadows.featureMask;
-    return ((f & 32u) != 0u) && ((f & 1u) != 0u) && (gShadows.softParams.w != 0.0f) && !rc.sky && !rc.terrain && !deck && (dot(rc.n, gShadows.sunDir.xyz) <= 0.0f);
+    if (((f & 32u) == 0u) || ((f & 1u) == 0u) || (gShadows.softParams.w == 0.0f) || rc.sky || rc.terrain || deck || (dot(rc.n, gShadows.sunDir.xyz) > 0.0f)) {
+        return false;
+    }
+
+    return rs64OnDrawnCaster(rc.p, rc.dist);
 }
 
 bool rs64ReceiverSunHit(RS64Receiver rc, RayDesc ray, out float hitT, out uint id) {
