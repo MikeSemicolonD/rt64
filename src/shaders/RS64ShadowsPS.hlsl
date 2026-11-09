@@ -9,7 +9,8 @@
 ConstantBuffer<RS64ShadowsCB> gShadows : register(b1, space3);
 
 // Water reflection: tangent of its blur cone and its strength (the indirect target multiplies the water's colour).
-static const float kWaterReflCone = 0.02f;
+static const float kWaterReflCone = 0.0f;
+static const float kWaterReflMinRise = 0.01f;
 static const float kWaterReflStrength = 1.5f;
 // The sun's glint on the water's ripples, as RS64TerrainPS: a sharp sparkle lobe over a broad sheen, added on top of the reflection where the sun reaches.
 static const float kWaterSunGlint = 1.2f;
@@ -130,6 +131,8 @@ struct RS64Receiver {
     float terrainSkip;
     // Water drawn under traced ground (the border rings): how far, in camera units, that ground sits above it, for the reflection ray to skip.
     float waterUnder;
+    // The flat water surface's normal on the camera's side.
+    float3 waterUp;
 };
 
 // The terrain's self-shadow skip, in terrain cells.
@@ -195,6 +198,7 @@ RS64Receiver rs64Receiver(float2 px) {
     r.terminatorWeight = 0.0f;
     r.terrainSkip = 0.0f;
     r.waterUnder = 0.0f;
+    r.waterUp = float3(0.0f, 0.0f, 0.0f);
     if (!r.sky) {
         float3 nT;
         r.terrain = (gShadows.softParams.w != 0.0f) && rs64TerrainNormal(r.p, r.dist, gShadows.terrainParams.x, nT);
@@ -217,6 +221,7 @@ RS64Receiver rs64Receiver(float2 px) {
             r.water = (r.waterCover > 0.0f);
             const float3 up = (dot(gRs64TerrainUp, nT) < 0.0f) ? -gRs64TerrainUp : gRs64TerrainUp;
             float3 surface = up;
+            r.waterUp = (dot(up, r.p) > 0.0f) ? -up : up;
             if (r.water && (gShadows.rippleStrength > 0.0f)) {
                 const float footprint = max(length(dpx), length(dpy)) * 512.0f / max(gRs64TerrainCell, 1e-6f);
                 const float3 ripple = rs64CofactorNormal(gRs64TerrainXf, rs64RippleNormal(gRs64TerrainMapXZ, gShadows.rippleTime, footprint, gShadows.rippleStrength));
@@ -540,6 +545,11 @@ RS64TraceOut PSMain(in float4 pos : SV_Position, in float2 uv : TEXCOORD0) {
         RayDesc r;
         r.Origin = origin;
         r.Direction = isRefl ? rs64RoughReflect(v, n, waterRefl ? kWaterReflCone : gShadows.reflParams.x, rot) : rs64CosineDir(n, g, giCount, frac(rot + 0.5f));
+        // A ripple seen at a grazing angle can reflect below the surface, where the ray finds the water instead of the sky.
+        if (isRefl && waterRefl) {
+            r.Direction = normalize(r.Direction + rc.waterUp * max(kWaterReflMinRise - dot(r.Direction, rc.waterUp), 0.0f));
+        }
+
         const float rise = max(dot(r.Direction, n), 0.05f);
         r.TMin = max(gShadows.tMin, ((isRefl && waterRefl) ? rc.waterUnder : deckSkip) / rise);
         r.TMax = isRefl ? gShadows.tMax : max(rs64Range(gShadows.giParams.y, dist), r.TMin * 2.0f);

@@ -176,11 +176,10 @@ void VSMain(uint vertexId : SV_VertexID, uint instanceId : SV_InstanceID,
         oSunDir = mul((float3x3)world, -gFrame[2].xyz);
     }
     else if (((cellWord >> 16) & 3u) != 0) {
-        // Ground in a water or shore cell under the drawn water surface takes the water's view tint (oEdge.y), fading in over the waterline band.
-        static const float kWaterlineBand = 2.0f;
+        // Ground in a water or shore cell under the drawn water surface takes the water's view tint (oEdge.y), fading in with the water's own shore alpha.
         oViewPos = mul(world, float4(pos, 1.0f)).xyz;
         oNormal = mul((float3x3)world, float3(0.0f, -1.0f, 0.0f));
-        oEdge = float2(0.0f, saturate((h - (gFrame[1].w * 16.0f - kWaterLift)) / kWaterlineBand));
+        oEdge = float2(0.0f, smoothstep(-kWaterLift, 0.0f, h - gFrame[1].w * 16.0f));
     }
 
     const float fogAlpha = terrainFog(mul(world, float4(pos, 1.0f)).xyz);

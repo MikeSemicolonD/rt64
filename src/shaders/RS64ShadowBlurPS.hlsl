@@ -105,7 +105,8 @@ BlurOut PSMain(in float4 pos : SV_Position, in float2 uv : TEXCOORD0) {
                 const float stepPx = dot(float2(q - px), gBlur.texelDir);
                 const float4 tq = gMask.Load(int3(q, 0));
                 const float4 iq = gIndirect.Load(int3(q, 0));
-                const float w = ((iq.a < 0.0f) == water) ? (g * depthWeight(dc + slope * stepPx, decodeDist(tq.b))) : 0.0f;
+                // Water taps skip the depth test: the stored distance is quantized, and on flat water its steps left thin rings in the reflection.
+                const float w = ((iq.a < 0.0f) == water) ? (g * (water ? 1.0f : depthWeight(dc + slope * stepPx, decodeDist(tq.b)))) : 0.0f;
                 sum += w * float2(tq.r, tq.a);
                 isum += w * iq;
                 wsum += w;
