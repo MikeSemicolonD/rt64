@@ -961,6 +961,8 @@ namespace RT64 {
         static void f5_ensure_viewport(State* state);
         // Above the N64's 8 MB (the recomp heap does use 0x71E000; hardware never sees this range; RT64's
         // segmented mask allows 16 MB and the host buffer is 512 MB).
+        // Display list chunks can also live in host RAM, up to where the 24-bit addresses reach.
+        static constexpr uint32_t F5_CHUNK_RAM_END = 0x01000000u;
         static constexpr uint32_t F5_VTX_SCRATCH = 0x00A00000u;   // 256 x 16 bytes
         static constexpr uint32_t F5_VP_SCRATCH  = 0x00A01000u;
         static constexpr uint32_t F5_FACE_SLOT   = 200;           // temp slots for per-face UVs
@@ -1031,7 +1033,7 @@ namespace RT64 {
             const uint32_t target = next & 0x00FFFFFFu;
             // The allocated chunk list is doubly linked: the next chunk's prev word must point back here.
             // A stale call into a recycled chunk otherwise walks the whole free list (thousands of garbage faces).
-            const bool fwdValid = (next >> 24) == 0x80u && target != 0 && target + 0x108u <= RDRAMSize;
+            const bool fwdValid = (next >> 24) == 0x80u && target != 0 && target + 0x108u <= F5_CHUNK_RAM_END;
             const bool backLinked = fwdValid && f5_rd32(state, target + 4) == (0x80000000u | base);
             const bool linked = backLinked;
             // ROGUESQ_F5_LINK_PROBE: log the forward-valid-but-back-link-mismatch case (the overlay-drop signature).
@@ -1211,10 +1213,10 @@ namespace RT64 {
             for (uint32_t i = 0; i < (uint32_t)r.md.size(); ++i) {
                 for (uint32_t off : { 0x3Cu, 0x40u }) {
                     uint32_t c = rd_be_u32(ram, r.md[i] + off);
-                    for (int k = 0; (k < 64) && f5_vaddr_ok(c, 0x108); ++k) {
+                    for (int k = 0; (k < 64) && f5_host_vaddr_ok(c, 0x108); ++k) {
                         r.chunkMesh.emplace(c & 0x00FFFFFFu, i);
                         const uint32_t nx = rd_be_u32(ram, c);
-                        if (!f5_vaddr_ok(nx, 0x108) || (rd_be_u32(ram, nx + 4) != (0x80000000u | (c & 0x00FFFFFFu)))) break;
+                        if (!f5_host_vaddr_ok(nx, 0x108) || (rd_be_u32(ram, nx + 4) != (0x80000000u | (c & 0x00FFFFFFu)))) break;
                         c = nx;
                     }
                 }
@@ -2062,7 +2064,7 @@ namespace RT64 {
         // 0x07: branch to chunk w1.
         void op_07_branch(State* state, DisplayList** dl) {
             const uint32_t target = state->rsp->fromSegmentedMasked((*dl)->w1);
-            if (target == 0 || target + 0x108u > RDRAMSize) { GBI_F3D::endDl(state, dl); return; }
+            if (target == 0 || target + 0x108u > F5_CHUNK_RAM_END) { GBI_F3D::endDl(state, dl); return; }
             f5_arm_mesh_emitters(state, target);
             f5_enter_chunk(state, dl, target);
         }
@@ -2080,7 +2082,7 @@ namespace RT64 {
                 return;
             }
             const uint32_t target = state->rsp->fromSegmentedMasked((*dl)->w1);
-            if (target == 0 || target + 0x108u > RDRAMSize) return;
+            if (target == 0 || target + 0x108u > F5_CHUNK_RAM_END) return;
             f5_arm_mesh_emitters(state, target);
             if (((*dl)->w0 >> 16) & 1) {
                 f5_enter_chunk(state, dl, target);
