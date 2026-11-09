@@ -902,7 +902,7 @@ namespace rs64lights {
         std::vector<TerrainCellColors> harvest;
         // The game's task counter (30 a second), the clock for the texture animations.
         uint64_t task = 0;
-        // A cutscene keeping the game's view distance: land fades out toward the fog end (RS64TerrainCB::fogClip).
+        // Land fades out toward the fog end (RS64TerrainCB::fogClip).
         bool fogClip = false;
     };
 
@@ -946,6 +946,56 @@ namespace rs64lights {
 
     // CI4 64x64 + 16 RGBA5551 bank entry (level/tex, 2080 bytes; odd rows TMEM word-swapped) to 4096 RGBA8 texels, as the explorer's decodeTerrainTex.
     constexpr uint32_t TerrainTexBytes = 2080;
+    // Cell words: low 16 bits texture layer, bits 16-17 water kind (0 ground, 1 water, 2 shore). Sets bits 18+ to the water draw's layer.
+    // Shore tiles paint sand and water into one texture, as do a few cells flagged open water, and showed as square patches, so those take a nearby texture open water commonly uses, or the map's main one.
+    inline void terrainWaterLayers(std::vector<uint32_t>& cells, const std::vector<uint8_t>& kinds, int32_t width, int32_t height) {
+        constexpr uint32_t RareShare = 8;
+        std::unordered_map<uint32_t, uint32_t> openCells;
+        uint32_t mostOpen = 0, mainOpen = 0;
+        for (size_t c = 0; (c < cells.size()) && (c < kinds.size()); ++c) {
+            if (kinds[c] == 1) {
+                const uint32_t layer = cells[c] & 0xFFFFu;
+                const uint32_t n = ++openCells[layer];
+                if (n > mostOpen) {
+                    mostOpen = n;
+                    mainOpen = layer;
+                }
+            }
+        }
+
+        const auto commonOpen = [&](uint32_t layer) {
+            const auto it = openCells.find(layer);
+            return (it != openCells.end()) && ((it->second * RareShare) >= mostOpen);
+        };
+
+        const auto nearbyOpen = [&](int32_t col, int32_t row, uint32_t own) {
+            for (int32_t r = 1; r <= 3; ++r) {
+                for (int32_t dz = -r; dz <= r; ++dz) {
+                    for (int32_t dx = -r; dx <= r; ++dx) {
+                        const int32_t x = col + dx, z = row + dz;
+                        if ((std::max(std::abs(dx), std::abs(dz)) != r) || (x < 0) || (z < 0) || (x >= width) || (z >= height)) {
+                            continue;
+                        }
+
+                        const size_t n = size_t(z) * width + x;
+                        if ((n < kinds.size()) && (kinds[n] == 1) && commonOpen(cells[n] & 0xFFFFu)) {
+                            return cells[n] & 0xFFFFu;
+                        }
+                    }
+                }
+            }
+
+            return (mostOpen > 0) ? mainOpen : own;
+        };
+
+        for (size_t c = 0; c < cells.size(); ++c) {
+            const uint32_t own = cells[c] & 0xFFFFu;
+            const uint8_t kind = (c < kinds.size()) ? kinds[c] : uint8_t(0);
+            const bool borrow = (kind == 2) || ((kind == 1) && !commonOpen(own));
+            cells[c] |= (borrow ? nearbyOpen(int32_t(c % width), int32_t(c / width), own) : own) << 18;
+        }
+    }
+
     inline void decodeTerrainTexture(const uint8_t* e, uint32_t out[4096]) {
         auto c5 = [](uint32_t v) {
             return (v << 3) | (v >> 2);
