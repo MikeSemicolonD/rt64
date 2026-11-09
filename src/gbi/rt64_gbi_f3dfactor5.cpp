@@ -46,6 +46,7 @@ extern "C" int rs64_static_terrain_mode(void);
 extern "C" int rs64_terrain_fog_clip(void);
 extern "C" float rs64_fog_dist(void);
 extern "C" float rs64_fog_tail_end(void);
+extern "C" int rs64_level_has_clouds(void);
 extern "C" float rs64_draw_dist(void);
 extern "C" int rs64_credits_active(void);
 
@@ -2882,7 +2883,7 @@ namespace RT64 {
         static constexpr uint32_t kTaloraanCloudSheetGeom = 0x800005u;
         static void f5_cloud_floor(State* state, uint32_t mvOff) {
             const bool taloraan = (rd_be_u32(state->RDRAM, 0x80130B70u) == kTaloraanLevel);
-            const double k = taloraan ? (double)rs64_draw_dist() : 1.0;
+            const double k = (taloraan || rs64_level_has_clouds()) ? (double)rs64_draw_dist() : 1.0;
             const auto& p = state->rsp->projMatrixStack[state->rsp->projectionMatrixStackSize - 1];
             float stockFar = 1.0f;
             if ((k > 1.0) && ((double)p[3][3] == 0.0) && ((double)p[2][3] != 0.0)) {
