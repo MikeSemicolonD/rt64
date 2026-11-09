@@ -1931,6 +1931,11 @@ namespace rs64lights {
         return !levelSun && (missionRoot == 0) && (menu == MenuSceneNone);
     }
 
+    // No level light this frame, but the same level's mission is still on (or the pause menu's scene is up): the level's last sun stays.
+    inline bool keepMissionSun(bool levelSun, uint32_t missionRoot, bool inMission, MenuScene menu, bool sameLevel) {
+        return !levelSun && sameLevel && (menu == MenuSceneNone) && ((missionRoot != 0) || inMission);
+    }
+
     // Hangar key light in camera space (stable while the camera orbits; the floor keeps the game's painted shadow); ROGUESQ_RT_HANGAR_SUN=x,y,z overrides.
     inline const float* hangarSunDir() {
         static const struct Dir {

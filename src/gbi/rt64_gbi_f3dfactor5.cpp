@@ -1267,6 +1267,20 @@ namespace RT64 {
             // The briefing room and the hangar have no game light and an unrotated menu camera: use authored lights.
             const uint32_t missionRoot = rd_be_u32(ram, 0x80138D20u);
             const rs64lights::MenuScene menu = rs64lights::menuScene(missionRoot, rd_be_u32(ram, 0x800CE730u), ram[0xCE734u ^ 3], rd_be_u16(ram, 0x800CFF50u), rs64lights::activeOverlay().load(std::memory_order_relaxed) == 1);
+            // The pause menu builds its own scene (root and light list) over the held mission view and leaves the level's list head cleared for the rest of the mission: keep the level's last sun.
+            static rs64lights::Sun s_mission_sun;
+            static uint32_t s_mission_level = UINT32_MAX;
+            const uint32_t level = rd_be_u32(ram, 0x80130B70u);
+            const bool inMission = (ram[0x130B17u ^ 3] != 0);
+
+            if (sun.valid && sun.levelWorld) {
+                s_mission_sun = sun;
+                s_mission_level = level;
+            }
+            else if (rs64lights::keepMissionSun(sun.valid, missionRoot, inMission, menu, level == s_mission_level)) {
+                sun = s_mission_sun;
+            }
+
             if (rs64lights::introScene(sun.valid, missionRoot, menu)) {
                 static const float identity[9] = { 1, 0, 0, 0, 1, 0, 0, 0, 1 };
                 sun.valid = rs64lights::sunCameraDir(rs64lights::menuSunDir(), identity, sun.dir);
@@ -1301,17 +1315,6 @@ namespace RT64 {
             }
             else {
                 rs64lights::menuImageGlow().active = false;
-            }
-            // The pause menu builds its own scene (root and light list) over the held mission view: keep the level's last sun (camera space; the camera holds still).
-            static rs64lights::Sun s_mission_sun;
-            static uint32_t s_mission_level = UINT32_MAX;
-            const uint32_t level = rd_be_u32(ram, 0x80130B70u);
-            if (sun.valid && sun.levelWorld) {
-                s_mission_sun = sun;
-                s_mission_level = level;
-            }
-            else if (!sun.valid && (missionRoot != 0) && (menu == rs64lights::MenuSceneNone) && (level == s_mission_level)) {
-                sun = s_mission_sun;
             }
             state->ext.workloadQueue->workloads[state->ext.workloadQueue->writeCursor].rs64Sun = sun;
         }
