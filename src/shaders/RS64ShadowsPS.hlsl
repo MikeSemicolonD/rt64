@@ -652,8 +652,9 @@ RS64TraceOut PSMain(in float4 pos : SV_Position, in float2 uv : TEXCOORD0) {
     // Water mixes dst * (1 - F) + R * F: the compose keeps 1 - F of the drawn water (alpha carries -F) and a second, additive draw adds R * F (rgb).
     // The colour target is UNORM, so a ratio against the water's colour clipped every reflection brighter than the water to the same value.
     const bool waterMix = (waterF > 0.0f) && (gShadows.debugMode != 9) && (gShadows.debugMode != 10);
+    // Water keeps its own blur size: a shadow's wide penumbra (a World Devastator's over the sea) spread the blur's few taps 6 rows apart, which showed in the reflection as regular bands.
     if (waterMix) {
-        radius = max(radius, gShadows.terrainParams.y);
+        radius = gShadows.terrainParams.y;
     }
 
     // The sun's glint: the mirror ray only meets the sky as drawn, which has no sun in it, and the compose keeps little of the drawn water's own glint.

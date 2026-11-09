@@ -81,6 +81,10 @@ BlurOut PSMain(in float4 pos : SV_Position, in float2 uv : TEXCOORD0) {
             }
         }
     }
+    if (water) {
+        radius = min(radius, c.g);
+    }
+
     // Shadow (r) and AO (a) of the mask and the indirect rgb + reflection share one set of weights.
     float s = c.r;
     float ao = c.a;
