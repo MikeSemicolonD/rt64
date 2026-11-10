@@ -141,6 +141,13 @@ LIBRARY_EXPORT bool RasterPS(const RenderParams rp, float4 vertexPosition, float
         gTextureSlot = tileIndex0;
 #endif
         texVal0 = sampleTexture(otherMode, rp.flags, textureUV, ddx(vertexUV), ddy(vertexUV), rdpTile, gpuTile, false);
+#ifndef RT64_TEXTURE_SLOTS
+        if (gpuTile.blendPrevWeight > 0.0f) {
+            GPUTile prevTile = gpuTile;
+            prevTile.textureIndex = gpuTile.blendTextureIndex;
+            texVal0 = lerp(texVal0, sampleTexture(otherMode, rp.flags, textureUV, ddx(vertexUV), ddy(vertexUV), rdpTile, prevTile, false), gpuTile.blendPrevWeight);
+        }
+#endif
     }
     
     if (renderFlagUsesTexture1(rp.flags)) {
@@ -160,6 +167,13 @@ LIBRARY_EXPORT bool RasterPS(const RenderParams rp, float4 vertexPosition, float
         gTextureSlot = oneCycleHardwareBug ? tileIndex0 : tileIndex1;
 #endif
         texVal1 = sampleTexture(otherMode, rp.flags, textureUV, ddx(vertexUV), ddy(vertexUV), rdpTile, gpuTile, oneCycleHardwareBug);
+#ifndef RT64_TEXTURE_SLOTS
+        if (gpuTile.blendPrevWeight > 0.0f) {
+            GPUTile prevTile = gpuTile;
+            prevTile.textureIndex = gpuTile.blendTextureIndex;
+            texVal1 = lerp(texVal1, sampleTexture(otherMode, rp.flags, textureUV, ddx(vertexUV), ddy(vertexUV), rdpTile, prevTile, oneCycleHardwareBug), gpuTile.blendPrevWeight);
+        }
+#endif
     }
     
     // Color combiner.

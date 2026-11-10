@@ -409,7 +409,9 @@ struct RS64TraceOut {
 };
 
 RS64TraceOut PSMain(in float4 pos : SV_Position, in float2 uv : TEXCOORD0) {
-    const RS64Receiver rc = rs64Receiver(pos.xy);
+    // Half-resolution trace: each texel takes the top-left pixel of its 2x2 block; RS64ShadowTemporalPS upsamples.
+    const float2 fullPos = ((gShadows.featureMask & 64u) != 0u) ? (floor(pos.xy) * 2.0f + 0.5f) : pos.xy;
+    const RS64Receiver rc = rs64Receiver(fullPos);
     RS64TraceOut o;
     o.mask = float4(0.0f, 0.0f, rc.sky ? 65000.0f : (rc.dist / 64.0f), 0.0f);
     o.indirect = float4(0.0f, 0.0f, 0.0f, 0.0f);
@@ -639,7 +641,7 @@ RS64TraceOut PSMain(in float4 pos : SV_Position, in float2 uv : TEXCOORD0) {
     // pixel, fog included, so the shadow only takes the share of its brightness the surface gives (drawn - fog colour x fog): scaling by 1 - fog alone
     // also darkened the fog mixed in, and shadows in haze read as hard grey shapes where the game's baked shading fades into the fog.
     const float fogHere = lerp(rs64FogAlpha(p), rs64WaterFog(p), rc.waterCover);
-    const float3 drawn = gColor.Load(int3(pos.xy, 0)).rgb;
+    const float3 drawn = gColor.Load(int3(fullPos, 0)).rgb;
     const float3 lumW = float3(0.2126f, 0.7152f, 0.0722f);
     const float drawnLum = dot(drawn, lumW);
     const float surfaceLum = dot(max(drawn - gShadows.fogColor.rgb * fogHere, 0.0f), lumW);

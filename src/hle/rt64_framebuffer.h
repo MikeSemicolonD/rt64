@@ -52,6 +52,8 @@ namespace RT64 {
         uint32_t modifiedBytes;
         uint32_t RAMBytes;
         uint64_t RAMHash;
+        // RDRAM as of the last render, so CPU changes can be counted without a GPU readback.
+        std::vector<uint8_t> trackedRAM;
         std::array<uint32_t, 4> ditherPatterns;
         TileCopyCache tileCopyCache;
         bool widthChanged;
@@ -67,7 +69,7 @@ namespace RT64 {
         bool overlaps(uint32_t start, uint32_t end) const;
         void discardLastWrite();
         bool isLastWriteDifferent(Framebuffer::Type newType) const;
-        uint32_t copyRAMToNativeAndChanges(RenderWorker *worker, FramebufferChange &fbChange, const uint8_t *src, uint32_t rowStart, uint32_t rowCount, uint8_t fmt, bool invalidateTargets, const ShaderLibrary *shaderLibrary);
+        uint32_t copyRAMToNativeAndChanges(RenderWorker *worker, FramebufferChange &fbChange, const uint8_t *src, uint32_t rowStart, uint32_t rowCount, uint8_t fmt, bool invalidateTargets, const ShaderLibrary *shaderLibrary, bool readModifiedCount = true);
         FramebufferChange *readChangeFromBytes(RenderWorker *worker, FramebufferChangePool &fbChangePool, Type type, uint8_t fmt, const uint8_t *src, uint32_t rowStart, uint32_t rowCount, const ShaderLibrary *shaderLibrary);
         FramebufferChange *readChangeFromStorage(RenderWorker *worker, const FramebufferStorage &fbStorage, FramebufferChangePool &fbChangePool, Type type, uint8_t fmt,
             uint32_t maxFbPairIndex, uint32_t rowStart, uint32_t rowCount, const ShaderLibrary *shaderLibrary);

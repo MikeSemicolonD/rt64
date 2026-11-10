@@ -14,21 +14,81 @@ struct TemporalOut {
     float4 indirect : SV_TARGET1;
 };
 
+// Half-resolution trace: this pixel takes the four nearest traced texels, those at its own distance counting most, and sky texels not at all.
+// Land and water don't mix (water's indirect alpha carries -F), the group of the nearest texel in distance wins.
+void upsample(int2 px, float code, out TemporalOut o) {
+    o.mask = float4(0.0f, 0.0f, code, 0.0f);
+    o.indirect = float4(0.0f, 0.0f, 0.0f, 0.0f);
+    if (code >= 60000.0f) {
+        return;
+    }
+
+    const int2 lo = int2(gBlur.viewport.xy) >> 1;
+    const int2 hi = max((int2(gBlur.viewport.xy + gBlur.viewport.zw) >> 1) - 1, lo);
+    const int2 i0 = px >> 1;
+    const float2 f = float2(px & 1) * 0.5f;
+    float4 masks[4];
+    float4 inds[4];
+    float weights[4];
+    float best = 0.0f;
+    bool bestWater = false;
+    [unroll]
+    for (int k = 0; k < 4; k++) {
+        const int2 o2 = int2(k & 1, k >> 1);
+        const int2 q = clamp(i0 + o2, lo, hi);
+        masks[k] = gMask.Load(int3(q, 0));
+        inds[k] = gIndirect.Load(int3(q, 0));
+        weights[k] = 0.0f;
+        if (masks[k].b < 60000.0f) {
+            const float d = abs(masks[k].b - code) / max(code, 1.0e-3f);
+            const float bilinear = (o2.x ? f.x : 1.0f - f.x) * (o2.y ? f.y : 1.0f - f.y);
+            weights[k] = (bilinear + 0.01f) / (1.0e-4f + d * d);
+            if (weights[k] > best) {
+                best = weights[k];
+                bestWater = (inds[k].a < 0.0f);
+            }
+        }
+    }
+
+    float4 mask = 0.0f;
+    float4 ind = 0.0f;
+    float wsum = 0.0f;
+    [unroll]
+    for (int k = 0; k < 4; k++) {
+        if ((weights[k] > 0.0f) && ((inds[k].a < 0.0f) == bestWater)) {
+            mask += weights[k] * masks[k];
+            ind += weights[k] * inds[k];
+            wsum += weights[k];
+        }
+    }
+
+    if (wsum > 0.0f) {
+        o.mask = mask / wsum;
+        o.mask.b = code;
+        o.indirect = ind / wsum;
+    }
+}
+
 // Accumulates the traced AO (mask.a) and indirect light (indirect.rgb) over frames: the surface's position reprojected into the previous frame through
 // the camera motion, kept when that frame saw the same surface there (its distance code matches). Shadow, radius, distance and reflection stay per frame.
 TemporalOut PSMain(in float4 pos : SV_Position, in float2 uv : TEXCOORD0) {
     const int2 px = int2(pos.xy);
-    TemporalOut o;
-    o.mask = gMask.Load(int3(px, 0));
-    o.indirect = gIndirect.Load(int3(px, 0));
-    if ((gBlur.temporal.x <= 0.0f) || (o.mask.b >= 60000.0f)) {
-        return o;
-    }
-
     const float depth = gDepth.Load(int3(px, 0));
     const float2 rel = (pos.xy - gBlur.viewport.xy) / gBlur.viewport.zw;
     const float4 v4 = mul(gBlur.viewFromScreen, float4(rel.x * 2.0f - 1.0f, 1.0f - rel.y * 2.0f, depth, 1.0f));
     const float3 p = v4.xyz / v4.w;
+    TemporalOut o;
+    if (gBlur.temporal.w > 0.5f) {
+        upsample(px, (depth >= 0.9980f) ? 65000.0f : (length(p) / 64.0f), o);
+    }
+    else {
+        o.mask = gMask.Load(int3(px, 0));
+        o.indirect = gIndirect.Load(int3(px, 0));
+    }
+    if ((gBlur.temporal.x <= 0.0f) || (o.mask.b >= 60000.0f)) {
+        return o;
+    }
+
     const float4 s4 = mul(gBlur.prevScreenFromView, float4(p, 1.0f));
     if (s4.w <= 0.0f) {
         return o;

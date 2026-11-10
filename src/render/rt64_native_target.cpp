@@ -60,7 +60,7 @@ namespace RT64 {
         return rowSize * height;
     }
 
-    uint32_t NativeTarget::copyFromRAM(RenderWorker *worker, FramebufferChange &emptyFbChange, uint32_t width, uint32_t height, uint32_t rowStart, uint8_t siz, uint8_t fmt, const uint8_t *data, bool invalidateTargets, const ShaderLibrary *shaderLibrary) {
+    uint32_t NativeTarget::copyFromRAM(RenderWorker *worker, FramebufferChange &emptyFbChange, uint32_t width, uint32_t height, uint32_t rowStart, uint8_t siz, uint8_t fmt, const uint8_t *data, bool invalidateTargets, const ShaderLibrary *shaderLibrary, bool readModifiedCount) {
         assert(worker != nullptr);
 
         // Create the buffers for change count readback if they've not been created yet.
@@ -223,7 +223,7 @@ namespace RT64 {
         
         // Read the modified count by executing and waiting.
         uint32_t modifiedCount = 0;
-        if (hasCurrentResource) {
+        if (hasCurrentResource && readModifiedCount) {
             worker->commandList->end();
             worker->execute();
             worker->wait();
@@ -234,7 +234,7 @@ namespace RT64 {
             changeReadbackBuffer->unmap();
         }
         // Consider all pixels as modified.
-        else {
+        else if (!hasCurrentResource) {
             modifiedCount = width * height;
         }
 

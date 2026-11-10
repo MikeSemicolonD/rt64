@@ -12,6 +12,7 @@
 #include "common/rt64_common.h"
 #include "gbi/rt64_f3d.h"
 #include "hle/rt64_rdp.h"
+#include "hle/rt64_rs64_lights.h"
 #include "render/rt64_render_target.h"
 #include "render/rt64_render_worker.h"
 
@@ -838,7 +839,13 @@ namespace RT64 {
             FramebufferChange &fbChange = fbChangePool.use(renderWorker, fbChangeType, fb->width, fb->height, shaderLibrary->usesHDR);
             const uint32_t DifferenceFractionNum = 1;
             const uint32_t DifferenceFractionDiv = 4;
-            const uint32_t differentPixels = fb->copyRAMToNativeAndChanges(renderWorker, fbChange, fbRAM, 0, fb->height, fb->lastWriteFmt, false, shaderLibrary);
+            // A GPU readback of the count waits behind the previous frame's whole render, so it's only used before the first tracked copy of this RAM exists.
+            const bool tracked = (fb->trackedRAM.size() == fb->RAMBytes) && (fb->siz > 0);
+            uint32_t differentPixels = fb->copyRAMToNativeAndChanges(renderWorker, fbChange, fbRAM, 0, fb->height, fb->lastWriteFmt, false, shaderLibrary, !tracked);
+            if (tracked) {
+                differentPixels = rs64lights::changedPixels(fbRAM, fb->trackedRAM.data(), fb->RAMBytes, (1u << fb->siz) >> 1);
+            }
+
             const uint32_t differentBytes = differentPixels << fb->siz >> 1;
             fb->modifiedBytes += differentBytes;
 
@@ -873,6 +880,7 @@ namespace RT64 {
         while (it != framebuffers.end()) {
             if ((it->second.maxHeight > 0) && (it->second.RAMBytes > 0)) {
                 it->second.RAMHash = XXH3_64bits(&RDRAM[it->first], it->second.RAMBytes);
+                it->second.trackedRAM.assign(&RDRAM[it->first], &RDRAM[it->first] + it->second.RAMBytes);
             }
 
             it++;
@@ -1071,13 +1079,24 @@ namespace RT64 {
         recordOperations(renderWorker, fbChangePool, fbStorage, shaderLibrary, textureCache, operations, targetManager, resolutionScale, maxFbPairIndex, submissionFrame);
     }
 
-    void FramebufferManager::performDiscards(const std::vector<uint32_t> &discards) {
+    void FramebufferManager::performDiscards(const std::vector<uint32_t> &discards, bool retire) {
         for (uint32_t address : discards) {
             auto it = framebuffers.find(address);
-            if (it != framebuffers.end()) {
+            if (it == framebuffers.end()) {
+                continue;
+            }
+
+            if (retire) {
+                retiredFramebuffers.emplace_back(framebuffers.extract(it));
+            }
+            else {
                 framebuffers.erase(it);
             }
         }
+    }
+
+    void FramebufferManager::clearRetired() {
+        retiredFramebuffers.clear();
     }
 
     void FramebufferManager::destroyAllTileCopies() {

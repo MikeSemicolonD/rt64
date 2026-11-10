@@ -160,6 +160,8 @@ namespace RT64 {
         };
 
         std::unordered_map<uint32_t, Framebuffer> framebuffers;
+        // Discarded while an upload may still read them on the GPU; freed by clearRetired.
+        std::vector<std::unordered_map<uint32_t, Framebuffer>::node_type> retiredFramebuffers;
         std::unordered_map<uint64_t, TileCopy> tileCopies;
         std::unordered_map<uint64_t, uint64_t> reinterpretTileCache;
         std::unique_ptr<RenderTexture> dummyTLUTTexture;
@@ -222,7 +224,8 @@ namespace RT64 {
             const std::vector<FramebufferOperation> &operations, RenderTargetManager &targetManager, hlslpp::float2 resolutionScale, uint32_t maxFbPairIndex,
             uint64_t submissionFrame, std::unordered_set<RenderTarget *> *resizedTargets = nullptr);
 
-        void performDiscards(const std::vector<uint32_t> &discards);
+        void performDiscards(const std::vector<uint32_t> &discards, bool retire = false);
+        void clearRetired();
 
         void destroyAllTileCopies();
         uint64_t nextWriteTimestamp();

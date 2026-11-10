@@ -96,6 +96,7 @@ namespace RT64 {
         uint32_t displayListAddress;
         uint64_t displayListCounter;
         bool rdramCheckPending;
+        bool rdramUploadPending = false;
         uint32_t lastWorkloadIndex;
         VI lastScreenVI;
         uint64_t lastScreenHash;
@@ -151,6 +152,7 @@ namespace RT64 {
         void submitFramebufferPair(FramebufferPair::FlushReason flushReason);
         void checkRDRAM();
         void fullSync();
+        void finishRDRAMUpload();
         void fullSyncFramebufferPairTiles(Workload &workload, FramebufferPair &fbPair, uint32_t &loadOpCursor, uint32_t &rdpTileCursor);
         void listProcessBegin();
         void listProcessEnd();

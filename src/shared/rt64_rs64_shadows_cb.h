@@ -41,7 +41,7 @@ namespace interop {
         float4 sunColor;
         // Hit colours (patched when the scene is built): hit table count, emissive table count, terrain colour, caster average (rgba8).
         uint4 hitParams;
-        // 1 sun shadows, 2 AO, 4 GI, 8 reflections, 16 water reflections.
+        // 1 sun shadows, 2 AO, 4 GI, 8 reflections, 16 water reflections, 32 model terminator, 64 half-resolution trace.
         uint featureMask;
         // First water triangle of the static terrain mesh (0 = no water).
         uint waterPrim;

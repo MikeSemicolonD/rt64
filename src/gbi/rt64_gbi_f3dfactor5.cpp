@@ -1613,11 +1613,7 @@ namespace RT64 {
 
             RDP& rdp = *state->rdp;
             const Workload& wl = state->ext.workloadQueue->workloads[state->ext.workloadQueue->writeCursor];
-            RDP::TMEMSnapshot saved;
-            rdp.applyPassLoads(wl.drawData.loadOperations, wl.drawRanges.loadOperations.first, saved);
-            const float emission = rs64lights::spriteEmission(reinterpret_cast<const uint8_t*>(rdp.TMEM), color, masked ? &mask : nullptr);
-            rdp.restoreTMEM(saved);
-            return emission;
+            return rs64lights::spriteEmission(rdp.passTMEM(wl.drawData.loadOperations, wl.drawRanges.loadOperations.first), color, masked ? &mask : nullptr);
         }
         // Light presets keyed by this sprite: their lights at the sprite (at: its placement), radius x its camera size (capped as the automatic light's), brightness x its PRIM
         // alpha x at.intensity (the frame's brightness weight) so they fade with it. Records the key for the Lights tab's picker. True when a preset matched (its lights, or none, replace
@@ -3199,6 +3195,19 @@ namespace RT64 {
             s_cache_count = n;
         }
 
+        // ROGUESQ_F5_FLIPBOOK_BLEND (default on): tags the next draw with the effect's id so its animation image crossfades from the previous one. The new call needs its own tile entries.
+        static void f5_flipbook_mark(State* state, uint32_t id) {
+            static const bool s_on = env_on("ROGUESQ_F5_FLIPBOOK_BLEND", true);
+
+            if (!s_on || (state->drawCall.rs64FlipbookId == id)) {
+                return;
+            }
+
+            state->flush();
+            state->drawCall.rs64FlipbookId = id;
+            state->updateDrawStatusAttribute(DrawAttribute::Texture);
+        }
+
         // 0xBD: ucode LOAD OVERLAY 0x2C = camera-facing BILLBOARD sprite -> texrect (see project memory
         // animated-effect-sprites-invisible). Hardware projects the cached center vertex and emits a
         // screen-space texrect. First-pass HLE: emit a quad around the cached center (op_04) with the
@@ -3325,6 +3334,7 @@ namespace RT64 {
                     const bool isolate = !s_sprite_xform && !nodeHasId;
                     auto& modelTop = state->rsp->modelMatrixStack[state->rsp->modelMatrixStackSize - 1];
                     const hlslpp::float4x4 savedModel = modelTop;
+                    uint32_t flipId = 0;
                     if (s_sprite_xform) {
                         const uint32_t dlPhys = (uint32_t)(reinterpret_cast<const uint8_t*>(*dl) - state->RDRAM);
                         const uint32_t face = f5_lookup_sprite_face(dlPhys);
@@ -3339,6 +3349,7 @@ namespace RT64 {
                             spriteId = f5_world_sprite_id(state, savedModel, s_mv_candidate_id, ordinal, (float)c.x, (float)c.y, (float)c.z, (float)std::max(halfX, halfY));
                         }
                         if (spriteId != 0) {
+                            flipId = spriteId;
                             state->rsp->matrixId(spriteId, /*push*/true, /*proj*/false, /*decompose*/true,
                                 G_EX_COMPONENT_INTERPOLATE, G_EX_COMPONENT_INTERPOLATE, G_EX_COMPONENT_INTERPOLATE, G_EX_COMPONENT_INTERPOLATE, G_EX_COMPONENT_INTERPOLATE,
                                 G_EX_COMPONENT_SKIP, G_EX_COMPONENT_SKIP, G_EX_COMPONENT_AUTO, G_EX_COMPONENT_AUTO,
@@ -3389,8 +3400,10 @@ namespace RT64 {
                         const int rb = f5_ring_buffer(s_mv_last_w1 & 0x00FFFFFFu);
                         f5_hud_probe_slot(state, (rb < 0) ? "sprite-fixedmtx" : (rb > 1) ? "sprite-ring2" : "sprite-ring0", F5_FACE_SLOT, 4);
                     }
+                    f5_flipbook_mark(state, flipId);
                     state->rsp->drawIndexedTri(F5_FACE_SLOT, F5_FACE_SLOT + 3, F5_FACE_SLOT + 2);
                     state->rsp->drawIndexedTri(F5_FACE_SLOT, F5_FACE_SLOT + 1, F5_FACE_SLOT + 3);
+                    f5_flipbook_mark(state, 0);
                     if (rs64mcp::drawWatchArmed()) {
                         f5_report_drawn(state, f5_sprite_key(state), F5_FACE_SLOT, 4);
                     }
@@ -3714,6 +3727,7 @@ namespace RT64 {
             if (!s_cull_skip) {
                 f5_probe_face_verts(state, tmp, n, (state->rdp->otherMode.L & 0x04u) != 0);
                 bool bakedGroup = false;
+                uint32_t flipId = 0;
                 {
                     const uint32_t mvOff = s_mv_last_w1 & 0x00FFFFFFu;
                     const bool inRing = f5_ring_buffer(mvOff) >= 0;
@@ -3733,6 +3747,7 @@ namespace RT64 {
                                 G_EX_ORDER_LINEAR, G_EX_ASPECT_AUTO, G_EX_EDIT_NONE, /*idIsAddress*/false, /*editGroup*/false);
                             state->rsp->modelViewProjChanged = true;
                             bakedGroup = true;
+                            flipId = ((id >> 28) == 0xAu) ? id : 0u;
                         }
                     }
                 }
@@ -3856,8 +3871,10 @@ namespace RT64 {
                 if (backdropTile) {
                     state->rdp->setTile(rtile, savedTile.fmt, savedTile.siz, savedTile.line, savedTile.tmem, savedTile.palette, savedTile.cmt | G_TX_CLAMP, savedTile.cms | G_TX_CLAMP, savedTile.maskt, savedTile.masks, savedTile.shiftt, savedTile.shifts);
                 }
+                f5_flipbook_mark(state, flipId);
                 state->rsp->drawIndexedTri(F5_FACE_SLOT, F5_FACE_SLOT + 1, F5_FACE_SLOT + 2);
                 if (n == 4) state->rsp->drawIndexedTri(F5_FACE_SLOT, F5_FACE_SLOT + 2, F5_FACE_SLOT + 3);
+                f5_flipbook_mark(state, 0);
                 if (backdropTile) {
                     state->rdp->setTile(rtile, savedTile.fmt, savedTile.siz, savedTile.line, savedTile.tmem, savedTile.palette, savedTile.cmt, savedTile.cms, savedTile.maskt, savedTile.masks, savedTile.shiftt, savedTile.shifts);
                 }

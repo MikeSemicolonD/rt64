@@ -55,15 +55,23 @@ static bool rs64EnvOn(const char *name) {
     return (e != nullptr) && (e[0] != '\0') && (e[0] != '0');
 }
 
-// ROGUESQ_SKIP_COLOR_READBACK / ROGUESQ_SKIP_DEPTH_READBACK force the write-back off regardless of the framebuffer.writeBack setting.
-static bool rs64SkipColorReadbackEnv() {
-    static const bool v = rs64EnvOn("ROGUESQ_SKIP_COLOR_READBACK");
-    return v;
+// Missions skip the copy back to RDRAM and its GPU wait; numMissionObjectives (0x80130B17) is non-zero in one. The env var overrides it: 1 = always skip, 0 = never.
+static bool rs64SkipReadback(const uint8_t *RDRAM, const char *value) {
+    if ((value != nullptr) && (value[0] != '\0')) {
+        return value[0] != '0';
+    }
+
+    return RDRAM[0x130B17u ^ 3] != 0;
 }
 
-static bool rs64SkipDepthReadbackEnv() {
-    static const bool v = rs64EnvOn("ROGUESQ_SKIP_DEPTH_READBACK");
-    return v;
+static bool rs64SkipColorReadback(const uint8_t *RDRAM) {
+    static const char *s_value = std::getenv("ROGUESQ_SKIP_COLOR_READBACK");
+    return rs64SkipReadback(RDRAM, s_value);
+}
+
+static bool rs64SkipDepthReadback(const uint8_t *RDRAM) {
+    static const char *s_value = std::getenv("ROGUESQ_SKIP_DEPTH_READBACK");
+    return rs64SkipReadback(RDRAM, s_value);
 }
 
 namespace RT64 {
@@ -595,10 +603,7 @@ namespace RT64 {
             const bool sampled = drawCall.colorCombiner.usesTexture(drawCall.otherMode, 0, drawCall.otherMode.cycleType() == G_CYC_1CYCLE);
             bool ok = false;
             if (sampled) {
-                RDP::TMEMSnapshot saved;
-                rdp->applyPassLoads(workload.drawData.loadOperations, workload.drawRanges.loadOperations.first, saved);
-                ok = rs64lights::tmemAverage(reinterpret_cast<const uint8_t *>(rdp->TMEM), t0.fmt, t0.siz, t0.tmem, t0.line, uint32_t(((t0.lrs - t0.uls) >> 2) + 1), uint32_t(((t0.lrt - t0.ult) >> 2) + 1), t0.palette, tex, cov);
-                rdp->restoreTMEM(saved);
+                ok = rs64lights::tmemAverage(rdp->passTMEM(workload.drawData.loadOperations, workload.drawRanges.loadOperations.first), t0.fmt, t0.siz, t0.tmem, t0.line, uint32_t(((t0.lrs - t0.uls) >> 2) + 1), uint32_t(((t0.lrt - t0.ult) >> 2) + 1), t0.palette, tex, cov);
             }
 
             // w: bit 0 the texture average is valid, bit 1 the colour combiner reads prim (a prim it ignores must not tint the hit colour).
@@ -798,6 +803,15 @@ namespace RT64 {
         return s_on;
     }
 
+    // The framebuffer worker's command list can't be reused until the upload from checkRDRAM has finished.
+    void State::finishRDRAMUpload() {
+        if (rdramUploadPending) {
+            ext.framebufferGraphicsWorker->wait();
+            framebufferManager.clearRetired();
+            rdramUploadPending = false;
+        }
+    }
+
     void State::checkRDRAM() {
         if (!rdramCheckPending) {
             return;
@@ -813,14 +827,88 @@ namespace RT64 {
             framebufferManager.storeRAM(workload.fbStorage, RDRAM, fbPairIndex);
             framebufferManager.checkRAM(RDRAM, differentFbs, true);
             if (!differentFbs.empty()) {
-                RenderWorkerExecution execution(ext.framebufferGraphicsWorker);
+                // No wait for the fence: on a single GPU queue it sits behind the previous frame's whole render, and the upload is queued ahead of anything that uses it.
+                finishRDRAMUpload();
+                ext.framebufferGraphicsWorker->commandList->begin();
                 framebufferManager.uploadRAM(ext.framebufferGraphicsWorker, differentFbs.data(), differentFbs.size(), workload.fbChangePool, RDRAM, true, drawFbOperations, drawFbDiscards, ext.shaderLibrary);
+                ext.framebufferGraphicsWorker->commandList->end();
+                ext.framebufferGraphicsWorker->execute();
+                rdramUploadPending = true;
             }
 
-            framebufferManager.performDiscards(drawFbDiscards);
+            // The upload above may still be reading a discarded framebuffer's buffers on the GPU, so those stay alive until it finishes.
+            framebufferManager.performDiscards(drawFbDiscards, rdramUploadPending);
         }
 
         rdramCheckPending = false;
+    }
+
+    // Tracks each effect sprite's last two animation images per texture slot and sets how much of the previous one still shows. The swap lags one animation frame, the images are always in the cache.
+    static void rs64FlipbookTile(DrawCallTile &tile, uint32_t id, uint32_t slot, uint64_t frame) {
+        struct Entry {
+            uint64_t cur = 0;
+            uint64_t prev = 0;
+            uint64_t swapFrame = 0;
+            uint64_t lastFrame = 0;
+            float hold = 2.0f;
+        };
+
+        static std::unordered_map<uint64_t, Entry> s_entries;
+        static const bool s_log = rs64EnvOn("ROGUESQ_LOG_FLIPBOOK");
+        static uint64_t s_logFrame = 0;
+        static uint32_t s_tiles = 0;
+        static uint32_t s_blended = 0;
+        static uint32_t s_swaps = 0;
+
+        tile.blendFromHash = 0;
+        tile.blendPrevWeight = 0.0f;
+
+        if ((id == 0) || !tile.valid || tile.tileCopyUsed || (tile.tmemHashOrID == 0)) {
+            return;
+        }
+
+        if (s_entries.size() > 4096) {
+            for (auto it = s_entries.begin(); it != s_entries.end();) {
+                it = ((it->second.lastFrame + 60) < frame) ? s_entries.erase(it) : std::next(it);
+            }
+        }
+
+        Entry &e = s_entries[(uint64_t(id) << 3) | slot];
+
+        if ((e.cur == 0) || ((e.lastFrame + 4) < frame)) {
+            e = Entry{};
+            e.cur = tile.tmemHashOrID;
+            e.swapFrame = frame;
+        }
+        else if ((tile.tmemHashOrID != e.cur) && (frame != e.lastFrame)) {
+            const float observed = std::clamp(float(frame - e.swapFrame), 1.0f, 12.0f);
+
+            e.hold = (e.prev != 0) ? (e.hold + observed) * 0.5f : observed;
+            e.prev = e.cur;
+            e.cur = tile.tmemHashOrID;
+            e.swapFrame = frame;
+            s_swaps++;
+        }
+
+        e.lastFrame = frame;
+
+        const float curWeight = std::clamp(float(frame - e.swapFrame + 1) / std::max(e.hold, 1.0f), 0.0f, 1.0f);
+
+        if ((e.prev != 0) && (curWeight < 1.0f)) {
+            tile.blendFromHash = e.prev;
+            tile.blendPrevWeight = 1.0f - curWeight;
+            s_blended++;
+        }
+
+        s_tiles++;
+
+        if (s_log && (frame >= (s_logFrame + 300))) {
+            std::fprintf(stderr, "[flipbook] frame=%" PRIu64 " tiles=%u blended=%u swaps=%u tracked=%zu\n", frame, s_tiles, s_blended, s_swaps, s_entries.size());
+            s_logFrame = frame;
+            s_tiles = 0;
+            s_blended = 0;
+            s_swaps = 0;
+        }
     }
 
     void State::fullSyncFramebufferPairTiles(Workload &workload, FramebufferPair &fbPair, uint32_t &loadOpCursor, uint32_t &rdpTileCursor) {
@@ -975,6 +1063,7 @@ namespace RT64 {
                     const uint32_t rdpTileLimit = gameCall.callDesc.tileIndex + gameCall.callDesc.tileCount;
                     while (rdpTileCursor < rdpTileLimit) {
                         uploadTile(rdpTileCursor, fbPair, gameCall.callDesc);
+                        rs64FlipbookTile(workload.drawData.callTiles[rdpTileCursor], gameCall.callDesc.rs64FlipbookId, rdpTileCursor - gameCall.callDesc.tileIndex, workload.submissionFrame);
                         rdpTileCursor++;
                     }
                 }
@@ -1454,6 +1543,7 @@ namespace RT64 {
             uint32_t framebufferIndex = 0;
             auto renderSetup = [&]() {
                 scratchFbChangePool.reset();
+                finishRDRAMUpload();
                 ext.framebufferGraphicsWorker->commandList->begin();
                 framebufferManager.resetOperations();
                 framebufferRenderer->resetFramebuffers(ext.framebufferGraphicsWorker, false, workload.extended.ditherNoiseStrength, renderTargetManager.multisampling);
@@ -1677,12 +1767,12 @@ namespace RT64 {
                         }
 
                         // Copy results from render targets back to RAM. ROGUESQ_SKIP_COLOR_READBACK=1 skips it (A/B for games that never read their color buffers back).
-                        const bool s_skip_color_rb = !ext.emulatorConfig->framebuffer.writeBack || rs64SkipColorReadbackEnv();
+                        const bool s_skip_color_rb = !ext.emulatorConfig->framebuffer.writeBack || rs64SkipColorReadback(RDRAM);
                         if (!s_skip_color_rb) {
                             colorFb->copyRenderTargetToNative(ext.framebufferGraphicsWorker, colorTarget, colorWriteWidth, colorRowStart, colorRowEnd, colorImg.fmt, ditherRandomSeed++, ext.shaderLibrary);
                         }
 
-                        const bool s_skip_depth_rb = !ext.emulatorConfig->framebuffer.writeBack || rs64SkipDepthReadbackEnv();
+                        const bool s_skip_depth_rb = !ext.emulatorConfig->framebuffer.writeBack || rs64SkipDepthReadback(RDRAM);
                         if (depthWriteWidth > 0 && !s_skip_depth_rb) {
                             depthFb->copyRenderTargetToNative(ext.framebufferGraphicsWorker, depthTarget, depthWriteWidth, depthRowStart, depthRowEnd, G_IM_FMT_DEPTH, ditherRandomSeed++, ext.shaderLibrary);
                         }
@@ -1760,7 +1850,7 @@ namespace RT64 {
                         // Width is not usable here (a width test blanked the display); alignment only. The
                         // width-1 garbage registrations are rejected upstream in setColorImage_filtered.
                         const bool colorFbPlausible = !s_wbStrict || (colorFb->addressStart & 0x3F) == 0;
-                        const bool s_skip_color_wb = !ext.emulatorConfig->framebuffer.writeBack || rs64SkipColorReadbackEnv();
+                        const bool s_skip_color_wb = !ext.emulatorConfig->framebuffer.writeBack || rs64SkipColorReadback(RDRAM);
                         if (!s_skip_color_wb && colorFbPlausible && colorFb->addressStart >= kFbMinAddr && colorFb->addressStart < kFbMaxAddr) {
                             colorFb->copyNativeToRAM(&(writeBackRDRAM ? writeBackRDRAM : RDRAM)[colorFb->addressStart], colorWriteWidth, colorRowStart, std::min(colorRowEnd, colorFb->height));
                             if (rs64LogTransition() && (colorFb->siz == G_IM_SIZ_16b)) {
@@ -1784,7 +1874,7 @@ namespace RT64 {
                             if (seenD.insert(key).second) { fprintf(stderr, "[wb] depth addr=0x%06X width=%u rows=%u..%u" "\n", depthFb->addressStart, depthWriteWidth, depthRowStart, std::min(depthRowEnd, depthFb->height)); fflush(stderr); }
                         }
                         const bool depthFbPlausible = !s_wbStrict || (depthFb->addressStart & 0x3F) == 0;
-                        const bool s_skip_depth_wb = !ext.emulatorConfig->framebuffer.writeBack || rs64SkipDepthReadbackEnv();
+                        const bool s_skip_depth_wb = !ext.emulatorConfig->framebuffer.writeBack || rs64SkipDepthReadback(RDRAM);
                         if (!s_skip_depth_wb && depthFbPlausible && depthWriteWidth > 0 && depthFb->addressStart >= kFbMinAddr && depthFb->addressStart < kFbMaxAddr) {
                             depthFb->copyNativeToRAM(&(writeBackRDRAM ? writeBackRDRAM : RDRAM)[depthFb->addressStart], depthWriteWidth, depthRowStart, std::min(depthRowEnd, depthFb->height));
                         }
@@ -1877,6 +1967,7 @@ namespace RT64 {
             }
 
             // Do not render anything, just wait for the data to be uploaded.
+            finishRDRAMUpload();
             ext.framebufferGraphicsWorker->commandList->begin();
             ext.drawDataUploader->commandListBeforeBarriers(ext.framebufferGraphicsWorker);
             ext.transformsUploader->commandListBeforeBarriers(ext.framebufferGraphicsWorker);
@@ -2280,6 +2371,7 @@ namespace RT64 {
                     uint64_t currentHash = XXH3_64bits(fbRAM, screenFb->RAMBytes);
                     if (currentHash != screenFb->RAMHash) {
                         {
+                            finishRDRAMUpload();
                             RenderWorkerExecution workerExecution(worker);
                             thread_local std::vector<uint32_t> fbDiscards;
                             const std::scoped_lock lock(ext.presentQueue->screenFbChangePoolMutex);
@@ -2405,6 +2497,7 @@ namespace RT64 {
             appData.m_deltaTime = io.DeltaTime;
         }
 
+        finishRDRAMUpload();
         inspector->newFrame(ext.framebufferGraphicsWorker);
 
         // Host ImGui hook (e.g. the controls/rebind window). Runs between

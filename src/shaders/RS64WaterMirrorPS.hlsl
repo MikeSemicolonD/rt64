@@ -14,7 +14,7 @@ Texture2D<float4> gLate : register(t4);
 // target: this one adds its rising part, the RS64_MIRROR_NEG one subtracts its falling part.
 float4 PSMain(in float4 pos : SV_Position, in float2 uv : TEXCOORD0) : SV_TARGET {
     const int2 px = int2(pos.xy);
-    const float4 mi = gMirror.Load(int3(px, 0));
+    const float4 mi = gMirror.Load(int3((gBlur.temporal.w > 0.5f) ? (px >> 1) : px, 0));
     if (mi.z <= 0.0f) {
         return float4(0.0f, 0.0f, 0.0f, 0.0f);
     }

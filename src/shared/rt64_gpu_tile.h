@@ -58,6 +58,8 @@ namespace interop {
         uint textureIndex;
         float3 textureDimensions;
         GPUTileFlags flags;
+        uint blendTextureIndex;
+        float blendPrevWeight;
     };
 #ifdef HLSL_CPU
 };

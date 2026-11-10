@@ -1528,6 +1528,44 @@ namespace rs64lights {
         activeLightsShared().sunTraced = true;
     }
 
+    inline Sun publishedSun() {
+        std::lock_guard<std::mutex> lock(activeLightsMutex());
+        return activeLightsShared().sun;
+    }
+
+    // Whether a sphere (camera space, looking down +z) can shadow a visible pixel: the line from it away from the sun must enter the view (z >= 0, |x| <= slopeX * z, |y| <= slopeY * z).
+    inline bool casterReachesView(const float p[3], float r, const float away[3], float slopeX, float slopeY) {
+        const float rx = r * std::sqrt(1.0f + slopeX * slopeX);
+        const float ry = r * std::sqrt(1.0f + slopeY * slopeY);
+        const float planes[5][4] = {
+            { 0.0f, 0.0f, 1.0f, r },
+            { -1.0f, 0.0f, slopeX, rx },
+            { 1.0f, 0.0f, slopeX, rx },
+            { 0.0f, -1.0f, slopeY, ry },
+            { 0.0f, 1.0f, slopeY, ry }
+        };
+        float tNear = 0.0f;
+        float tFar = 1e30f;
+        for (const auto& n : planes) {
+            const float start = n[0] * p[0] + n[1] * p[1] + n[2] * p[2] + n[3];
+            const float slope = n[0] * away[0] + n[1] * away[1] + n[2] * away[2];
+            if (slope == 0.0f) {
+                if (start < 0.0f) {
+                    return false;
+                }
+                continue;
+            }
+            const float t = -start / slope;
+            if (slope > 0.0f) {
+                tNear = std::max(tNear, t);
+            }
+            else {
+                tFar = std::min(tFar, t);
+            }
+        }
+        return tNear <= tFar;
+    }
+
     inline ActiveLights activeLights() {
         std::lock_guard<std::mutex> lock(activeLightsMutex());
         return activeLightsShared();
@@ -1612,6 +1650,7 @@ namespace rs64lights {
         float lightShadowEnd;
         float menuImageGain;
         float temporalAlpha;
+        bool softHalfRes;
         float hangarFloorCos;
         std::atomic<bool> fogShafts;
         int fogShaftsSteps;
@@ -1701,6 +1740,7 @@ namespace rs64lights {
             envFloat("ROGUESQ_RT_LIGHTS_SHADOW_END", 0.1f),
             envFloat("ROGUESQ_RT_MENU_IMAGE_GAIN", 2.0f),
             std::clamp(envFloat("ROGUESQ_RT_TEMPORAL", 0.2f), 0.0f, 1.0f),
+            envFloat("ROGUESQ_RT_HALF_RES", 1.0f) != 0.0f,
             envFloat("ROGUESQ_RT_HANGAR_FLOOR_COS", 0.995f),
             envFloat("ROGUESQ_RT_FOG_SHAFTS", 0.0f) != 0.0f,
             std::clamp((int)envFloat("ROGUESQ_RT_FOG_SHAFTS_STEPS", 12.0f), 4, 32),
@@ -2151,6 +2191,22 @@ namespace rs64lights {
         }
 
         return std::min(emission / ref, 1.0f);
+    }
+
+    // Pixels that differ between two framebuffer images. Unchanged runs are skipped a block at a time, as nearly all of a frame's pixels match.
+    inline uint32_t changedPixels(const uint8_t* a, const uint8_t* b, uint32_t bytes, uint32_t pixelBytes) {
+        const uint32_t blockBytes = pixelBytes * 32;
+        uint32_t changed = 0;
+        for (uint32_t block = 0; block < bytes; block += blockBytes) {
+            const uint32_t end = std::min(block + blockBytes, bytes);
+            if (std::memcmp(a + block, b + block, end - block) == 0) {
+                continue;
+            }
+            for (uint32_t i = block; (i + pixelBytes) <= end; i += pixelBytes) {
+                changed += (std::memcmp(a + i, b + i, pixelBytes) != 0) ? 1u : 0u;
+            }
+        }
+        return changed;
     }
 
     // Alpha-weighted average colour of a tile in TMEM (see tmemTexel). coverage = mean alpha; false when nothing is visible.

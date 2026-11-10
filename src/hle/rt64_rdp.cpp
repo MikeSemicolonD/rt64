@@ -479,32 +479,44 @@ namespace RT64 {
         }
     }
 
-    void RDP::applyPassLoads(const std::vector<LoadOperation> &ops, size_t passFirst, TMEMSnapshot &saved) {
-        memcpy(saved.TMEM, TMEM, sizeof(saved.TMEM));
-        memcpy(saved.tags, tmemWordTags, sizeof(saved.tags));
-        saved.loadTag = tmemLoadTag;
-
-        const size_t first = std::max<size_t>(passFirst, (ops.size() > 16) ? (ops.size() - 16) : 0);
-        for (size_t i = first; i < ops.size(); ++i) {
-            const LoadOperation &op = ops[i];
-            switch (op.type) {
-            case LoadOperation::Type::Block:
-                loadBlockOperation(op.tile, op.texture, false);
-                break;
-            case LoadOperation::Type::Tile:
-                loadTileOperation(op.tile, op.texture, false);
-                break;
-            case LoadOperation::Type::TLUT:
-                loadTLUTOperation(op.tile, op.texture, false);
-                break;
-            }
+    const uint8_t *RDP::passTMEM(const std::vector<LoadOperation> &ops, size_t passFirst) {
+        PassTMEM &p = rs64PassTMEM;
+        if ((p.workloadId != uint64_t(state->workloadId)) || (p.passFirst != passFirst) || (p.applied > ops.size())) {
+            memcpy(p.TMEM, TMEM, sizeof(p.TMEM));
+            memcpy(p.tags, tmemWordTags, sizeof(p.tags));
+            p.loadTag = tmemLoadTag;
+            p.workloadId = uint64_t(state->workloadId);
+            p.passFirst = passFirst;
+            p.applied = passFirst;
         }
-    }
 
-    void RDP::restoreTMEM(const TMEMSnapshot &saved) {
-        memcpy(TMEM, saved.TMEM, sizeof(saved.TMEM));
-        memcpy(tmemWordTags, saved.tags, sizeof(saved.tags));
-        tmemLoadTag = saved.loadTag;
+        if (p.applied < ops.size()) {
+            // The load operations write the live TMEM, so the copy stands in for it while they run.
+            std::swap(TMEM, p.TMEM);
+            std::swap(tmemWordTags, p.tags);
+            std::swap(tmemLoadTag, p.loadTag);
+            for (size_t i = p.applied; i < ops.size(); ++i) {
+                const LoadOperation &op = ops[i];
+                switch (op.type) {
+                case LoadOperation::Type::Block:
+                    loadBlockOperation(op.tile, op.texture, false);
+                    break;
+                case LoadOperation::Type::Tile:
+                    loadTileOperation(op.tile, op.texture, false);
+                    break;
+                case LoadOperation::Type::TLUT:
+                    loadTLUTOperation(op.tile, op.texture, false);
+                    break;
+                }
+            }
+
+            std::swap(TMEM, p.TMEM);
+            std::swap(tmemWordTags, p.tags);
+            std::swap(tmemLoadTag, p.loadTag);
+            p.applied = ops.size();
+        }
+
+        return reinterpret_cast<const uint8_t *>(p.TMEM);
     }
 
     void RDP::loadTileOperation(const LoadTile &loadTile, const LoadTexture &loadTexture, bool deferred) {

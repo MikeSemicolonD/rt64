@@ -187,6 +187,7 @@ namespace RT64 {
             std::unique_ptr<RenderFramebuffer> rs64SoftPingFb;
             uint32_t rs64SoftW = 0;
             uint32_t rs64SoftH = 0;
+            bool rs64SoftHalf = false;
             std::unique_ptr<RS64ShadowBlurDescriptorSet> rs64BlurHSet;
             std::unique_ptr<RS64ShadowBlurDescriptorSet> rs64BlurVSet;
             std::unique_ptr<RenderBuffer> rs64BlurHBuffer;
@@ -407,7 +408,7 @@ namespace RT64 {
         void fillRS64Temporal(const DrawParams &p, Framebuffer &framebuffer, uint32_t transformsIndex, const rs64lights::Mat4 &viewFromScreen, interop::RS64ShadowBlurCB &bcb);
         void recordRS64Shadows(RenderWorker *worker, const Framebuffer &framebuffer, bool &depthState);
         void recordRS64Mirror(RenderWorker *worker, const Framebuffer &framebuffer, bool &depthState);
-        void ensureRS64SoftTargets(RenderWorker *worker, Framebuffer &framebuffer, uint32_t width, uint32_t height);
+        void ensureRS64SoftTargets(RenderWorker *worker, Framebuffer &framebuffer, uint32_t width, uint32_t height, bool halfTrace);
         void buildRS64HitColors(const DrawParams &p, const std::vector<std::pair<rs64lights::IndexRange, uint32_t>> &terrainCalls, const float *floorUp);
         bool rs64ViewProj(const DrawParams &p, uint32_t transformsIndex, rs64lights::Mat4 &out);
         bool fillRS64FogShafts(const DrawParams &p, Framebuffer &framebuffer, uint32_t transformsIndex, hlslpp::float2 screenScale, hlslpp::float2 screenOffset, const rs64lights::Sun &sun, const rs64lights::FogParams &fog);
@@ -426,7 +427,7 @@ namespace RT64 {
         void waitForUploaders();
 
         // GPU time of the RS64 passes (ROGUESQ_LOG_RT_TIMING=1): begin/end timestamp pairs per pass, averaged and logged every 120 workloads.
-        enum RS64TimingPass : uint8_t { RS64TimeScene, RS64TimeShadows, RS64TimeFog, RS64TimeLights, RS64TimeCount };
+        enum RS64TimingPass : uint8_t { RS64TimeScene, RS64TimeShadows, RS64TimeFog, RS64TimeLights, RS64TimeTrace, RS64TimeTemporal, RS64TimeBlur, RS64TimeCount };
         std::unique_ptr<RenderQueryPool> rs64TimingPool;
         uint32_t rs64TimingMarks = 0;
         uint8_t rs64TimingLabels[64] = {};

@@ -71,7 +71,7 @@ namespace RT64 {
         return (lastWriteType != Type::None) && (lastWriteType != newType);
     }
 
-    uint32_t Framebuffer::copyRAMToNativeAndChanges(RenderWorker *worker, FramebufferChange &fbChange, const uint8_t *src, uint32_t rowStart, uint32_t rowCount, uint8_t fmt, bool invalidateTargets, const ShaderLibrary *shaderLibrary) {
+    uint32_t Framebuffer::copyRAMToNativeAndChanges(RenderWorker *worker, FramebufferChange &fbChange, const uint8_t *src, uint32_t rowStart, uint32_t rowCount, uint8_t fmt, bool invalidateTargets, const ShaderLibrary *shaderLibrary, bool readModifiedCount) {
         assert(worker != nullptr);
         assert(src != nullptr);
 
@@ -91,7 +91,7 @@ namespace RT64 {
             dstWords++;
         }
 
-        uint32_t differentPixels = nativeTarget.copyFromRAM(worker, fbChange, width, rowCount, rowStart, siz, fmt, nativeSwappedRAM.data(), invalidateTargets, shaderLibrary);
+        uint32_t differentPixels = nativeTarget.copyFromRAM(worker, fbChange, width, rowCount, rowStart, siz, fmt, nativeSwappedRAM.data(), invalidateTargets, shaderLibrary, readModifiedCount);
         return differentPixels;
     }
 

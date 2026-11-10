@@ -308,6 +308,9 @@ namespace RT64 {
             }
             
             interop::GPUTile &gpuTile = dstGPUTiles[i];
+            gpuTile.blendTextureIndex = 0;
+            gpuTile.blendPrevWeight = 0.0f;
+
             if (callTile.tileCopyUsed) {
                 const auto &it = fbManager->tileCopies.find(callTile.tmemHashOrID);
                 if (it != fbManager->tileCopies.end()) {
@@ -347,6 +350,22 @@ namespace RT64 {
                 gpuTile.flags.rawTMEM = !textureReplaced && callTile.rawTMEM;
                 gpuTile.flags.hasMipmaps = hasMipmaps;
                 gpuTile.flags.shiftedByHalf = shiftedByHalf;
+
+                if (callTile.blendPrevWeight > 0.0f) {
+                    uint32_t prevIndex = 0;
+                    interop::float2 prevScale;
+                    interop::float3 prevDimensions;
+                    bool prevReplaced = false;
+                    bool prevMipmaps = false;
+                    bool prevShifted = false;
+                    const bool found = textureCache->useTexture(callTile.blendFromHash, submissionFrame, prevIndex, prevScale, prevDimensions, prevReplaced, prevMipmaps, prevShifted);
+                    const bool sameSize = (prevDimensions.x == gpuTile.textureDimensions.x) && (prevDimensions.y == gpuTile.textureDimensions.y);
+
+                    if (found && sameSize && (prevReplaced == textureReplaced) && !gpuTile.flags.rawTMEM) {
+                        gpuTile.blendTextureIndex = prevIndex;
+                        gpuTile.blendPrevWeight = callTile.blendPrevWeight;
+                    }
+                }
             }
         }
     }
@@ -1756,9 +1775,13 @@ namespace RT64 {
                 submitRasterScene(worker, framebuffer, targetDrawCall.fbStorage, rasterScene, depthState);
                 if (targetDrawCall.rs64LightsAfterScene == static_cast<int32_t>(pair.first)) {
                     if (framebuffer.rs64ShadowsOn && rs64Shadow.ready) {
-                        rs64TimingMark(worker, RS64TimeShadows);
+                        if (!framebuffer.rs64ShadowsSoft) {
+                            rs64TimingMark(worker, RS64TimeShadows);
+                        }
                         recordRS64Shadows(worker, framebuffer, depthState);
-                        rs64TimingMark(worker, RS64TimeShadows);
+                        if (!framebuffer.rs64ShadowsSoft) {
+                            rs64TimingMark(worker, RS64TimeShadows);
+                        }
                     }
                     if (framebuffer.rs64FogOn && rs64Shadow.ready && (rs64Shadow.tlas != nullptr)) {
                         rs64TimingMark(worker, RS64TimeFog);
@@ -3317,6 +3340,10 @@ namespace RT64 {
         if (framebuffer.rs64NewView) {
             cb.featureMask &= (1u | 32u);
         }
+        // The temporal pass upsamples, so the half-resolution trace needs it on.
+        // Not in the hangar: its shadows fall close to the camera on large flat surfaces, where the lower resolution bands.
+        const bool halfTrace = soft && cfg.softHalfRes && !sun.fromModel && (cfg.temporalAlpha > 0.0f) && (cfg.temporalAlpha < 1.0f);
+        cb.featureMask |= halfTrace ? 64u : 0u;
         cb.terrainParams = { cfg.terrainNormalWindow, cfg.reflWaterBlurPx * res, cfg.terminatorFlatLo, std::max(cfg.terminatorFlatHi, cfg.terminatorFlatLo + 0.01f) };
         rs64lights::Mat4 sfv;
         if (rs64lights::inverse(inv, sfv)) {
@@ -3339,7 +3366,7 @@ namespace RT64 {
         framebuffer.rs64ShadowsDebug = (cfg.shadowsDebug != 0);
         framebuffer.rs64ShadowsSoft = soft;
         if (soft) {
-            ensureRS64SoftTargets(p.worker, framebuffer, p.fbStorage->colorTarget->width, p.fbStorage->colorTarget->height);
+            ensureRS64SoftTargets(p.worker, framebuffer, p.fbStorage->colorTarget->width, p.fbStorage->colorTarget->height, halfTrace);
             interop::RS64ShadowBlurCB bcb = {};
             memcpy(&bcb.viewFromScreen, &inv, sizeof(inv));
             bcb.viewport = cb.viewport;
@@ -3347,6 +3374,7 @@ namespace RT64 {
             bcb.params = { cfg.shadows ? cfg.shadowStrength : 0.0f, 0.02f, (cfg.shadowsDebug >= 5) ? 1.0f : 0.0f, blurMax };
             bcb.aoParams = { cfg.aoStrength, (cfg.shadowsDebug >= 5) ? float(cfg.shadowsDebug) : 0.0f, 0.0f, 0.0f };
             fillRS64Temporal(p, framebuffer, transformsIndex, inv, bcb);
+            bcb.temporal.w = halfTrace ? 1.0f : 0.0f;
             float waterUp[3];
             framebuffer.rs64MirrorOn = (cfg.reflMirror > 0.0f) && !framebuffer.rs64NewView && (cfg.shadowsDebug == 0) && rs64Shadow.terrainActive
                 && (rs64Shadow.terrainWaterPrim > 0) && rs64lights::affinePlaneNormalY(rs64Shadow.terrainTransform, waterUp);
@@ -3686,17 +3714,20 @@ namespace RT64 {
     }
 
     // Soft-shadow mask (shadow, blur radius) and ping textures at the colour target's size; recreated when it changes.
-    void FramebufferRenderer::ensureRS64SoftTargets(RenderWorker *worker, Framebuffer &framebuffer, uint32_t width, uint32_t height) {
-        if (framebuffer.rs64SoftMask && (framebuffer.rs64SoftW == width) && (framebuffer.rs64SoftH == height)) {
+    void FramebufferRenderer::ensureRS64SoftTargets(RenderWorker *worker, Framebuffer &framebuffer, uint32_t width, uint32_t height, bool halfTrace) {
+        if (framebuffer.rs64SoftMask && (framebuffer.rs64SoftW == width) && (framebuffer.rs64SoftH == height) && (framebuffer.rs64SoftHalf == halfTrace)) {
             return;
         }
+        const uint32_t traceW = halfTrace ? ((width + 1) / 2) : width;
+        const uint32_t traceH = halfTrace ? ((height + 1) / 2) : height;
+        framebuffer.rs64SoftHalf = halfTrace;
         framebuffer.rs64SoftMaskFb.reset();
         framebuffer.rs64SoftPingFb.reset();
-        framebuffer.rs64SoftMask = worker->device->createTexture(RenderTextureDesc::ColorTarget(width, height, RenderFormat::R16G16B16A16_FLOAT));
+        framebuffer.rs64SoftMask = worker->device->createTexture(RenderTextureDesc::ColorTarget(traceW, traceH, RenderFormat::R16G16B16A16_FLOAT));
         framebuffer.rs64SoftPing = worker->device->createTexture(RenderTextureDesc::ColorTarget(width, height, RenderFormat::R16G16B16A16_FLOAT));
-        framebuffer.rs64SoftIndirect = worker->device->createTexture(RenderTextureDesc::ColorTarget(width, height, RenderFormat::R16G16B16A16_FLOAT));
+        framebuffer.rs64SoftIndirect = worker->device->createTexture(RenderTextureDesc::ColorTarget(traceW, traceH, RenderFormat::R16G16B16A16_FLOAT));
         framebuffer.rs64SoftIndirectPing = worker->device->createTexture(RenderTextureDesc::ColorTarget(width, height, RenderFormat::R16G16B16A16_FLOAT));
-        framebuffer.rs64SoftMirror = worker->device->createTexture(RenderTextureDesc::ColorTarget(width, height, RenderFormat::R32G32B32A32_FLOAT));
+        framebuffer.rs64SoftMirror = worker->device->createTexture(RenderTextureDesc::ColorTarget(traceW, traceH, RenderFormat::R32G32B32A32_FLOAT));
         const RenderTexture *maskTargets[] = { framebuffer.rs64SoftMask.get(), framebuffer.rs64SoftIndirect.get(), framebuffer.rs64SoftMirror.get() };
         const RenderTexture *pingTargets[] = { framebuffer.rs64SoftPing.get(), framebuffer.rs64SoftIndirectPing.get() };
         framebuffer.rs64SoftMaskFb = worker->device->createFramebuffer(RenderFramebufferDesc(maskTargets, 3));
@@ -3738,6 +3769,7 @@ namespace RT64 {
             RenderTexture *indPing = framebuffer.rs64SoftIndirectPing.get();
             // The trace reads the colour target for screen-space water reflections; it is written again by the compose.
             RenderTexture *color = targetDrawCall.fbStorage->colorTarget->texture.get();
+            rs64TimingMark(worker, RS64TimeTrace);
             const RenderTextureBarrier toMask[] = {
                 RenderTextureBarrier(mask, RenderTextureLayout::COLOR_WRITE), RenderTextureBarrier(ind, RenderTextureLayout::COLOR_WRITE), RenderTextureBarrier(color, RenderTextureLayout::SHADER_READ),
                 RenderTextureBarrier(framebuffer.rs64SoftMirror.get(), RenderTextureLayout::COLOR_WRITE)
@@ -3747,16 +3779,24 @@ namespace RT64 {
             worker->commandList->clearColor(0, RenderColor(0.0f, 0.0f, 0.0f, 0.0f));
             worker->commandList->clearColor(1, RenderColor(0.0f, 0.0f, 0.0f, 0.0f));
             worker->commandList->clearColor(2, RenderColor(0.0f, 0.0f, 0.0f, 0.0f));
-            worker->commandList->setViewports(v);
-            worker->commandList->setScissors(sc);
+            if (framebuffer.rs64SoftHalf) {
+                worker->commandList->setViewports(RenderViewport(v.x / 2.0f, v.y / 2.0f, v.width / 2.0f, v.height / 2.0f, v.minDepth, v.maxDepth));
+                worker->commandList->setScissors(RenderRect(int32_t(v.x) / 2, int32_t(v.y) / 2, (int32_t(v.x + v.width) + 1) / 2, (int32_t(v.y + v.height) + 1) / 2));
+            }
+            else {
+                worker->commandList->setViewports(v);
+                worker->commandList->setScissors(sc);
+            }
             worker->commandList->setPipeline(shaderLibrary->rs64ShadowsSoft.pipeline.get());
             worker->commandList->setGraphicsPipelineLayout(shaderLibrary->rs64ShadowsSoft.pipelineLayout.get());
             bindRS64Traced(worker, *framebuffer.rs64ShadowsSet, framebuffer.rs64ShadowsBuffer.get(), offsetof(interop::RS64ShadowsCB, cutoutDrawCount), false);
             worker->commandList->setVertexBuffers(0, nullptr, 0, nullptr);
             worker->commandList->drawInstanced(3, 1, 0, 0);
+            rs64TimingMark(worker, RS64TimeTrace);
 
             // Accumulate AO and indirect light into this frame's history set, which the H blur then reads.
             if (framebuffer.rs64TemporalOn) {
+                rs64TimingMark(worker, RS64TimeTemporal);
                 const uint32_t w = framebuffer.rs64HistWrite;
                 RenderTexture *histMask = framebuffer.rs64HistMask[w].get();
                 RenderTexture *histInd = framebuffer.rs64HistIndirect[w].get();
@@ -3777,8 +3817,10 @@ namespace RT64 {
                 worker->commandList->drawInstanced(3, 1, 0, 0);
                 mask = histMask;
                 ind = histInd;
+                rs64TimingMark(worker, RS64TimeTemporal);
             }
 
+            rs64TimingMark(worker, RS64TimeBlur);
             const RenderTextureBarrier toPing[] = {
                 RenderTextureBarrier(mask, RenderTextureLayout::SHADER_READ), RenderTextureBarrier(ind, RenderTextureLayout::SHADER_READ),
                 RenderTextureBarrier(ping, RenderTextureLayout::COLOR_WRITE), RenderTextureBarrier(indPing, RenderTextureLayout::COLOR_WRITE)
@@ -3814,6 +3856,7 @@ namespace RT64 {
                 worker->commandList->drawInstanced(3, 1, 0, 0);
             }
 
+            rs64TimingMark(worker, RS64TimeBlur);
             return;
         }
         const ShaderRecord &record = framebuffer.rs64ShadowsDebug ? shaderLibrary->rs64ShadowsDebug : shaderLibrary->rs64Shadows;
@@ -4822,9 +4865,11 @@ namespace RT64 {
         }
         if (++rs64TimingFrames >= 120) {
             const double n = double(rs64TimingFrames);
-            std::fprintf(stderr, "[rt-timing] avg ms/workload over %u: scene=%.3f shadows=%.3f fog=%.3f lights=%.3f total=%.3f\n", rs64TimingFrames,
-                rs64TimingSum[RS64TimeScene] / n, rs64TimingSum[RS64TimeShadows] / n, rs64TimingSum[RS64TimeFog] / n, rs64TimingSum[RS64TimeLights] / n,
-                (rs64TimingSum[RS64TimeScene] + rs64TimingSum[RS64TimeShadows] + rs64TimingSum[RS64TimeFog] + rs64TimingSum[RS64TimeLights]) / n);
+            const double shadows = rs64TimingSum[RS64TimeShadows] + rs64TimingSum[RS64TimeTrace] + rs64TimingSum[RS64TimeTemporal] + rs64TimingSum[RS64TimeBlur];
+            std::fprintf(stderr, "[rt-timing] avg ms/workload over %u: scene=%.3f shadows=%.3f (trace=%.3f temporal=%.3f blur=%.3f) fog=%.3f lights=%.3f total=%.3f\n", rs64TimingFrames,
+                rs64TimingSum[RS64TimeScene] / n, shadows / n, rs64TimingSum[RS64TimeTrace] / n, rs64TimingSum[RS64TimeTemporal] / n, rs64TimingSum[RS64TimeBlur] / n,
+                rs64TimingSum[RS64TimeFog] / n, rs64TimingSum[RS64TimeLights] / n,
+                (rs64TimingSum[RS64TimeScene] + shadows + rs64TimingSum[RS64TimeFog] + rs64TimingSum[RS64TimeLights]) / n);
             for (double &v : rs64TimingSum) {
                 v = 0.0;
             }

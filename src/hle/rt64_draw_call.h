@@ -106,6 +106,9 @@ namespace RT64 {
         bool NoN;
         bool f5Cull;
 
+        // Effect sprite identity for the animation crossfade; 0 = none.
+        uint32_t rs64FlipbookId = 0;
+
         // GBI extended parameters.
         DrawExtendedType extendedType;
         DrawExtendedData extendedData;
@@ -154,6 +157,10 @@ namespace RT64 {
         uint8_t reinterpretFmt;
         bool rawTMEM;
         bool valid;
+
+        // Previous animation image and how much of it still shows.
+        uint64_t blendFromHash = 0;
+        float blendPrevWeight = 0.0f;
 
         bool validTexcoords() const {
             return (minTexcoord.x <= maxTexcoord.x) && (minTexcoord.y <= maxTexcoord.y);
