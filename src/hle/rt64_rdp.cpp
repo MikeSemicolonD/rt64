@@ -94,6 +94,7 @@ namespace RT64 {
         primDepthStack[0] = { 0.0f, 0.0f };
         fogColorStack[0] = { 0.0f, 0.0f, 0.0f, 0.0f };
         fillColorStack[0] = 0;
+        viewFillColor = 0;
         blendColorStack[0] = { 0.0f, 0.0f, 0.0f, 0.0f };
         keyCenter = { 0.0f, 0.0f, 0.0f };
         keyScale = { 0.0f, 0.0f, 0.0f };
@@ -1098,6 +1099,12 @@ namespace RT64 {
         if ((mode == G_CYC_COPY) || (mode == G_CYC_FILL)) {
             lrx |= 3;
             lry |= 3;
+        }
+
+        const FixedRect &scissor = scissorRectStack[scissorStackSize - 1];
+
+        if ((mode == G_CYC_FILL) && (colorImage.address != depthImage.address) && ((lry - uly) * 2 >= (scissor.lry - scissor.uly))) {
+            viewFillColor = fillColorStack[fillColorStackSize - 1];
         }
 
         drawRect(ulx, uly, lrx, lry, 0, 0, 0, 0, false, extAlignment);

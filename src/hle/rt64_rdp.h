@@ -136,6 +136,9 @@ namespace RT64 {
         hlslpp::float4 blendColorStack[RDP_EXTENDED_STACK_SIZE];
         hlslpp::float4 fogColorStack[RDP_EXTENDED_STACK_SIZE];
         uint32_t fillColorStack[RDP_EXTENDED_STACK_SIZE];
+
+        // Colour of the last colour fill covering at least half the scissor height (the view's clear, not the letterbox bars filled after it).
+        uint32_t viewFillColor = 0;
         FixedRect scissorRectStack[RDP_EXTENDED_STACK_SIZE];
         uint8_t scissorModeStack[RDP_EXTENDED_STACK_SIZE];
         int colorCombinerStackSize;
