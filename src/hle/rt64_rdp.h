@@ -137,8 +137,16 @@ namespace RT64 {
         hlslpp::float4 fogColorStack[RDP_EXTENDED_STACK_SIZE];
         uint32_t fillColorStack[RDP_EXTENDED_STACK_SIZE];
 
-        // Colour of the last colour fill covering at least half the scissor height (the view's clear, not the letterbox bars filled after it).
-        uint32_t viewFillColor = 0;
+        // The last colour fills and their rects, so a draw can find the fill inside its own scissor (not the letterbox bars filled after it).
+        struct RecentFill {
+            FixedRect rect;
+            uint32_t color = 0;
+        };
+
+        static const int RecentFillCount = 4;
+        RecentFill recentFills[RecentFillCount] = {};
+        int recentFillNext = 0;
+        uint32_t fillColorInside(const FixedRect &scissor) const;
         FixedRect scissorRectStack[RDP_EXTENDED_STACK_SIZE];
         uint8_t scissorModeStack[RDP_EXTENDED_STACK_SIZE];
         int colorCombinerStackSize;

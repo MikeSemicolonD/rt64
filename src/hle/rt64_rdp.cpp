@@ -94,7 +94,11 @@ namespace RT64 {
         primDepthStack[0] = { 0.0f, 0.0f };
         fogColorStack[0] = { 0.0f, 0.0f, 0.0f, 0.0f };
         fillColorStack[0] = 0;
-        viewFillColor = 0;
+        for (RecentFill &f : recentFills) {
+            f = {};
+        }
+
+        recentFillNext = 0;
         blendColorStack[0] = { 0.0f, 0.0f, 0.0f, 0.0f };
         keyCenter = { 0.0f, 0.0f, 0.0f };
         keyScale = { 0.0f, 0.0f, 0.0f };
@@ -1101,13 +1105,29 @@ namespace RT64 {
             lry |= 3;
         }
 
-        const FixedRect &scissor = scissorRectStack[scissorStackSize - 1];
-
-        if ((mode == G_CYC_FILL) && (colorImage.address != depthImage.address) && ((lry - uly) * 2 >= (scissor.lry - scissor.uly))) {
-            viewFillColor = fillColorStack[fillColorStackSize - 1];
+        if ((mode == G_CYC_FILL) && (colorImage.address != depthImage.address)) {
+            recentFills[recentFillNext] = { FixedRect(ulx, uly, lrx, lry), fillColorStack[fillColorStackSize - 1] };
+            recentFillNext = (recentFillNext + 1) % RecentFillCount;
         }
 
         drawRect(ulx, uly, lrx, lry, 0, 0, 0, 0, false, extAlignment);
+    }
+
+    // Newest colour fill overlapping the scissor by more than a pixel row; the fill stack's colour when none does.
+    uint32_t RDP::fillColorInside(const FixedRect &scissor) const {
+        for (int i = 1; i <= RecentFillCount; i++) {
+            const RecentFill &f = recentFills[(recentFillNext - i + RecentFillCount) % RecentFillCount];
+            const int32_t top = std::max(f.rect.uly, scissor.uly);
+            const int32_t bottom = std::min(f.rect.lry, scissor.lry);
+            const int32_t left = std::max(f.rect.ulx, scissor.ulx);
+            const int32_t right = std::min(f.rect.lrx, scissor.lrx);
+
+            if ((bottom - top > 4) && (right > left)) {
+                return f.color;
+            }
+        }
+
+        return fillColorStack[fillColorStackSize - 1];
     }
 
     void RDP::setRectAlign(const ExtendedAlignment &extAlignment) {

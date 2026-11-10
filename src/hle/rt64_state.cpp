@@ -297,7 +297,7 @@ namespace RT64 {
                 static const bool s_ringFade = [](){ const char *e = std::getenv("ROGUESQ_F5_HORIZON_FADE"); return !(e && e[0] == '0'); }();
                 const interop::ColorCombiner &cc = rdp->colorCombinerStack[rdp->colorCombinerStackSize - 1];
                 if (s_ringFade && (cc.L == 0xFCFFFFFFu) && (cc.H == 0xFFFE793Cu)) {
-                    const uint32_t fill = rdp->viewFillColor & 0xFFFFu;
+                    const uint32_t fill = rdp->fillColorInside(rdp->scissorRectStack[rdp->scissorStackSize - 1]) & 0xFFFFu;
                     drawCall.colorCombiner.L = 0xFC45FE8Bu;
                     drawCall.colorCombiner.H = 0x55FEF97Cu;
                     drawCall.rdpParams.envColor = { float((fill >> 11) & 31u) / 31.0f, float((fill >> 6) & 31u) / 31.0f, float((fill >> 1) & 31u) / 31.0f, 1.0f };
