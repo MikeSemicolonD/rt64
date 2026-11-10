@@ -43,6 +43,7 @@ float4 catmullRomWeights(float t) {
 }
 
 // Catmull-Rom through the lattice samples: passes through every sample, no creases along the sample lines.
+// Clamped to the cell's corner range, or a cliff rings into horns on its rim and a trench at its foot.
 float smoothHeight(int2 i0, float2 t, uint latticeW, uint latticeH) {
     const float4 wx = catmullRomWeights(t.x), wy = catmullRomWeights(t.y);
     float h = 0.0f;
@@ -52,7 +53,9 @@ float smoothHeight(int2 i0, float2 t, uint latticeW, uint latticeH) {
         h += wy[y] * row;
     }
 
-    return h;
+    const float a = latticeHeight(i0, latticeW, latticeH), b = latticeHeight(i0 + int2(1, 0), latticeW, latticeH);
+    const float c = latticeHeight(i0 + int2(0, 1), latticeW, latticeH), d = latticeHeight(i0 + int2(1, 1), latticeW, latticeH);
+    return clamp(h, min(min(a, b), min(c, d)), max(max(a, b), max(c, d)));
 }
 
 // Surface height at a lattice coordinate (4 samples per cell).

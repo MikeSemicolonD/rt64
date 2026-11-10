@@ -10,7 +10,7 @@ float3 latticeColor(int2 p, uint latticeW, uint latticeH) {
     return unpackRGBA8(gColors[p.y * latticeW + p.x]).rgb;
 }
 
-// The game's vertex colours on the same Catmull-Rom curve as the heights, so shading has no creases at the sample lines either.
+// The game's vertex colours on the same clamped Catmull-Rom curve as the heights, so shading has no creases at the sample lines either.
 float3 smoothColor(int2 i0, float2 t, uint latticeW, uint latticeH) {
     const float4 wx = catmullRomWeights(t.x), wy = catmullRomWeights(t.y);
     float3 c = 0.0f;
@@ -20,7 +20,9 @@ float3 smoothColor(int2 i0, float2 t, uint latticeW, uint latticeH) {
         c += wy[y] * row;
     }
 
-    return saturate(c);
+    const float3 a = latticeColor(i0, latticeW, latticeH), b = latticeColor(i0 + int2(1, 0), latticeW, latticeH);
+    const float3 e = latticeColor(i0 + int2(0, 1), latticeW, latticeH), d = latticeColor(i0 + int2(1, 1), latticeW, latticeH);
+    return clamp(c, min(min(a, b), min(e, d)), max(max(a, b), max(e, d)));
 }
 
 // Height and colour of the ground at lattice coordinate f.
