@@ -900,7 +900,7 @@ namespace rs64lights {
         // This frame's water level (heightmap units).
         int32_t waterLevel = 0;
         std::vector<TerrainCellColors> harvest;
-        // The game's task counter (30 a second), the clock for the texture animations.
+        // The clock for the texture animations, in 30 Hz ticks of game time.
         uint64_t task = 0;
         // Land fades out toward the fog end (RS64TerrainCB::fogClip).
         bool fogClip = false;
