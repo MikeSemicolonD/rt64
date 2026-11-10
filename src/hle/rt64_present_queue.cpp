@@ -4,6 +4,7 @@
 
 #include "rt64_present_queue.h"
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
@@ -52,6 +53,8 @@ namespace RT64 {
         uint64_t bufferSize = 0;
         uint32_t width = 0;
         uint32_t height = 0;
+        uint32_t outWidth = 0;
+        uint32_t outHeight = 0;
         uint32_t rowWidth = 0;
         bool rgba8 = true;
         bool requested = false;
@@ -111,6 +114,16 @@ namespace RT64 {
         s.width = params.textureWidth;
         s.height = params.textureHeight;
         s.rowWidth = (s.width + 63) & ~63U;
+
+        // Keep only what the VI pass shows: the target's last native column and row hold stale pixels (see the VI overscan inset).
+        const hlslpp::uint2 nativeSize = (params.vi != nullptr) && (params.downsamplingScale > 0) ? params.vi->fbSize() : hlslpp::uint2(0, 0);
+        const float hdW = float(nativeSize.x) * float(params.resolutionScale.x) / float(params.downsamplingScale);
+        const float hdH = float(nativeSize.y) * float(params.resolutionScale.y) / float(params.downsamplingScale);
+        const float cropW = (nativeSize.x > 1) ? (hdW - hdW / float(nativeSize.x)) : hdW;
+        const float cropH = (nativeSize.y > 1) ? (hdH - hdH / float(nativeSize.y)) : hdH;
+        s.outWidth = (cropW >= 1.0f) ? std::min(uint32_t(cropW), s.width) : s.width;
+        s.outHeight = (cropH >= 1.0f) ? std::min(uint32_t(cropH), s.height) : s.height;
+
         const uint64_t size = uint64_t(s.rowWidth) * s.height * (rgba8 ? 4 : 8);
         if (s.bufferSize < size) {
             s.buffer = device->createBuffer(RenderBufferDesc::ReadbackBuffer(size));
@@ -126,10 +139,12 @@ namespace RT64 {
     static void rs64WriteScreenshot() {
         RS64Screenshot &s = rs64Screenshot;
         const uint8_t *src = static_cast<const uint8_t *>(s.buffer->map());
-        std::vector<uint8_t> rgba(size_t(s.width) * s.height * 4);
-        for (uint32_t y = 0; y < s.height; y++) {
-            for (uint32_t x = 0; x < s.width; x++) {
-                uint8_t *dst = &rgba[(size_t(y) * s.width + x) * 4];
+        const uint32_t ow = s.outWidth;
+        const uint32_t oh = s.outHeight;
+        std::vector<uint8_t> rgba(size_t(ow) * oh * 4);
+        for (uint32_t y = 0; y < oh; y++) {
+            for (uint32_t x = 0; x < ow; x++) {
+                uint8_t *dst = &rgba[(size_t(y) * ow + x) * 4];
                 if (s.rgba8) {
                     const uint8_t *p = &src[(size_t(y) * s.rowWidth + x) * 4];
                     dst[0] = p[0];
@@ -165,8 +180,8 @@ namespace RT64 {
                 std::filesystem::create_directories(out.parent_path(), ec);
             }
 
-            const bool ok = stbi_write_png(rs64CapturePath.c_str(), int(s.width), int(s.height), 4, rgba.data(), int(s.width) * 4) != 0;
-            rs64CaptureLast = { ok, s.width, s.height, uint32_t(colours.size()) };
+            const bool ok = stbi_write_png(rs64CapturePath.c_str(), int(ow), int(oh), 4, rgba.data(), int(ow) * 4) != 0;
+            rs64CaptureLast = { ok, ow, oh, uint32_t(colours.size()) };
             rs64CaptureWritten = rs64CaptureTaken;
             rs64CaptureCondition.notify_all();
             return;
@@ -176,9 +191,9 @@ namespace RT64 {
         std::filesystem::create_directories("screenshots", ec);
         char path[64];
         std::snprintf(path, sizeof(path), "screenshots/shot_%03d.png", s.taken);
-        stbi_write_png(path, int(s.width), int(s.height), 4, rgba.data(), int(s.width) * 4);
+        stbi_write_png(path, int(ow), int(oh), 4, rgba.data(), int(ow) * 4);
         s.taken++;
-        std::fprintf(stderr, "[screenshot] %s (%ux%u)\n", path, s.width, s.height);
+        std::fprintf(stderr, "[screenshot] %s (%ux%u)\n", path, ow, oh);
     }
 
     // PresentQueue
