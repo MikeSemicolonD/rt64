@@ -1,5 +1,6 @@
 #pragma once
 
+#include <algorithm>
 #include <cstdint>
 #include <cmath>
 
@@ -15,6 +16,8 @@ namespace rs64xhair {
     constexpr float kOriginX = 256.0f;
     constexpr float kOriginY = 224.0f;
     constexpr float kTolerance = 0.75f;
+    // The game's frame size (u32 width, u32 height), which its 2D rects are limited to.
+    constexpr uint32_t kFrameSizeAddr = 0x8011A838u;
 
     struct Element { float x, y; uint32_t flags; };
     struct Rect { float ulx, uly, lrx, lry; };
@@ -28,13 +31,10 @@ namespace rs64xhair {
         return (step > 0) ? (float)texels * 1024.0f / (float)step : 0.0f;
     }
 
-    // An edge may also sit at the clip edge when the game clamped the rect there.
-    inline bool axisMatches(float ul, float lr, float expUl, float expLr, float clipUl, float clipLr) {
-        const bool ulOk = std::fabs(ul - expUl) <= kTolerance;
-        const bool lrOk = std::fabs(lr - expLr) <= kTolerance;
-        const bool ulClamped = (ul <= clipUl + kTolerance) && (expUl < ul);
-        const bool lrClamped = (lr >= clipLr - kTolerance) && (expLr > lr);
-        return (ulOk || lrOk) && (ulOk || ulClamped) && (lrOk || lrClamped);
+    // The drawTextGlyphRect hook moves a ring that would leave the frame back inside it, whole, so the game neither cuts nor drops it.
+    inline bool axisMatches(float ul, float lr, float expUl, float size, float clipUl, float clipLr) {
+        const float pinned = std::max(clipUl, std::min(expUl, clipLr - size));
+        return (std::fabs(ul - pinned) <= kTolerance) && (std::fabs(lr - (pinned + size)) <= kTolerance);
     }
 
     inline bool matches(const Element &e, const Rect &r, float w, float h, const Rect &clip) {
@@ -42,7 +42,17 @@ namespace rs64xhair {
             return false;
         }
         const float ex = e.x + kOriginX, ey = e.y + kOriginY;
-        return axisMatches(r.ulx, r.lrx, ex, ex + w, clip.ulx, clip.lrx) && axisMatches(r.uly, r.lry, ey, ey + h, clip.uly, clip.lry);
+        return axisMatches(r.ulx, r.lrx, ex, w, clip.ulx, clip.lrx) && axisMatches(r.uly, r.lry, ey, h, clip.uly, clip.lry);
+    }
+
+    // The element a rect the hook moved draws, known by its tile alone (its S and T carry the move instead of a position to compare); -1 if no element uses that tile.
+    inline int ringOfTile(const Element els[kElementCount], TexSize tex) {
+        for (int i = 0; i < kElementCount; i++) {
+            if ((tex.w == kElementTex[i].w) && (tex.h == kElementTex[i].h) && ((els[i].flags & 1u) != 0)) {
+                return i;
+            }
+        }
+        return -1;
     }
 
     // Index of the element (0 outer, 1 inner, 2 bomb sight) this texrect draws, or -1.

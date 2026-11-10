@@ -3468,7 +3468,7 @@ namespace RT64 {
             (*dl) += 2;
         }
 
-        static bool f5_texrect_quad(State* state, const DisplayList* dl, uint32_t id, const char* probe, float dy);
+        static bool f5_texrect_quad(State* state, const DisplayList* dl, uint32_t id, const char* probe, float dx, float dy, bool stIsZero = false);
 
         // Crosshair rings are texrects, which RT64 never interpolates. A texrect that matches a ring element of the HUD struct draws instead as a camera-space quad on its own transform id. ROGUESQ_F5_XHAIR_QUAD=0 keeps the texrect.
         bool f5_crosshair_quad(State* state, const DisplayList* dl) {
@@ -3482,8 +3482,7 @@ namespace RT64 {
             const int16_t dsdx = (int16_t)(dl[1].w1 >> 16), dtdy = (int16_t)(dl[1].w1 & 0xFFFFu);
             const auto &t = state->rdp->tiles[tile];
             const rs64xhair::TexSize tex{ (uint32_t)((t.lrs - t.uls) >> 2) + 1u, (uint32_t)((t.lrt - t.ult) >> 2) + 1u };
-            const auto &sc = state->rdp->scissorRectStack[state->rdp->scissorStackSize - 1];
-            const rs64xhair::Rect clip{ sc.ulx / 4.0f, sc.uly / 4.0f, sc.lrx / 4.0f, sc.lry / 4.0f };
+            const rs64xhair::Rect clip{ 0.0f, 0.0f, (float)rd_be_u32(state->RDRAM, rs64xhair::kFrameSizeAddr), (float)rd_be_u32(state->RDRAM, rs64xhair::kFrameSizeAddr + 4) };
             rs64xhair::Element els[rs64xhair::kElementCount];
             for (int i = 0; i < rs64xhair::kElementCount; i++) {
                 const uint32_t b = rs64xhair::kHudBase + rs64xhair::kElementOffsets[i];
@@ -3492,12 +3491,15 @@ namespace RT64 {
                 y.u = rd_be_u32(state->RDRAM, b + rs64xhair::kPosOffset + 4);
                 els[i] = { x.f, y.f, rd_be_u32(state->RDRAM, b + rs64xhair::kFlagsOffset) };
             }
-            const int ring = rs64xhair::ringOf(els, r, tex, dsdx, dtdy, clip);
+            // The drawTextGlyphRect hook stores how far it moved a ring in S and T (10.2 pixels); a whole ring otherwise has both 0.
+            const int16_t moveX = (int16_t)(dl[1].w0 >> 16), moveY = (int16_t)(dl[1].w0 & 0xFFFFu);
+            const bool moved = (moveX != 0) || (moveY != 0);
+            const int ring = moved ? rs64xhair::ringOfTile(els, tex) : rs64xhair::ringOf(els, r, tex, dsdx, dtdy, clip);
             if (ring < 0) {
                 return false;
             }
 
-            return f5_texrect_quad(state, dl, 0x80000000u | (uint32_t)ring, (ring == 2) ? "xhair-quad-bomb" : ring ? "xhair-quad-in" : "xhair-quad-out", 0.0f);
+            return f5_texrect_quad(state, dl, 0x80000000u | (uint32_t)ring, (ring == 2) ? "xhair-quad-bomb" : ring ? "xhair-quad-in" : "xhair-quad-out", moveX / 4.0f, moveY / 4.0f, moved);
         }
 
         // A credits glyph's interpolation id: the previous task's glyph with the same texture and x (the text only scrolls vertically) nearest in y, within
@@ -3561,15 +3563,15 @@ namespace RT64 {
             float shown = y;
             const uint32_t id = f5_credits_glyph_id(state, key, y, shown);
 
-            return f5_texrect_quad(state, dl, id, "credits-glyph", shown - y);
+            return f5_texrect_quad(state, dl, id, "credits-glyph", 0.0f, shown - y);
         }
 
-        // Draws the texrect at dl, moved down by dy pixels, as a camera-space quad on transform `id`; false leaves it to the texrect path.
-        static bool f5_texrect_quad(State* state, const DisplayList* dl, uint32_t id, const char* probe, float dy) {
+        // Draws the texrect at dl, moved by dx, dy pixels, as a camera-space quad on transform `id`; false leaves it to the texrect path. stIsZero: dl's S and T hold something else and the texture starts at 0.
+        static bool f5_texrect_quad(State* state, const DisplayList* dl, uint32_t id, const char* probe, float dx, float dy, bool stIsZero) {
             const uint32_t w0 = dl[0].w0, w1 = dl[0].w1;
-            const rs64xhair::Rect r{ ((w1 >> 12) & 0xFFFu) / 4.0f, (w1 & 0xFFFu) / 4.0f + dy, ((w0 >> 12) & 0xFFFu) / 4.0f, (w0 & 0xFFFu) / 4.0f + dy };
+            const rs64xhair::Rect r{ ((w1 >> 12) & 0xFFFu) / 4.0f + dx, (w1 & 0xFFFu) / 4.0f + dy, ((w0 >> 12) & 0xFFFu) / 4.0f + dx, (w0 & 0xFFFu) / 4.0f + dy };
             const uint8_t tile = (uint8_t)((w1 >> 24) & 7u);
-            const int16_t uls = (int16_t)(dl[1].w0 >> 16), ult = (int16_t)(dl[1].w0 & 0xFFFFu);
+            const int16_t uls = stIsZero ? (int16_t)0 : (int16_t)(dl[1].w0 >> 16), ult = stIsZero ? (int16_t)0 : (int16_t)(dl[1].w0 & 0xFFFFu);
             const int16_t dsdx = (int16_t)(dl[1].w1 >> 16), dtdy = (int16_t)(dl[1].w1 & 0xFFFFu);
 
             // Un-project the rect corners onto a plane of constant screen depth through the current projection and viewport.
