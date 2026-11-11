@@ -8,6 +8,7 @@
 #include <cassert>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 
 #include "../include/rt64_extended_gbi.h"
 
@@ -17,6 +18,10 @@
 #include "rt64_color_converter.h"
 #include "rt64_interpreter.h"
 #include "rt64_state.h"
+
+#ifdef __GNUC__
+#define _byteswap_ulong __builtin_bswap32
+#endif
 
 #ifndef NDEBUG
 //#   define ASSERT_LOAD_METHODS
@@ -395,6 +400,20 @@ namespace RT64 {
             TMEM[((tmemAddress + 1) ^ tmemXorMask) | UpperTMEM] = RDRAM[(textureAddress + (3 & offsetMask)) ^ 3];
             TMEM[((tmemAddress + 2) ^ tmemXorMask) | UpperTMEM] = RDRAM[(textureAddress + (6 & offsetMask)) ^ 3];
             TMEM[((tmemAddress + 3) ^ tmemXorMask) | UpperTMEM] = RDRAM[(textureAddress + (7 & offsetMask)) ^ 3];
+        }
+        else if (!TLUT && ((textureAddress & 3) == 0) && ((tmemAddress & 7) == 0)) {
+            // Aligned word: the per-byte copy below is two byte-swapped 32-bit words, their halves exchanged by tmemXorMask.
+            uint32_t words[2];
+            std::memcpy(words, &RDRAM[textureAddress], sizeof(words));
+            words[0] = _byteswap_ulong(words[0]);
+            words[1] = _byteswap_ulong(words[1]);
+            std::memcpy(&TMEM[tmemAddress ^ tmemXorMask], &words[0], 4);
+            std::memcpy(&TMEM[(tmemAddress + 4) ^ tmemXorMask], &words[1], 4);
+#       ifndef NDEBUG
+            for (uint32_t i = 0; i < 8; i++) {
+                assert(TMEM[(tmemAddress + i) ^ tmemXorMask] == RDRAM[(textureAddress + i) ^ 3]);
+            }
+#       endif
         }
         else {
             // Copy the entire word.
