@@ -40,8 +40,11 @@ float3 viewFromPixel(float2 px, float depth) {
 }
 
 float4 PSMain(in float4 pos : SV_Position, in float2 uv : TEXCOORD0) : SV_TARGET {
-    const float depth = gDepth.Load(int3(pos.xy, 0));
-    const float3 p = viewFromPixel(pos.xy, depth);
+    // Half-resolution pass: this texel shades the top-left full-resolution pixel of its 2x2 block.
+    const bool half = gLights.halfParams.x > 0.5f;
+    const float2 px = half ? (floor(pos.xy) * 2.0f + 0.5f) : pos.xy;
+    const float depth = gDepth.Load(int3(px, 0));
+    const float3 p = viewFromPixel(px, depth);
     float3 n = normalize(cross(ddy(p), ddx(p)));
     if (dot(n, p) > 0.0f) {
         n = -n;
@@ -79,7 +82,7 @@ float4 PSMain(in float4 pos : SV_Position, in float2 uv : TEXCOORD0) : SV_TARGET
     }
 
     if (sky) {
-        return float4(0.0f, 0.0f, 0.0f, 0.0f);
+        return float4(0.0f, 0.0f, 0.0f, half ? 65000.0f : 0.0f);
     }
 
 #ifdef RS64_LIGHT_SHADOWS
@@ -188,5 +191,5 @@ float4 PSMain(in float4 pos : SV_Position, in float2 uv : TEXCOORD0) : SV_TARGET
         return float4(0.0f, 0.0f, 0.0f, 0.0f);
     }
 
-    return float4(sum * gLights.gain, 0.0f);
+    return float4(sum * gLights.gain, half ? (length(p) / 64.0f) : 0.0f);
 }

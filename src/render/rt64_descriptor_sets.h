@@ -506,6 +506,25 @@ namespace RT64 {
         }
     };
 
+    // Adds the half-resolution point light pass to the frame: its constant buffer (view and viewport), the depth and the half-resolution lights.
+    struct RS64LightsUpsampleDescriptorSet : RenderDescriptorSetBase {
+        uint32_t gLights;
+        uint32_t gDepth;
+        uint32_t gHalf;
+
+        RS64LightsUpsampleDescriptorSet(RenderDevice *device = nullptr) {
+            builder.begin();
+            gLights = builder.addConstantBuffer(0);
+            gDepth = builder.addTexture(1);
+            gHalf = builder.addTexture(2);
+            builder.end();
+
+            if (device != nullptr) {
+                create(device);
+            }
+        }
+    };
+
     // The RS64 whole-map terrain pass: the frame's transform, viewport and fog buffers plus the static map lattice and tile textures.
     struct RS64TerrainDescriptorSet : RenderDescriptorSetBase {
         uint32_t gWorldTransforms;

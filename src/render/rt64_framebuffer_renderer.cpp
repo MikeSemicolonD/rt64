@@ -1655,12 +1655,15 @@ namespace RT64 {
 
         // Shadow casters were gathered by addFramebuffer; build their acceleration structures after this frame's world vertices.
         const bool rs64Dynamic = (!rs64Shadow.indices.empty() || !rs64Shadow.cutoutIndices.empty() || !rs64Shadow.craftIndices.empty()) && (vertexProcessor != nullptr) && (rs64Shadow.worldPos != nullptr);
-        if (rs64Dynamic || rs64Shadow.terrainActive) {
+
+        // An interpolated frame keeps the real frame's scene: its shadow trace is reprojected, and the point light and fog shaft rays can use the casters of the real frame.
+        const bool keepScene = rs64lights::g_reuseTrace && rs64Shadow.ready && (rs64Shadow.tlas != nullptr);
+        if (!keepScene && (rs64Dynamic || rs64Shadow.terrainActive)) {
             rs64TimingMark(worker, RS64TimeScene);
             recordRS64ShadowScene(worker, rs64Dynamic);
             rs64TimingMark(worker, RS64TimeScene);
         }
-        else {
+        else if (!keepScene) {
             rs64Shadow.ready = false;
             rs64Shadow.indices.clear();
             rs64Shadow.cutoutDrawCount = 0;
@@ -1866,6 +1869,7 @@ namespace RT64 {
             framebufferVector.back().descDummyFbSet = std::make_unique<FramebufferRendererDescriptorFramebufferSet>(p.worker->device);
             framebufferVector.back().rs64LightsBuffer = p.worker->device->createBuffer(RenderBufferDesc::UploadBuffer(sizeof(interop::RS64LightsCB), RenderBufferFlag::CONSTANT));
             framebufferVector.back().rs64LightsSet = std::make_unique<RS64LightsDescriptorSet>(p.worker->device);
+            framebufferVector.back().rs64LightsUpsampleSet = std::make_unique<RS64LightsUpsampleDescriptorSet>(p.worker->device);
             framebufferVector.back().rs64PanelsBuffer = p.worker->device->createBuffer(RenderBufferDesc::UploadBuffer(sizeof(interop::RS64LightsCB), RenderBufferFlag::CONSTANT));
             framebufferVector.back().rs64PanelsSet = std::make_unique<RS64LightsDescriptorSet>(p.worker->device);
             if (p.worker->device->getCapabilities().rayQuery) {
@@ -3243,6 +3247,30 @@ namespace RT64 {
         cb.terrainTMinScale = cfg.shadowTerrainTMin;
         cb.shadowParams = { cfg.lightShadowEnd, 0.0f, (cfg.terrainNormals && rs64TerrainNormalsThisFrame(rs64Shadow)) ? 1.0f : 0.0f, cfg.terrainNormalWindow };
         cb.specParams = { cfg.specular, cfg.specularPower, 0.0f, 0.0f };
+
+        // ROGUESQ_RT_LIGHTS_HALF=0 shades every pixel; the debug views always do.
+        static const bool s_lightsHalf = []() { const char *e = std::getenv("ROGUESQ_RT_LIGHTS_HALF"); return !(e && (e[0] == '0')); }();
+        framebuffer.rs64LightsHalf = s_lightsHalf && (cfg.debugMode == 0) && (framebuffer.rs64LightsUpsampleSet != nullptr);
+        cb.halfParams = { framebuffer.rs64LightsHalf ? 1.0f : 0.0f, 0.0f, 0.0f, 0.0f };
+        if (framebuffer.rs64LightsHalf) {
+            const RenderTarget *ct = p.fbStorage->colorTarget;
+            const uint32_t hw = (ct->width + 1) / 2;
+            const uint32_t hh = (ct->height + 1) / 2;
+            if (!framebuffer.rs64LightsHalfTex || (framebuffer.rs64LightsHalfW != hw) || (framebuffer.rs64LightsHalfH != hh)) {
+                framebuffer.rs64LightsHalfFb.reset();
+                framebuffer.rs64LightsHalfTex = p.worker->device->createTexture(RenderTextureDesc::ColorTarget(hw, hh, RenderFormat::R16G16B16A16_FLOAT));
+                const RenderTexture *halfTargets[] = { framebuffer.rs64LightsHalfTex.get() };
+                framebuffer.rs64LightsHalfFb = p.worker->device->createFramebuffer(RenderFramebufferDesc(halfTargets, 1));
+                framebuffer.rs64LightsHalfW = hw;
+                framebuffer.rs64LightsHalfH = hh;
+            }
+
+            RS64LightsUpsampleDescriptorSet &us = *framebuffer.rs64LightsUpsampleSet;
+            us.setBuffer(us.gLights, framebuffer.rs64LightsBuffer.get(), sizeof(interop::RS64LightsCB));
+            us.setTexture(us.gDepth, p.fbStorage->depthTarget->texture.get(), RenderTextureLayout::DEPTH_READ, p.fbStorage->depthTarget->textureView.get());
+            us.setTexture(us.gHalf, framebuffer.rs64LightsHalfTex.get(), RenderTextureLayout::SHADER_READ);
+        }
+
         // Flicker runs on wall time, so it keeps its pace whatever the frame rate.
         static const auto s_flickerStart = std::chrono::steady_clock::now();
         const double flickerT = std::chrono::duration<double>(std::chrono::steady_clock::now() - s_flickerStart).count();
@@ -3272,6 +3300,7 @@ namespace RT64 {
 
         if (framebuffer.rs64Panels) {
             cb.debugMode = RS64_LIGHTS_PANEL_FACES;
+            cb.halfParams = { 0.0f, 0.0f, 0.0f, 0.0f };
             bytes = framebuffer.rs64PanelsBuffer->map();
             memcpy(bytes, &cb, sizeof(cb));
             framebuffer.rs64PanelsBuffer->unmap();
@@ -4908,10 +4937,24 @@ namespace RT64 {
         const ShaderRecord &record = shadowed ? (framebuffer.rs64LightsDebug ? shaderLibrary->rs64LightsShadowedDebug : shaderLibrary->rs64LightsShadowed)
                                               : (framebuffer.rs64LightsDebug ? shaderLibrary->rs64LightsDebug : shaderLibrary->rs64Lights);
         const RenderViewport &v = framebuffer.viewport;
-        worker->commandList->setViewports(v);
-        worker->commandList->setScissors(RenderRect(int32_t(v.x), int32_t(v.y), int32_t(v.x + v.width), int32_t(v.y + v.height)));
-        worker->commandList->setPipeline(record.pipeline.get());
-        worker->commandList->setGraphicsPipelineLayout(record.pipelineLayout.get());
+        const RenderRect sc(int32_t(v.x), int32_t(v.y), int32_t(v.x + v.width), int32_t(v.y + v.height));
+        const bool half = framebuffer.rs64LightsHalf && (framebuffer.rs64LightsHalfFb != nullptr);
+        const ShaderRecord &pass = !half ? record : (shadowed ? shaderLibrary->rs64LightsShadowedHalf : shaderLibrary->rs64LightsHalf);
+        if (half) {
+            RenderTexture *halfTex = framebuffer.rs64LightsHalfTex.get();
+            const RenderTextureBarrier toHalf[] = { RenderTextureBarrier(halfTex, RenderTextureLayout::COLOR_WRITE) };
+            worker->commandList->barriers(RenderBarrierStage::GRAPHICS, toHalf, uint32_t(std::size(toHalf)));
+            worker->commandList->setFramebuffer(framebuffer.rs64LightsHalfFb.get());
+            worker->commandList->clearColor(0, RenderColor(0.0f, 0.0f, 0.0f, 65000.0f));
+            worker->commandList->setViewports(RenderViewport(v.x / 2.0f, v.y / 2.0f, v.width / 2.0f, v.height / 2.0f, v.minDepth, v.maxDepth));
+            worker->commandList->setScissors(RenderRect(int32_t(v.x) / 2, int32_t(v.y) / 2, (int32_t(v.x + v.width) + 1) / 2, (int32_t(v.y + v.height) + 1) / 2));
+        }
+        else {
+            worker->commandList->setViewports(v);
+            worker->commandList->setScissors(sc);
+        }
+        worker->commandList->setPipeline(pass.pipeline.get());
+        worker->commandList->setGraphicsPipelineLayout(pass.pipelineLayout.get());
         if (shadowed) {
             framebuffer.rs64LightsShadowedSet->setAccelerationStructure(framebuffer.rs64LightsShadowedSet->gScene, rs64Shadow.tlas.get());
             bindRS64Traced(worker, *framebuffer.rs64LightsShadowedSet, framebuffer.rs64LightsBuffer.get(), offsetof(interop::RS64LightsCB, shadowParams) + sizeof(float), true);
@@ -4921,6 +4964,21 @@ namespace RT64 {
         }
         worker->commandList->setVertexBuffers(0, nullptr, 0, nullptr);
         worker->commandList->drawInstanced(3, 1, 0, 0);
+
+        // Add the half-resolution lights to the frame, matching each pixel to the half texels at its distance.
+        if (half) {
+            RenderTexture *halfTex = framebuffer.rs64LightsHalfTex.get();
+            RenderTexture *color = targetDrawCall.fbStorage->colorTarget->texture.get();
+            const RenderTextureBarrier toUpsample[] = { RenderTextureBarrier(halfTex, RenderTextureLayout::SHADER_READ), RenderTextureBarrier(color, RenderTextureLayout::COLOR_WRITE) };
+            worker->commandList->barriers(RenderBarrierStage::GRAPHICS, toUpsample, uint32_t(std::size(toUpsample)));
+            worker->commandList->setFramebuffer(targetDrawCall.fbStorage->colorWriteDepthRead.get());
+            worker->commandList->setViewports(v);
+            worker->commandList->setScissors(sc);
+            worker->commandList->setPipeline(shaderLibrary->rs64LightsUpsample.pipeline.get());
+            worker->commandList->setGraphicsPipelineLayout(shaderLibrary->rs64LightsUpsample.pipelineLayout.get());
+            worker->commandList->setGraphicsDescriptorSet(framebuffer.rs64LightsUpsampleSet->get(), 0);
+            worker->commandList->drawInstanced(3, 1, 0, 0);
+        }
 
         if (framebuffer.rs64Panels) {
             worker->commandList->setPipeline(shaderLibrary->rs64LightsDebug.pipeline.get());

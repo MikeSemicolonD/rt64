@@ -11,6 +11,7 @@
 #include "shaders/FbChangesClearCS.hlsl.spirv.h"
 #include "shaders/FbChangesDrawColorPS.hlsl.spirv.h"
 #include "shaders/RS64LightsPS.hlsl.spirv.h"
+#include "shaders/RS64LightsUpsamplePS.hlsl.spirv.h"
 #include "shaders/RS64TerrainVS.hlsl.spirv.h"
 #include "shaders/RS64TerrainPS.hlsl.spirv.h"
 #ifndef __APPLE__
@@ -74,6 +75,7 @@
 #   include "shaders/FbChangesClearCS.hlsl.dxil.h"
 #   include "shaders/FbChangesDrawColorPS.hlsl.dxil.h"
 #   include "shaders/RS64LightsPS.hlsl.dxil.h"
+#   include "shaders/RS64LightsUpsamplePS.hlsl.dxil.h"
 #   include "shaders/RS64TerrainVS.hlsl.dxil.h"
 #   include "shaders/RS64TerrainPS.hlsl.dxil.h"
 #   include "shaders/RS64TerrainPSPacks.hlsl.dxil.h"
@@ -134,6 +136,7 @@
 #   include "shaders/FbChangesClearCS.hlsl.metal.h"
 #   include "shaders/FbChangesDrawColorPS.hlsl.metal.h"
 #   include "shaders/RS64LightsPS.hlsl.metal.h"
+#   include "shaders/RS64LightsUpsamplePS.hlsl.metal.h"
 #   include "shaders/RS64TerrainVS.hlsl.metal.h"
 #   include "shaders/RS64TerrainPS.hlsl.metal.h"
 #   include "shaders/FbChangesDrawDepthPS.hlsl.metal.h"
@@ -932,6 +935,27 @@ namespace RT64 {
             pipelineDesc.renderTargetBlend[0] = over;
             pipelineDesc.pipelineLayout = rs64LightsDebug.pipelineLayout.get();
             rs64LightsDebug.pipeline = device->createGraphicsPipeline(pipelineDesc);
+
+            // Half-resolution light pass into its own float target (distance code in alpha), then added to the frame with the tint blend.
+            RenderGraphicsPipelineDesc halfDesc = pipelineDesc;
+            halfDesc.renderTargetFormat[0] = RenderFormat::R16G16B16A16_FLOAT;
+            halfDesc.multisampling = RenderMultisampling();
+            halfDesc.depthTargetFormat = RenderFormat::UNKNOWN;
+            halfDesc.renderTargetBlend[0] = RenderBlendDesc::Copy();
+            rs64LightsHalf.pipelineLayout = layoutBuilder.create(device);
+            halfDesc.pipelineLayout = rs64LightsHalf.pipelineLayout.get();
+            rs64LightsHalf.pipeline = device->createGraphicsPipeline(halfDesc);
+
+            RS64LightsUpsampleDescriptorSet upsampleSet;
+            layoutBuilder.begin();
+            layoutBuilder.addDescriptorSet(upsampleSet);
+            layoutBuilder.end();
+            rs64LightsUpsample.pipelineLayout = layoutBuilder.create(device);
+            std::unique_ptr<RenderShader> upsampleShader = device->createShader(CREATE_SHADER_INPUTS(RS64LightsUpsamplePSBlobDXIL, RS64LightsUpsamplePSBlobSPIRV, RS64LightsUpsamplePSBlobMSL, "PSMain", shaderFormat));
+            pipelineDesc.pixelShader = upsampleShader.get();
+            pipelineDesc.renderTargetBlend[0] = tint;
+            pipelineDesc.pipelineLayout = rs64LightsUpsample.pipelineLayout.get();
+            rs64LightsUpsample.pipeline = device->createGraphicsPipeline(pipelineDesc);
         }
 
         // RS64 sun shadows: inline RayQuery against the per-frame scene, only on devices with ray queries.
@@ -1094,6 +1118,14 @@ namespace RT64 {
             pipelineDesc.renderTargetBlend[0] = tint;
             pipelineDesc.pipelineLayout = rs64LightsShadowed.pipelineLayout.get();
             rs64LightsShadowed.pipeline = device->createGraphicsPipeline(pipelineDesc);
+            RenderGraphicsPipelineDesc shadowedHalfDesc = pipelineDesc;
+            shadowedHalfDesc.renderTargetFormat[0] = RenderFormat::R16G16B16A16_FLOAT;
+            shadowedHalfDesc.multisampling = RenderMultisampling();
+            shadowedHalfDesc.depthTargetFormat = RenderFormat::UNKNOWN;
+            shadowedHalfDesc.renderTargetBlend[0] = RenderBlendDesc::Copy();
+            rs64LightsShadowedHalf.pipelineLayout = tracedLayout();
+            shadowedHalfDesc.pipelineLayout = rs64LightsShadowedHalf.pipelineLayout.get();
+            rs64LightsShadowedHalf.pipeline = device->createGraphicsPipeline(shadowedHalfDesc);
             RenderBlendDesc over = RenderBlendDesc::Copy();
             over.blendEnabled = true;
             over.srcBlend = RenderBlend::SRC_ALPHA;

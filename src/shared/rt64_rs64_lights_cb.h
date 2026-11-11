@@ -25,6 +25,8 @@ namespace interop {
         float4 shadowParams;
         // x: specular strength, y: specular exponent.
         float4 specParams;
+        // x: 1 = the half-resolution pass (one full-resolution pixel of each 2x2, distance code in alpha for RS64LightsUpsamplePS).
+        float4 halfParams;
         float4 lightPosRadius[RS64_MAX_LIGHTS];
         float4 lightColor[RS64_MAX_LIGHTS];
         float4 lightParams[RS64_MAX_LIGHTS];

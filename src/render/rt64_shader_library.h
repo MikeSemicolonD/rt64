@@ -34,6 +34,8 @@ namespace RT64 {
         ShaderRecord fbChangesClear;
         ShaderRecord fbChangesDrawColor;
         ShaderRecord rs64Lights;
+        ShaderRecord rs64LightsHalf;
+        ShaderRecord rs64LightsUpsample;
         ShaderRecord rs64Terrain;
         ShaderRecord rs64TerrainWater;
         ShaderRecord rs64TerrainPacks;
@@ -50,6 +52,7 @@ namespace RT64 {
         ShaderRecord rs64WaterMirror;
         ShaderRecord rs64WaterMirrorNeg;
         ShaderRecord rs64LightsShadowed;
+        ShaderRecord rs64LightsShadowedHalf;
         ShaderRecord rs64LightsShadowedDebug;
         ShaderRecord rs64FogShafts;
         ShaderRecord rs64FogShaftsDebug;

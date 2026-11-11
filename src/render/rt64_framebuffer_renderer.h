@@ -160,6 +160,13 @@ namespace RT64 {
             RenderViewport viewport;
             std::unique_ptr<RenderBuffer> rs64LightsBuffer;
             std::unique_ptr<RS64LightsDescriptorSet> rs64LightsSet;
+            // Point lights at half resolution (ROGUESQ_RT_LIGHTS_HALF): drawn into rs64LightsHalfTex, then added to the frame by the upsample.
+            std::unique_ptr<RS64LightsUpsampleDescriptorSet> rs64LightsUpsampleSet;
+            std::unique_ptr<RenderTexture> rs64LightsHalfTex;
+            std::unique_ptr<RenderFramebuffer> rs64LightsHalfFb;
+            uint32_t rs64LightsHalfW = 0;
+            uint32_t rs64LightsHalfH = 0;
+            bool rs64LightsHalf = false;
             // Glowing panel faces: the lights CB in faces-only mode, drawn over the frame (the lights pass itself only tints it).
             std::unique_ptr<RenderBuffer> rs64PanelsBuffer;
             std::unique_ptr<RS64LightsDescriptorSet> rs64PanelsSet;
