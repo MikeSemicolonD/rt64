@@ -153,6 +153,9 @@ namespace RT64 {
         hlslpp::float4x4 modelViewProjMatrix;
         bool modelViewProjChanged;
         bool modelViewProjInserted;
+
+        // Set by the F5 sprite path while it loads a camera-facing sprite; its world transform is recorded as a billboard.
+        bool rs64Billboard = false;
         int projectionIndex;
         std::array<interop::RSPViewport, RSP_EXTENDED_STACK_SIZE> viewportStack;
         int viewportStackSize;

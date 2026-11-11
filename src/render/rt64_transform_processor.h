@@ -21,6 +21,9 @@ namespace RT64 {
             const GameFrame *prevFrame = nullptr;
             float curFrameWeight = 1.0f;
             float prevFrameWeight = 0.0f;
+
+            // VR: the head's rotation in game camera space (row vectors, 3x3); billboard transforms turn by it to face the head. Null = no head.
+            const float *headRotation = nullptr;
         };
 
         TransformProcessor();

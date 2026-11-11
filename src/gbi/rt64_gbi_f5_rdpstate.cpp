@@ -13,6 +13,9 @@
 
 #include "common/rt64_diag_bounds.h"
 
+extern "C" int rs64_vr_active(void);
+extern "C" int rs64_vr_hud_quads(void);
+
 #include <atomic>
 
 extern "C" void rt64_f5_desync_dump(const char *why, uint32_t badW1);
@@ -292,6 +295,19 @@ namespace RT64 {
 
         // fullSync_logged stays in core (geometry: render_scene_objects + s_native_primed).
 
+        static uint64_t s_hud_task = 0;
+        uint64_t g_vr_fill_task = ~0ull;
+
+        // VR: a fill reaching the scissor bottom before any HUD marker is the scene clear (in missions the below-horizon colour), sized for the game camera; it covers the whole target so turned eyes see no stale pixels.
+        static bool vr_scene_fill(State *state, const DisplayList *dl) {
+            if ((rs64_vr_active() == 0) || (s_hud_task == state->displayListCounter)) {
+                return false;
+            }
+
+            const FixedRect &sc = state->rdp->scissorRectStack[state->rdp->scissorStackSize - 1];
+            return int32_t(dl->p0(0, 12)) + 4 >= sc.lry;
+        }
+
         // fillRect (op 0xF6) — solid color fills. Logs draw geometry.
         void fillRect_logged(State *state, DisplayList **dl) {
             if (state->rdp->colorImage.address == 0x76A000u) {
@@ -335,6 +351,15 @@ namespace RT64 {
                   std::fprintf(stderr, "[fill-diag] cimg=0x%06X fillColor=0x%08X rect=(%u,%u)-(%u,%u)\n",
                     state->rdp->colorImage.address, fc,
                     (*dl)->p1(12,12), (*dl)->p1(0,12), lrx, lry); std::fflush(stderr); } } }
+
+            if (vr_scene_fill(state, *dl)) {
+                const FixedRect &sc = state->rdp->scissorRectStack[state->rdp->scissorStackSize - 1];
+
+                g_vr_fill_task = state->displayListCounter;
+                state->rdp->fillRect(sc.ulx, sc.uly, sc.lrx, sc.lry);
+                return;
+            }
+
             GBI_RDP::fillRect(state, dl);
         }
 
@@ -367,11 +392,36 @@ namespace RT64 {
 
         // The side the last RS64 HUD marker named, valid only in the task it was read in.
         static rs64hud::Side s_hud_side = rs64hud::None;
-        static uint64_t s_hud_task = 0;
 
         void op_60_hud_side(State *state, DisplayList **dl) {
             s_hud_side = rs64hud::Side((*dl)->w0 & 0xFFu);
-            s_hud_task = state->displayListCounter;        }
+            s_hud_task = state->displayListCounter;
+        }
+
+        // VR outside missions: texrects that do not span the full height (wipes keep their masking tile only as texrects).
+        static bool vr_scene_texrect(State *state, const DisplayList *dl) {
+            if ((rs64_vr_active() == 0) || (rs64_vr_hud_quads() != 0) || (g_active_overlay <= 0)) {
+                return false;
+            }
+
+            if (((state->rdp->otherMode.H >> 20) & 3u) == 3u) {
+                return false;
+            }
+
+            const FixedRect &sc = state->rdp->scissorRectStack[state->rdp->scissorStackSize - 1];
+            return !rs64hud::spansHeight(int32_t(dl->w1 & 0xFFFu), int32_t(dl->w0 & 0xFFFu), sc.uly, sc.lry);
+        }
+
+        // VR: texrects drawn after a HUD marker in this task are the mission's 2D HUD, except full-height wipes, which stay on the screen like a fade.
+        // Menus also draw through the marked routine but keep their texrects: their wipes use a second masking tile a quad drops.
+        static bool vr_hud_texrect(State *state, const DisplayList *dl) {
+            if ((rs64_vr_active() == 0) || (rs64_vr_hud_quads() == 0) || (s_hud_task != state->displayListCounter)) {
+                return false;
+            }
+
+            const FixedRect &sc = state->rdp->scissorRectStack[state->rdp->scissorStackSize - 1];
+            return !rs64hud::spansHeight(int32_t(dl->w1 & 0xFFFu), int32_t(dl->w0 & 0xFFFu), sc.uly, sc.lry);
+        }
 
         // Draws one texrect of an edge-anchored HUD element with its side as the rect and scissor origins; both edges share it, so the rect moves without stretching.
         template <class Draw>
@@ -383,7 +433,9 @@ namespace RT64 {
                 return;
             }
 
-            const rs64hud::Side side = (s_hud_task == state->displayListCounter) ? s_hud_side : rs64hud::None;            if (side == rs64hud::None) {
+            const rs64hud::Side side = (s_hud_task == state->displayListCounter) ? s_hud_side : rs64hud::None;
+
+            if (side == rs64hud::None) {
                 draw();
                 return;
             }
@@ -602,7 +654,7 @@ namespace RT64 {
                     }
                 }
             }
-            if (f5_crosshair_quad(state, *dl) || f5_credits_glyph_quad(state, *dl)) {
+            if (f5_crosshair_quad(state, *dl) || f5_credits_glyph_quad(state, *dl) || (vr_hud_texrect(state, *dl) && f5_vr_hud_quad(state, *dl)) || (vr_scene_texrect(state, *dl) && f5_vr_scene_quad(state, *dl))) {
                 (*dl)++;
                 return;
             }

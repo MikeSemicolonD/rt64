@@ -2273,7 +2273,10 @@ namespace RT64 {
                     rs64TerrainFrame = tp;
                     rs64TerrainCB.worldIndex = drawData.worldIndices[v];
                     rs64TerrainCB.viewProjIndex = drawData.viewProjIndices[v];
-                    rs64TerrainMvp = hlslpp::mul(hlslpp::float4x4(drawData.worldTransforms[rs64TerrainCB.worldIndex]), hlslpp::float4x4(drawData.viewProjTransforms[rs64TerrainCB.viewProjIndex]));
+                    // The modified view-projection when the projection processor ran (interpolation, widening, VR eyes), as rs64ViewProj picks it.
+                    const bool modViewProj = (drawData.modViewProjTransforms.size() == drawData.viewProjTransforms.size());
+                    const auto &terrainViewProj = modViewProj ? drawData.modViewProjTransforms : drawData.viewProjTransforms;
+                    rs64TerrainMvp = hlslpp::mul(hlslpp::float4x4(drawData.worldTransforms[rs64TerrainCB.worldIndex]), hlslpp::float4x4(terrainViewProj[rs64TerrainCB.viewProjIndex]));
                     rs64TerrainCB.fogIndex = drawData.fogIndices[v];
                     rs64TerrainCB.originX = tp.originX;
                     rs64TerrainCB.originZ = tp.originZ;

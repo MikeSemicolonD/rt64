@@ -70,7 +70,8 @@ void CSMain(uint vertexIndex : SV_DispatchThreadID) {
     float4 vertexColor;
     if (fogIndex > 0) {
         const RSPFog rspFog = rspFogVector[fogIndex - 1];
-        const float fogAlpha = ((max(tfPos.z, 0) / tfPos.w) * rspFog.mul + rspFog.offset);
+        const float3 camPos = mul(worldMat, float4(pos - vel * (1.0f - gConstants.curFrameWeight), 1.0f)).xyz;
+        const float fogAlpha = rs64FogDepth(viewProjMat, camPos, rspFog) * rspFog.mul + rspFog.offset;
         vertexColor.a = rs64FogCurve(fogAlpha / 255.0f, rspFog.tailEnd);
     }
     else {

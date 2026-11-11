@@ -5,6 +5,7 @@
 #pragma once
 
 #include "hle/rt64_game_frame.h"
+#include "hle/rt64_rs64_vr.h"
 
 #include "rt64_buffer_uploader.h"
 
@@ -21,6 +22,10 @@ namespace RT64 {
             float curFrameWeight = 1.0f;
             float prevFrameWeight = 0.0f;
             float aspectRatioScale = 1.0f;
+
+            // VR: the eye (0 left, 1 right) this frame renders, with the poses it was located at; null = flat.
+            const rs64vr::EyeViews *eyeViews = nullptr;
+            int eye = 0;
         };
 
         ProjectionProcessor();

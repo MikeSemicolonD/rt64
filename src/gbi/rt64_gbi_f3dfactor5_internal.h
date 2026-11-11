@@ -103,6 +103,12 @@ namespace RT64 {
         // Draws a crosshair-ring texrect (dl points at its 16 bytes) as an interpolated quad; false leaves it to the texrect path.
         bool f5_crosshair_quad(State *state, const DisplayList *dl);
         bool f5_credits_glyph_quad(State *state, const DisplayList *dl);
+        // VR: draws a HUD element's texrect as a quad at the radar's depth in front of the game camera; false leaves it to the texrect path.
+        bool f5_vr_hud_quad(State *state, const DisplayList *dl);
+        // VR outside missions: a backdrop or menu texrect as a quad where the game camera faces; false leaves it to the texrect path.
+        bool f5_vr_scene_quad(State *state, const DisplayList *dl);
+        // The task whose scene clear fill was stretched to the whole target (VR).
+        extern uint64_t g_vr_fill_task;
 
         // --- RDP-state / raster handlers (rt64_gbi_f5_rdpstate.cpp): Factor-5 wrappers
         //     around the base GBI_F3D/GBI_RDP handlers (logging, guards, CI4 reinterpret).

@@ -25,6 +25,7 @@
 
 #include "rt64_rs64_mcp.h"
 #include "rt64_rs64_transition.h"
+#include "rt64_rs64_vr.h"
 #include "rt64_workload_queue.h"
 
 // Most draw-active color buffer, published by the F3DFACTOR5 GBI module. Present
@@ -133,6 +134,41 @@ namespace RT64 {
         commandList->barriers(RenderBarrierStage::COPY, RenderTextureBarrier(params.texture, RenderTextureLayout::COPY_SOURCE));
         commandList->copyTextureRegion(RenderTextureCopyLocation::PlacedFootprint(s.buffer.get(), params.textureFormat, s.width, s.height, 1, s.rowWidth), RenderTextureCopyLocation::Subresource(params.texture));
         commandList->barriers(RenderBarrierStage::GRAPHICS, RenderTextureBarrier(params.texture, RenderTextureLayout::SHADER_READ));
+        return true;
+    }
+
+    // VR: raw copies of both eye targets into the headset's swapchain images, then the frame ends with the poses they were rendered at.
+    // The targets hold display-encoded RGBA8 and the images are sRGB, so the bytes go across unchanged.
+    static bool rs64SubmitEyes(RenderWorker *worker, const ShaderLibrary *shaderLibrary, RenderTarget *left, RenderTarget *right, const rs64vr::EyeViews &views) {
+        RenderTarget *targets[2] = { left, right };
+        RenderTexture *images[2] = {};
+        uint32_t width = 0;
+        uint32_t height = 0;
+        for (int e = 0; e < 2; e++) {
+            images[e] = rs64_vr_acquire_eye(e, &width, &height);
+        }
+
+        if ((images[0] == nullptr) || (images[1] == nullptr)) {
+            return false;
+        }
+
+        RenderCommandList *commandList = worker->commandList.get();
+        commandList->begin();
+        for (int e = 0; e < 2; e++) {
+            targets[e]->resolveTarget(worker, shaderLibrary);
+            RenderTexture *source = targets[e]->getResolvedTexture();
+            const RenderBox box(0, 0, int32_t(std::min(targets[e]->width, width)), int32_t(std::min(targets[e]->height, height)));
+            commandList->barriers(RenderBarrierStage::COPY, RenderTextureBarrier(source, RenderTextureLayout::COPY_SOURCE));
+            commandList->barriers(RenderBarrierStage::COPY, RenderTextureBarrier(images[e], RenderTextureLayout::COPY_DEST));
+            commandList->copyTextureRegion(RenderTextureCopyLocation::Subresource(images[e]), RenderTextureCopyLocation::Subresource(source), 0, 0, 0, &box);
+            commandList->barriers(RenderBarrierStage::GRAPHICS, RenderTextureBarrier(source, RenderTextureLayout::SHADER_READ));
+            commandList->barriers(RenderBarrierStage::GRAPHICS, RenderTextureBarrier(images[e], RenderTextureLayout::COLOR_WRITE));
+        }
+
+        commandList->end();
+        worker->execute();
+        worker->wait();
+        rs64_vr_end_frame(&views);
         return true;
     }
 
@@ -306,6 +342,7 @@ namespace RT64 {
         bool lockedWorkloadMutex = false;
         InterpolatedFrameCounters &frameCounters = ext.sharedResources->interpolatedFrames[ext.sharedResources->interpolatedFramesIndex];
         const bool usingMSAA = frameCounters.msaa;
+        const uint32_t vrSet = ext.sharedResources->interpolatedFramesIndex;
 
         // TODO: There's a possible race condition interactions that can happen while the workload
         // queue is rendering extra frames and the present event is processed while it's generating
@@ -660,10 +697,35 @@ namespace RT64 {
                 frameCountersNextPresented = frameCounters.count;
             }
 
+            // VR: xrWaitFrame paces this loop. A frame with no new eyes shows the last ones again (the layer keeps each swapchain's last
+            // released image); ending a frame with no layers would clear the display.
+            static rs64vr::EyeViews vrLastViews;
+            const bool vrSession = (rs64_vr_session() != 0);
+            if (vrSession && (i < framesToPresent)) {
+                const int vrRender = rs64_vr_begin_frame();
+                std::vector<std::unique_ptr<RenderTarget>> &vrRight = ext.sharedResources->vrRightTargets[vrSet];
+                std::vector<rs64vr::EyeViews> &vrViews = ext.sharedResources->vrTargetViews[vrSet];
+                const bool haveEyes = (colorTarget != nullptr) && (uint32_t(i) < vrRight.size()) && (uint32_t(i) < vrViews.size()) && vrViews[i].valid;
+                if ((vrRender == 1) && haveEyes && rs64SubmitEyes(ext.presentGraphicsWorker, ext.shaderLibrary, colorTarget, vrRight[i].get(), vrViews[i])) {
+                    vrLastViews = vrViews[i];
+                }
+                else if (vrRender == 1) {
+                    rs64_vr_end_frame(&vrLastViews);
+                }
+                else if (vrRender == 0) {
+                    rs64_vr_end_frame(nullptr);
+                }
+            }
+
+            // The window mirrors the left eye at most 30 times a second, so a 60 Hz FIFO swapchain never holds back the headset.
+            static Timestamp vrWindowTimestamp;
+            const bool vrWindowDue = !vrSession || (vrWindowTimestamp == Timestamp()) || (Timer::current() - vrWindowTimestamp >= std::chrono::milliseconds(33));
+
             uint32_t swapChainIndex = 0;
-            const bool presentFrame = (i < framesToPresent) && swapChainValid;
+            const bool presentFrame = (i < framesToPresent) && swapChainValid && vrWindowDue;
             if (presentFrame) {
                 swapChainValid = ext.swapChain->acquireTexture(acquiredSemaphore.get(), &swapChainIndex);
+                vrWindowTimestamp = Timer::current();
             }
 
             if (presentFrame && swapChainValid) {
@@ -803,7 +865,7 @@ namespace RT64 {
 
             if (presentFrame && swapChainValid) {
                 // Wait until the approximate time the next present should be at the current intended rate.
-                if ((presentTimestamp != Timestamp()) && (targetRate > 0) && (targetRate > viOriginalRate)) {
+                if (!vrSession && (presentTimestamp != Timestamp()) && (targetRate > 0) && (targetRate > viOriginalRate)) {
                     Timer::preciseSleepUntil(presentTimestamp + std::chrono::nanoseconds(1'000'000'000 / targetRate));
                 }
 

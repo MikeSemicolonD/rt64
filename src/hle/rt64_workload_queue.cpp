@@ -12,10 +12,13 @@
 
 #include "rt64_present_queue.h"
 #include "rt64_rs64_hud.h"
+#include "rt64_rs64_vr.h"
 
 #define ENABLE_HIGH_RESOLUTION_RENDERER 1
 
 std::atomic<float> g_rs64_hud_placement{ 0.0f };
+
+extern "C" int rs64_vr_active(void);
 
 namespace RT64 {
     // WorkloadQueue
@@ -229,6 +232,17 @@ namespace RT64 {
         workloadConfig.aspectRatioScale = workloadConfig.aspectRatioTarget / workloadConfig.aspectRatioSource;
         workloadConfig.resolutionScale = { resolutionMultiplier * workloadConfig.aspectRatioScale, resolutionMultiplier };
         workloadConfig.downsampleMultiplier = ssaaMultiplier;
+
+        // VR: the eye targets are the headset's per-eye size, copied raw into its swapchain; the eye projection sets the field of view, so nothing widens.
+        uint32_t vrEyeWidth = 0;
+        uint32_t vrEyeHeight = 0;
+        rs64_vr_eye_size(&vrEyeWidth, &vrEyeHeight);
+        if (rs64_vr_session() && (vrEyeWidth > 0) && (vrEyeHeight > 0) && (viFbSize[0] > 0) && (viFbSize[1] > 0)) {
+            workloadConfig.aspectRatioScale = 1.0f;
+            workloadConfig.resolutionScale = { float(vrEyeWidth) / float(viFbSize[0]), float(vrEyeHeight) / float(viFbSize[1]) };
+            workloadConfig.downsampleMultiplier = 1;
+        }
+
         ext.sharedResources->resolutionScale = workloadConfig.resolutionScale;
 
         // Find the target refresh rate from the configuration.
@@ -250,6 +264,11 @@ namespace RT64 {
         default:
             workloadConfig.targetRate = 0;
             break;
+        }
+
+        // VR runs at the headset's rate, whatever the window's monitor does.
+        if (rs64_vr_session()) {
+            workloadConfig.targetRate = rs64_vr_target_rate();
         }
 
         // Store the rate that was chosen for the configuration.
@@ -311,7 +330,8 @@ namespace RT64 {
     void WorkloadQueue::threadRenderFrame(GameFrame &curFrame, const GameFrame &prevFrame, const WorkloadConfiguration &workloadConfig,
         const DebuggerRenderer &debuggerRenderer, const DebuggerCamera &debuggerCamera, float curFrameWeight, float prevFrameWeight,
         float deltaTimeMs, RenderTargetKey overrideTargetKey, int32_t overrideTargetFbPairIndex, RenderTarget *overrideTarget,
-        uint32_t overrideTargetModifier, bool uploadVelocity, bool uploadExtras, bool interpolateTiles, bool interpolateLookAts)
+        uint32_t overrideTargetModifier, bool uploadVelocity, bool uploadExtras, bool interpolateTiles, bool interpolateLookAts,
+        const rs64vr::EyeViews *eyeViews, int eye)
     {
 #   if ENABLE_HIGH_RESOLUTION_RENDERER
         std::scoped_lock<std::mutex> managerLock(ext.sharedResources->workloadMutex);
@@ -322,7 +342,7 @@ namespace RT64 {
         rendererCPUProfiler.start();
 
         const bool aspectRatioAdjustment = (abs(workloadConfig.aspectRatioScale - 1.0f) > 1e-6f);
-        const bool processProjections = aspectRatioAdjustment || prevFrame.matched|| curFrame.isDebuggerCameraEnabled(*this);
+        const bool processProjections = aspectRatioAdjustment || prevFrame.matched || curFrame.isDebuggerCameraEnabled(*this) || (rs64_vr_active() != 0);
         bool uploadProjections = false;
         if (processProjections) {
             ProjectionProcessor::ProcessParams projParams;
@@ -333,6 +353,8 @@ namespace RT64 {
             projParams.curFrameWeight = curFrameWeight;
             projParams.prevFrameWeight = prevFrameWeight;
             projParams.aspectRatioScale = workloadConfig.aspectRatioScale;
+            projParams.eyeViews = eyeViews;
+            projParams.eye = eye;
             projectionProcessor.process(projParams);
             projectionProcessor.upload(projParams);
             uploadProjections = true;
@@ -340,7 +362,30 @@ namespace RT64 {
 
         // Shadows need the world-vertex pass, which reads the inverse-transpose and previous transforms; unmatched frames upload the plain ones.
         const bool rs64WorldPass = rs64lights::sceneCaptureEnabled(rs64lights::config()) && ext.device->getCapabilities().rayQuery;
-        const bool processTransforms = prevFrame.matched || rs64WorldPass;
+        // The right eye reuses the left eye's transform, tile and look-at uploads: same weights, and nothing else writes those buffers in between.
+        const bool rightEye = (eyeViews != nullptr) && (eye == 1);
+
+        // VR: the head's rotation in game camera space, the transpose of its view's rotation, which turns billboard sprites to face it. Both eyes share it.
+        float headRotation[9];
+        bool haveHead = false;
+        rs64vr::Pose fakeHead;
+        rs64vr::Mat4 headView;
+        if ((eyeViews != nullptr) && eyeViews->valid) {
+            headView = rs64vr::eyeView(eyeViews->eye[0], 1.0f);
+            haveHead = true;
+        }
+        else if (rs64_vr_fake_head(&fakeHead)) {
+            headView = rs64vr::eyeView(fakeHead, 1.0f);
+            haveHead = true;
+        }
+
+        for (int r = 0; haveHead && (r < 3); r++) {
+            for (int c = 0; c < 3; c++) {
+                headRotation[r * 3 + c] = headView.m[c][r];
+            }
+        }
+
+        const bool processTransforms = (prevFrame.matched || rs64WorldPass || haveHead) && !rightEye;
         bool uploadTransforms = false;
         if (processTransforms) {
             TransformProcessor::ProcessParams transformParams;
@@ -350,13 +395,14 @@ namespace RT64 {
             transformParams.prevFrame = prevFrame.matched ? &prevFrame : nullptr;
             transformParams.curFrameWeight = curFrameWeight;
             transformParams.prevFrameWeight = prevFrameWeight;
+            transformParams.headRotation = haveHead ? headRotation : nullptr;
             transformProcessor.process(transformParams);
             transformProcessor.upload(transformParams);
             uploadTransforms = true;
         }
 
         bool uploadTiles = false;
-        if (interpolateTiles) {
+        if (interpolateTiles && !rightEye) {
             TileProcessor::ProcessParams tileParams;
             tileParams.worker = ext.workloadGraphicsWorker;
             tileParams.workloadQueue = this;
@@ -370,7 +416,7 @@ namespace RT64 {
         }
 
         bool uploadLookAts = false;
-        if (interpolateLookAts) {
+        if (interpolateLookAts && !rightEye) {
             LookAtProcessor::ProcessParams lookAtParams;
             lookAtParams.worker = ext.workloadGraphicsWorker;
             lookAtParams.workloadQueue = this;
@@ -409,7 +455,7 @@ namespace RT64 {
             }
 
             // RSPWorldCS has no CPU path yet, so devices without compute skip world-space vertices (interpolation and ray-traced lighting).
-            const bool processWorldVertices = (prevFrame.matched || rs64WorldPass) && ext.device->getCapabilities().computeShaders;
+            const bool processWorldVertices = (prevFrame.matched || rs64WorldPass) && ext.device->getCapabilities().computeShaders && !rightEye;
             if (processWorldVertices) {
                 workload.resetWorldOutputBuffers();
 
@@ -1227,9 +1273,36 @@ namespace RT64 {
                     // ROGUESQ_RT_INTERP_REUSE=0 traces every displayed frame again.
                     static const bool s_reuseTrace = []() { const char *e = std::getenv("ROGUESQ_RT_INTERP_REUSE"); return !(e && (e[0] == '0')); }();
                     rs64lights::g_reuseTrace = s_reuseTrace && generateInterpolatedFrames && (frame > 0);
+                    // VR: both eyes of this rendered frame use poses located now, stored per counter set and rendered frame so the present thread submits the same ones.
+                    const uint32_t vrSet = ext.sharedResources->interpolatedFramesIndex;
+                    const rs64vr::EyeViews *vrViews = nullptr;
+                    if (rs64_vr_session() && !interpolationTargetKey.isEmpty()) {
+                        std::vector<rs64vr::EyeViews> &views = ext.sharedResources->vrTargetViews[vrSet];
+                        if (views.size() <= framesRendered) {
+                            views.resize(framesRendered + 1);
+                        }
+
+                        rs64_vr_locate(framesRendered + 1, &views[framesRendered]);
+                        vrViews = &views[framesRendered];
+                    }
+
                     int64_t renderTimeMicro = workloadTimer.elapsedMicroseconds();
                     threadRenderFrame(curFrame, prevFrame, workloadConfig, workload.debuggerRenderer, workload.debuggerCamera, curFrameWeight, prevFrameWeight, deltaTimeMs,
-                        interpolationTargetKey, interpolationTargetFbPairIndex, overrideTarget, overrideModifier, velocityUploaderUsed, uploadExtras, tileInterpolationUsed, lookAtInterpolationUsed);
+                        interpolationTargetKey, interpolationTargetFbPairIndex, overrideTarget, overrideModifier, velocityUploaderUsed, uploadExtras, tileInterpolationUsed, lookAtInterpolationUsed,
+                        vrViews, 0);
+
+                    // The right eye goes into its own target before the present thread can take this frame; ray-traced results are per view, so nothing is reused.
+                    if (vrViews != nullptr) {
+                        std::vector<std::unique_ptr<RenderTarget>> &rightTargets = ext.sharedResources->vrRightTargets[vrSet];
+                        while (rightTargets.size() <= framesRendered) {
+                            rightTargets.push_back(std::make_unique<RenderTarget>(interpolationTargetKey.address, Framebuffer::Type::Color, RenderMultisampling(), usesHDR));
+                        }
+
+                        rs64lights::g_reuseTrace = false;
+                        threadRenderFrame(curFrame, prevFrame, workloadConfig, workload.debuggerRenderer, workload.debuggerCamera, curFrameWeight, prevFrameWeight, deltaTimeMs,
+                            interpolationTargetKey, interpolationTargetFbPairIndex, rightTargets[framesRendered].get(), 0x100 + framesRendered, false, false, tileInterpolationUsed, lookAtInterpolationUsed,
+                            vrViews, 1);
+                    }
 
                     rs64lights::g_reuseTrace = false;
 

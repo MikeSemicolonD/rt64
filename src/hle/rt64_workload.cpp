@@ -96,6 +96,7 @@ namespace RT64 {
         drawData.lerpRspLookAt.clear();
         drawData.loadOperations.clear();
         drawData.worldTransforms.clear();
+        drawData.rs64BillboardTransforms.clear();
         drawData.viewTransforms.clear();
         drawData.projTransforms.clear();
         drawData.viewProjTransforms.clear();

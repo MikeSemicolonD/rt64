@@ -5,9 +5,37 @@
 #include "rt64_projection_processor.h"
 
 #include "common/rt64_math.h"
+#include "hle/rt64_rs64_vr.h"
 #include "hle/rt64_workload_queue.h"
 
 namespace RT64 {
+    static interop::float4x4 toFloat4x4(const rs64vr::Mat4 &m) {
+        interop::float4x4 out;
+        for (int r = 0; r < 4; ++r) {
+            for (int c = 0; c < 4; ++c) {
+                out[r][c] = float(m.m[r][c]);
+            }
+        }
+
+        return out;
+    }
+
+    static rs64vr::Mat4 toMat4(const interop::float4x4 &m) {
+        rs64vr::Mat4 out;
+        for (int r = 0; r < 4; ++r) {
+            for (int c = 0; c < 4; ++c) {
+                out.m[r][c] = float(m[r][c]);
+            }
+        }
+
+        return out;
+    }
+
+    // F5 loads a pure perspective, so the recorded view is identity and a head turn composes after it.
+    static void applyVrView(interop::float4x4 &view, const rs64vr::Mat4 &head) {
+        view = hlslpp::mul(view, toFloat4x4(head));
+    }
+
     inline void adjustProjectionMatrix(interop::float4x4 &matrix, const float aspectRatioScale) {
         matrix[0][0] *= aspectRatioScale;
         matrix[1][0] *= aspectRatioScale;
@@ -139,6 +167,22 @@ namespace RT64 {
             }
             else {
                 prevViewTransform = viewMatrix;
+                prevProjTransform = projMatrix;
+            }
+
+            rs64vr::Pose fakeHead;
+            if ((proj.type == Projection::Type::Perspective) && rs64_vr_fake_head(&fakeHead)) {
+                const rs64vr::Mat4 head = rs64vr::eyeView(fakeHead, rs64_vr_units_per_meter());
+                applyVrView(viewMatrix, head);
+                applyVrView(prevViewTransform, head);
+            }
+
+            // VR: the eye's view composes after the game camera and its asymmetric fov replaces the game's x/y terms; prev gets the same so the head is no motion.
+            if ((p.eyeViews != nullptr) && p.eyeViews->valid && (proj.type == Projection::Type::Perspective)) {
+                const rs64vr::Mat4 eye = rs64vr::eyeView(p.eyeViews->eye[p.eye], rs64_vr_units_per_meter());
+                applyVrView(viewMatrix, eye);
+                applyVrView(prevViewTransform, eye);
+                projMatrix = toFloat4x4(rs64vr::eyeProjection(toMat4(projMatrix), p.eyeViews->fov[p.eye]));
                 prevProjTransform = projMatrix;
             }
 

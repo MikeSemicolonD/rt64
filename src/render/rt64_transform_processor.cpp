@@ -67,6 +67,32 @@ namespace RT64 {
                     invTWorldTransforms.push_back(invTMatrix);
                 }
             }
+
+            // VR: a sprite transform's rows are its axes in camera space and its last row its centre, so turning the axes by the head's rotation keeps the
+            // sprite in place and faces it to the head, whose view turns them back.
+            if ((p.headRotation != nullptr) && !drawData.rs64BillboardTransforms.empty()) {
+                if (lerpWorldTransforms.size() != drawData.worldTransforms.size()) {
+                    lerpWorldTransforms = drawData.worldTransforms;
+                    prevWorldTransforms = drawData.worldTransforms;
+                }
+
+                const float *r = p.headRotation;
+                auto turn = [r](interop::float4x4 &m) {
+                    for (int row = 0; row < 3; row++) {
+                        const float a = float(m[row][0]), b = float(m[row][1]), c = float(m[row][2]);
+                        for (int col = 0; col < 3; col++) {
+                            m[row][col] = a * r[col] + b * r[3 + col] + c * r[6 + col];
+                        }
+                    }
+                };
+
+                for (uint32_t t : drawData.rs64BillboardTransforms) {
+                    if (t < lerpWorldTransforms.size()) {
+                        turn(lerpWorldTransforms[t]);
+                        turn(prevWorldTransforms[t]);
+                    }
+                }
+            }
         }
     }
     
@@ -74,12 +100,14 @@ namespace RT64 {
         uploads.clear();
 
         for (uint32_t w : p.curFrame->workloads) {
-            const bool prevFrameValid = (p.prevFrame != nullptr);
             Workload &workload = p.workloadQueue->workloads[w];
             const DrawData &drawData = workload.drawData;
             DrawBuffers &drawBuffers = workload.drawBuffers;
-            const interop::float4x4 *worldMatrices = prevFrameValid ? drawData.lerpWorldTransforms.data() : drawData.worldTransforms.data();
-            const interop::float4x4 *prevWorldMatrices = prevFrameValid ? drawData.prevWorldTransforms.data() : drawData.worldTransforms.data();
+
+            // The processed copies when process() made them (interpolation, or VR billboards turned on an unmatched frame).
+            const bool processed = (drawData.lerpWorldTransforms.size() == drawData.worldTransforms.size()) && (drawData.prevWorldTransforms.size() == drawData.worldTransforms.size());
+            const interop::float4x4 *worldMatrices = processed ? drawData.lerpWorldTransforms.data() : drawData.worldTransforms.data();
+            const interop::float4x4 *prevWorldMatrices = processed ? drawData.prevWorldTransforms.data() : drawData.worldTransforms.data();
             const interop::float4x4 *invTWorldMatrices = drawData.invTWorldTransforms.data();
             std::pair<size_t, size_t> uploadRange = { 0, drawData.worldTransforms.size() };
             uploads.emplace_back(BufferUploader::Upload{ worldMatrices, uploadRange, sizeof(interop::float4x4), RenderBufferFlag::STORAGE, { }, &drawBuffers.worldTransformsBuffer });

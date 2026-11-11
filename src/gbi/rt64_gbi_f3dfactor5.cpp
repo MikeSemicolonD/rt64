@@ -12,6 +12,7 @@
 #include "hle/rt64_rs64_crosshair.h"
 #include "hle/rt64_rs64_hud.h"
 #include "hle/rt64_rs64_mcp.h"
+#include "hle/rt64_rs64_vr.h"
 
 #include "rt64_gbi_f3dex.h"
 #include "rt64_gbi_f3d.h"
@@ -2935,6 +2936,7 @@ namespace RT64 {
             state->rsp->fog.mul = (float)(255.0 * m);
             state->rsp->fog.offset = (float)(255.0 * o);
             state->rsp->fog.tailEnd = rs64_fog_tail_end();
+            state->rsp->fog.radial = (rs64_vr_active() != 0) ? 1.0f : 0.0f;
             state->rsp->fogChanged = true;
             state->updateDrawStatusAttribute(DrawAttribute::FogColor);
         }
@@ -3444,7 +3446,10 @@ namespace RT64 {
                             G_EX_ORDER_LINEAR, G_EX_ASPECT_AUTO, G_EX_EDIT_NONE, /*idIsAddress*/false, /*editGroup*/false);
                         state->rsp->modelViewProjChanged = true;
                     }
+                    // VR turns a per-sprite transform (centred on the sprite) toward the head at render time.
+                    state->rsp->rs64Billboard = s_sprite_xform && haveView;
                     state->rsp->setVertex(0x80000000u | (F5_VTX_SCRATCH + F5_FACE_SLOT * sizeof(RSP::Vertex)), 4, F5_FACE_SLOT);
+                    state->rsp->rs64Billboard = false;
                     // primDepth must equal the depth a normally-projected vertex gets here. RasterVS never
                     // applies an MVP: it rebuilds clip space from the CPU's posScreen (z_clip = posScreen.z*w),
                     // and for zSource=PRIM it uses z_clip = primDepth*w. So take the depth from the verts we
@@ -3535,7 +3540,72 @@ namespace RT64 {
             (*dl) += 2;
         }
 
-        static bool f5_texrect_quad(State* state, const DisplayList* dl, uint32_t id, const char* probe, float dx, float dy, bool stIsZero = false);
+        static bool f5_texrect_quad(State* state, const DisplayList* dl, uint32_t id, const char* probe, float dx, float dy, bool stIsZero = false, float pushDepth = 0.0f);
+
+        // VR: a HUD element's texrect becomes a camera-space quad at the radar's depth, so it stays with the ship and lines up with the 3D radar disc
+        // (the HUD pass places the radar node 0.9 world units ahead; camera space is world units x 256). The id is the rect's corner, which a still HUD element keeps.
+        bool f5_vr_hud_quad(State* state, const DisplayList* dl) {
+            constexpr float kHudDepth = 0.9f * 256.0f;
+            const uint32_t ulx = (dl[0].w1 >> 14) & 0x3FFu;
+            const uint32_t uly = (dl[0].w1 >> 2) & 0x3FFu;
+            const uint32_t id = 0x82000000u | (ulx << 10) | uly;
+            return f5_texrect_quad(state, dl, id, "vr-hud", 0.0f, 0.0f, false, kHudDepth);
+        }
+
+        // VR outside missions: a texrect drawn before any 3D face of its task is a backdrop (the crawl's planet), placed at half the far plane; menu text and
+        // pictures drawn over the 3D scene sit a meter ahead. Both stay where the game camera faces instead of following the head.
+        bool f5_vr_scene_quad(State* state, const DisplayList* dl) {
+            const bool backdrop = (s_task_faces == 0);
+
+            if (!backdrop && (g_active_overlay != 1)) {
+                return false;
+            }
+
+            float depth = rs64_vr_units_per_meter();
+
+            if (backdrop) {
+                const hlslpp::float4x4 proj = state->rsp->viewProjMatrixStack[state->rsp->projectionMatrixStackSize - 1];
+                const float w = float(proj[2][3]);
+
+                if (std::fabs(w) < 1e-6f) {
+                    return false;
+                }
+
+                // NDC z = a + b / z; the far plane is where it reaches +-1.
+                const float a = float(proj[2][2]) / w;
+                const float b = float(proj[3][2]) / w;
+                const float farPlane = std::max(std::fabs(b / (1.0f - a)), std::fabs(b / (-1.0f - a)));
+
+                depth = 0.5f * farPlane;
+            }
+
+            if (!std::isfinite(depth) || !(depth > 0.0f)) {
+                return false;
+            }
+
+            // A task with no clear fill of its own relies on a full-screen backdrop, so the area it leaves when the head turns is cleared to black first, once per task.
+            static uint64_t s_cleared_task = ~0ull;
+
+            if (backdrop && (s_cleared_task != state->displayListCounter) && (g_vr_fill_task != state->displayListCounter)) {
+                RDP &rdp = *state->rdp;
+                const uint32_t savedH = rdp.otherMode.H;
+                const uint32_t savedL = rdp.otherMode.L;
+                const FixedRect &sc = rdp.scissorRectStack[rdp.scissorStackSize - 1];
+
+                s_cleared_task = state->displayListCounter;
+                rdp.pushFillColor();
+                rdp.setFillColor(0);
+                rdp.setOtherMode(savedH | (3u << 20), savedL);
+                rdp.fillRect(sc.ulx, sc.uly, sc.lrx, sc.lry);
+                rdp.setOtherMode(savedH, savedL);
+                rdp.popFillColor();
+            }
+
+            const uint32_t ulx = (dl[0].w1 >> 14) & 0x3FFu;
+            const uint32_t uly = (dl[0].w1 >> 2) & 0x3FFu;
+            const uint32_t id = 0x83000000u | (ulx << 10) | uly;
+            return f5_texrect_quad(state, dl, id, "vr-scene", 0.0f, 0.0f, false, depth);
+        }
 
         // Crosshair rings are texrects, which RT64 never interpolates. A texrect that matches a ring element of the HUD struct draws instead as a camera-space quad on its own transform id. ROGUESQ_F5_XHAIR_QUAD=0 keeps the texrect.
         bool f5_crosshair_quad(State* state, const DisplayList* dl) {
@@ -3566,7 +3636,10 @@ namespace RT64 {
                 return false;
             }
 
-            return f5_texrect_quad(state, dl, 0x80000000u | (uint32_t)ring, (ring == 2) ? "xhair-quad-bomb" : ring ? "xhair-quad-in" : "xhair-quad-out", moveX / 4.0f, moveY / 4.0f, moved);
+            // VR: the rings sit out where shots go, so they don't double while the eyes are on a distant target.
+            constexpr float kVrReticleMeters = 50.0f;
+            const float vrPush = (rs64_vr_active() != 0) ? kVrReticleMeters * rs64_vr_units_per_meter() : 0.0f;
+            return f5_texrect_quad(state, dl, 0x80000000u | (uint32_t)ring, (ring == 2) ? "xhair-quad-bomb" : ring ? "xhair-quad-in" : "xhair-quad-out", moveX / 4.0f, moveY / 4.0f, moved, vrPush);
         }
 
         // A credits glyph's interpolation id: the previous task's glyph with the same texture and x (the text only scrolls vertically) nearest in y, within
@@ -3634,7 +3707,8 @@ namespace RT64 {
         }
 
         // Draws the texrect at dl, moved by dx, dy pixels, as a camera-space quad on transform `id`; false leaves it to the texrect path. stIsZero: dl's S and T hold something else and the texture starts at 0.
-        static bool f5_texrect_quad(State* state, const DisplayList* dl, uint32_t id, const char* probe, float dx, float dy, bool stIsZero) {
+        // pushDepth > 0 slides the quad along its view rays to that camera-space depth: the same screen spot flat, that distance in stereo.
+        static bool f5_texrect_quad(State* state, const DisplayList* dl, uint32_t id, const char* probe, float dx, float dy, bool stIsZero, float pushDepth) {
             const uint32_t w0 = dl[0].w0, w1 = dl[0].w1;
             const rs64xhair::Rect r{ ((w1 >> 12) & 0xFFFu) / 4.0f + dx, (w1 & 0xFFFu) / 4.0f + dy, ((w0 >> 12) & 0xFFFu) / 4.0f + dx, (w0 & 0xFFFu) / 4.0f + dy };
             const uint8_t tile = (uint8_t)((w1 >> 24) & 7u);
@@ -3668,6 +3742,22 @@ namespace RT64 {
                 }
                 for (int a = 0; a < 3; a++) {
                     centre[a] += 0.25f * corner[k][a];
+                }
+            }
+            // F5 projections carry no view, so the eye is the origin and scaling every point keeps it on its view ray. Only a perspective has rays.
+            if (pushDepth > 0.0f) {
+                const bool perspective = std::fabs(float(proj[3][3])) < 1e-6f;
+                if (!perspective || !(centre[2] > 0.0f)) {
+                    return false;
+                }
+
+                // Never nearer than the unprojected depth, which sits just past the near plane.
+                const float k = std::max(pushDepth / centre[2], 1.0f);
+                for (int a = 0; a < 3; a++) {
+                    centre[a] *= k;
+                    for (int c = 0; c < 4; c++) {
+                        corner[c][a] *= k;
+                    }
                 }
             }
             // Vertices are int16, so build the quad at a fixed size and carry the real size in the transform scale.

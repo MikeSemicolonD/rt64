@@ -13,6 +13,7 @@
 #include "render/rt64_render_target_manager.h"
 
 #include "rt64_framebuffer_manager.h"
+#include "rt64_rs64_vr.h"
 
 #if RT_ENABLED
 #   include "render/rt64_raytracing_resources.h"
@@ -57,6 +58,10 @@ namespace RT64 {
         std::unordered_set<uint32_t> colorImageAddressSet;
         std::atomic<uint64_t> colorImageWorkloadId{ 0 };
         std::vector<std::unique_ptr<RenderTarget>> interpolatedColorTargets;
+
+        // VR: the right eye of each rendered frame and the eye poses both eyes used, per counter set (interpolatedFramesIndex), indexed by rendered frame.
+        std::vector<std::unique_ptr<RenderTarget>> vrRightTargets[2];
+        std::vector<rs64vr::EyeViews> vrTargetViews[2];
         InterpolatedFrameCounters interpolatedFrames[2];
         uint32_t interpolatedFramesIndex = 0;
         std::mutex interpolatedMutex;

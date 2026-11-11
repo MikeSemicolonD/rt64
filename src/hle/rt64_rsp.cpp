@@ -16,6 +16,8 @@
 #include "rt64_interpreter.h"
 #include "rt64_state.h"
 
+extern "C" int rs64_vr_active(void);
+
 //#define LOG_SPECIAL_MATRIX_OPERATIONS
 
 namespace RT64 {
@@ -85,6 +87,7 @@ namespace RT64 {
         fog.mul = 0.0f;
         fog.offset = 0.0f;
         fog.tailEnd = 0.0f;
+        fog.radial = 0.0f;
         lookAt.x = { 0.0f, 0.0f, 0.0f };
         lookAt.y = { 0.0f, 0.0f, 0.0f };
         otherModeStack[0].L = 0x0;
@@ -547,6 +550,10 @@ namespace RT64 {
             worldTransformSegmentedAddresses.emplace_back(modelMatrixSegmentedAddressStack[modelMatrixStackSize - 1]);
             worldTransformPhysicalAddresses.emplace_back(physicalAddress);
             worldTransformVertexIndices.emplace_back(workload.drawData.vertexCount());
+
+            if (rs64Billboard) {
+                workload.drawData.rs64BillboardTransforms.push_back(curTransformIndex);
+            }
         }
 
         // Push a new projection if it's changed.
@@ -1197,7 +1204,64 @@ namespace RT64 {
             bool anyNear = false;
             int farCount = 0;
             const float farDepth = ((farClipGeomMode != 0) && (geometryMode == farClipGeomMode)) ? std::min(farClipDepth, farClipGeomDepth) : farClipDepth;
-            if (s_clip && !degenerate) {
+            // VR draws each eye with its own projection after recording, so near and side clips against the game camera would cut what the head turns to; the GPU clips per eye.
+            // The game's far distance still cuts geometry (Taloraan's cloud layers), on a plane facing each triangle so every direction gets the same reach.
+            // Camera space is clip space times the inverse projection (affine for these points, w stays 1).
+            const bool vr = rs64_vr_active() != 0;
+            bool vrFar = false;
+            hlslpp::float4x4 vrInv;
+            hlslpp::float3 vrN(0.0f, 0.0f, 1.0f);
+            float vrD = 0.0f;
+
+            if (s_clip && !degenerate && vr && s_farClip) {
+                static hlslpp::float4x4 s_proj;
+                static hlslpp::float4x4 s_inv;
+                static bool s_haveInv = false;
+                const hlslpp::float4x4 &P = viewProjMatrixStack[projectionMatrixStackSize - 1];
+
+                if (!s_haveInv || (std::memcmp(&P, &s_proj, sizeof(P)) != 0)) {
+                    s_proj = P;
+                    s_inv = hlslpp::inverse(P);
+                    s_haveInv = true;
+                }
+
+                const float denom = float(P[2][2]) - farDepth * float(P[2][3]);
+                const float zFar = (std::fabs(denom) > 1e-12f) ? (farDepth * float(P[3][3]) - float(P[3][2])) / denom : 0.0f;
+
+                if (std::isfinite(zFar) && (std::fabs(zFar) > 0.0f)) {
+                    hlslpp::float3 cam[3];
+                    hlslpp::float3 centre(0.0f, 0.0f, 0.0f);
+
+                    for (int i = 0; i < 3; i++) {
+                        cam[i] = hlslpp::mul(workload.drawData.posTransformed[globalIndices[i]], s_inv).xyz;
+                        centre += cam[i] / 3.0f;
+                    }
+
+                    const float len = float(hlslpp::length(centre));
+
+                    if (len > 1e-6f) {
+                        vrN = centre / len;
+                        vrD = std::fabs(zFar);
+                        vrInv = s_inv;
+
+                        int beyond = 0;
+
+                        for (int i = 0; i < 3; i++) {
+                            if (float(hlslpp::dot(cam[i], vrN)) > vrD) {
+                                beyond++;
+                            }
+                        }
+
+                        if (beyond == 3) {
+                            return;
+                        }
+
+                        vrFar = (beyond > 0);
+                    }
+                }
+            }
+
+            if (s_clip && !degenerate && !vr) {
                 for (int i = 0; i < 3; i++) {
                     const hlslpp::float4 p = workload.drawData.posTransformed[globalIndices[i]];
                     const float pw = p.w, px = p.x, py = p.y;
@@ -1210,6 +1274,11 @@ namespace RT64 {
             }
             if (farCount == 3) return;
             if (farCount > 0) extreme = true;
+
+            if (vrFar) {
+                extreme = true;
+                farCount = 1;
+            }
             // The skybox dome (the only cull=BOTH geometry) is pinned to a flat far-plane primDepth in
             // State::loadDrawState. Its back hemisphere (101 of 149 tris sit behind the camera) would then
             // draw its near-plane cap at the far plane. The front hemisphere alone covers the whole view,
@@ -1223,7 +1292,7 @@ namespace RT64 {
 
             if (extreme) {
                 // Signed distance to near and the guard-band lateral planes; clipping at |x| = w cut the sky at the 4:3 edge once widescreen widens the view.
-                auto planeDist = [guardX, farDepth](const hlslpp::float4 &p, int plane) -> float {
+                auto planeDist = [guardX, farDepth, &vrInv, vrN, vrD](const hlslpp::float4 &p, int plane) -> float {
                     const float x = p.x, y = p.y, z = p.z, w = p.w;
                     switch (plane) {
                         case 0:  return w - kNearW;
@@ -1231,14 +1300,16 @@ namespace RT64 {
                         case 2:  return guardX * w - x;
                         case 3:  return kGuard * w + y;
                         case 4:  return kGuard * w - y;
+                        case 6:  return vrD - float(hlslpp::dot(hlslpp::mul(p, vrInv).xyz, vrN));
                         default: return farDepth * w - z;
                     }
                 };
                 uint32_t poly[12];
                 poly[0] = globalIndices[0]; poly[1] = globalIndices[1]; poly[2] = globalIndices[2];
                 int polyN = 3;
-                const int planeCount = (farCount > 0) ? 6 : 5;
-                for (int pl = 0; pl < planeCount && polyN > 0; pl++) {
+                const int planeFirst = vrFar ? 6 : 0;
+                const int planeCount = vrFar ? 7 : ((farCount > 0) ? 6 : 5);
+                for (int pl = planeFirst; pl < planeCount && polyN > 0; pl++) {
                     uint32_t out[12];
                     int outCnt = 0;
                     for (int i = 0; i < polyN; i++) {

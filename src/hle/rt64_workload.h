@@ -56,6 +56,9 @@ namespace RT64 {
         std::vector<interop::float4x4> prevWorldTransforms;
         std::vector<interop::float4x4> invTWorldTransforms;
         std::vector<interop::float4x4> lerpWorldTransforms;
+
+        // World transforms of camera-facing sprites, which VR turns toward the head.
+        std::vector<uint32_t> rs64BillboardTransforms;
         std::vector<interop::RDPTile> rdpTiles;
         std::vector<interop::RDPTile> lerpRdpTiles;
         std::vector<interop::GPUTile> gpuTiles;
