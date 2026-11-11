@@ -208,6 +208,9 @@ namespace RT64 {
             std::unique_ptr<RS64ShadowTemporalDescriptorSet> rs64TemporalSet;
             uint32_t rs64HistWrite = 0;
             bool rs64TemporalOn = false;
+            // Interpolated frame reusing the real frame's trace: the temporal pass reprojects history rs64HistWrite into the other set, which stays the spare.
+            bool rs64ReuseTrace = false;
+            uint32_t rs64HistTarget = 0;
             // The previous frame of this slot: its main view's objects by matrix id, screen-from-view and viewport (history is reprojected through them).
             std::unordered_map<uint32_t, rs64lights::Mat4> rs64PrevObjects;
             rs64lights::Mat4 rs64PrevScreenFromView = {};

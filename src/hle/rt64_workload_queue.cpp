@@ -1223,9 +1223,14 @@ namespace RT64 {
                         ext.workloadExtrasUploader->submit(ext.workloadGraphicsWorker, { extrasUpload });
                     }
 
+                    // ROGUESQ_RT_INTERP_REUSE=0 traces every displayed frame again.
+                    static const bool s_reuseTrace = []() { const char *e = std::getenv("ROGUESQ_RT_INTERP_REUSE"); return !(e && (e[0] == '0')); }();
+                    rs64lights::g_reuseTrace = s_reuseTrace && generateInterpolatedFrames && (frame > 0);
                     int64_t renderTimeMicro = workloadTimer.elapsedMicroseconds();
                     threadRenderFrame(curFrame, prevFrame, workloadConfig, workload.debuggerRenderer, workload.debuggerCamera, curFrameWeight, prevFrameWeight, deltaTimeMs,
                         interpolationTargetKey, interpolationTargetFbPairIndex, overrideTarget, overrideModifier, velocityUploaderUsed, uploadExtras, tileInterpolationUsed, lookAtInterpolationUsed);
+
+                    rs64lights::g_reuseTrace = false;
 
                     // Add total time the frame took to render.
                     renderTimeTotalMicro += workloadTimer.elapsedMicroseconds() - renderTimeMicro;

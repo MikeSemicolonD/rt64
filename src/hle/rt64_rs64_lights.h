@@ -21,6 +21,9 @@
 namespace rs64lights {
     constexpr uint32_t MaxLights = 64;
 
+    // Set while an interpolated in-between frame renders: the soft shadow pass reuses the real frame's trace, reprojected, instead of tracing again.
+    inline bool g_reuseTrace = false;
+
     // KindLampMark: not a light, where one of the game's blinking lamps (a 2D texture rectangle) is drawn this frame, for lamp presets.
     enum Kind : uint8_t { KindNone = 0, KindSprite = 1, KindLaser = 2, KindMesh = 3, KindLampMark = 4 };
 

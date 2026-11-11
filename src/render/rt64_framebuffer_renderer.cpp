@@ -3392,7 +3392,7 @@ namespace RT64 {
             RS64ShadowBlurDescriptorSet &vs = *framebuffer.rs64BlurVSet;
             hs.setBuffer(hs.gBlur, framebuffer.rs64BlurHBuffer.get(), sizeof(interop::RS64ShadowBlurCB));
             hs.setTexture(hs.gDepth, p.fbStorage->depthTarget->texture.get(), RenderTextureLayout::DEPTH_READ, p.fbStorage->depthTarget->textureView.get());
-            const uint32_t w = framebuffer.rs64HistWrite;
+            const uint32_t w = framebuffer.rs64HistTarget;
             hs.setTexture(hs.gMask, framebuffer.rs64TemporalOn ? framebuffer.rs64HistMask[w].get() : framebuffer.rs64SoftMask.get(), RenderTextureLayout::SHADER_READ);
             hs.setTexture(hs.gIndirect, framebuffer.rs64TemporalOn ? framebuffer.rs64HistIndirect[w].get() : framebuffer.rs64SoftIndirect.get(), RenderTextureLayout::SHADER_READ);
             if (framebuffer.rs64TemporalOn) {
@@ -3435,6 +3435,7 @@ namespace RT64 {
     void FramebufferRenderer::fillRS64Temporal(const DrawParams &p, Framebuffer &framebuffer, uint32_t transformsIndex, const rs64lights::Mat4 &viewFromScreen, interop::RS64ShadowBlurCB &bcb) {
         const rs64lights::Config &cfg = rs64lights::config();
         framebuffer.rs64TemporalOn = (cfg.temporalAlpha > 0.0f) && (cfg.temporalAlpha < 1.0f);
+        framebuffer.rs64ReuseTrace = false;
         if (!framebuffer.rs64TemporalOn) {
             framebuffer.rs64HistValid = false;
             return;
@@ -3490,6 +3491,25 @@ namespace RT64 {
 
         rs64lights::Mat4 delta;
         const bool moved = framebuffer.rs64HistValid && rs64lights::consensusCameraDelta(deltas.data(), weights.data(), deltas.size(), 0.002f, 2.0f, delta);
+
+        // An interpolated frame reprojects the real frame's history without tracing (camera unchanged if no motion is found) and leaves the
+        // history, objects and camera of that real frame for the next one.
+        framebuffer.rs64ReuseTrace = rs64lights::g_reuseTrace && framebuffer.rs64HistValid;
+        if (framebuffer.rs64ReuseTrace) {
+            if (!moved) {
+                delta = rs64lights::identity();
+            }
+
+            const rs64lights::Mat4 prevScreen = rs64lights::mul(delta, framebuffer.rs64PrevScreenFromView);
+            memcpy(&bcb.prevScreenFromView, &prevScreen, sizeof(prevScreen));
+            memcpy(&bcb.prevViewFromView, &delta, sizeof(delta));
+            bcb.prevViewport = { framebuffer.rs64PrevViewport[0], framebuffer.rs64PrevViewport[1], framebuffer.rs64PrevViewport[2], framebuffer.rs64PrevViewport[3] };
+            bcb.temporal = { 1.0f, 0.03f, cfg.temporalAlpha, 0.0f };
+            bcb.aoParams.z = 1.0f;
+            framebuffer.rs64HistTarget = framebuffer.rs64HistWrite ^ 1;
+            return;
+        }
+
         if (moved) {
             const rs64lights::Mat4 prevScreen = rs64lights::mul(delta, framebuffer.rs64PrevScreenFromView);
             memcpy(&bcb.prevScreenFromView, &prevScreen, sizeof(prevScreen));
@@ -3506,6 +3526,7 @@ namespace RT64 {
 
         // This frame becomes the next frame's history.
         framebuffer.rs64HistWrite ^= 1;
+        framebuffer.rs64HistTarget = framebuffer.rs64HistWrite;
         for (uint32_t id : ambiguous) {
             objects.erase(id);
         }
@@ -3769,35 +3790,37 @@ namespace RT64 {
             RenderTexture *indPing = framebuffer.rs64SoftIndirectPing.get();
             // The trace reads the colour target for screen-space water reflections; it is written again by the compose.
             RenderTexture *color = targetDrawCall.fbStorage->colorTarget->texture.get();
-            rs64TimingMark(worker, RS64TimeTrace);
-            const RenderTextureBarrier toMask[] = {
-                RenderTextureBarrier(mask, RenderTextureLayout::COLOR_WRITE), RenderTextureBarrier(ind, RenderTextureLayout::COLOR_WRITE), RenderTextureBarrier(color, RenderTextureLayout::SHADER_READ),
-                RenderTextureBarrier(framebuffer.rs64SoftMirror.get(), RenderTextureLayout::COLOR_WRITE)
-            };
-            worker->commandList->barriers(RenderBarrierStage::GRAPHICS, toMask, uint32_t(std::size(toMask)));
-            worker->commandList->setFramebuffer(framebuffer.rs64SoftMaskFb.get());
-            worker->commandList->clearColor(0, RenderColor(0.0f, 0.0f, 0.0f, 0.0f));
-            worker->commandList->clearColor(1, RenderColor(0.0f, 0.0f, 0.0f, 0.0f));
-            worker->commandList->clearColor(2, RenderColor(0.0f, 0.0f, 0.0f, 0.0f));
-            if (framebuffer.rs64SoftHalf) {
-                worker->commandList->setViewports(RenderViewport(v.x / 2.0f, v.y / 2.0f, v.width / 2.0f, v.height / 2.0f, v.minDepth, v.maxDepth));
-                worker->commandList->setScissors(RenderRect(int32_t(v.x) / 2, int32_t(v.y) / 2, (int32_t(v.x + v.width) + 1) / 2, (int32_t(v.y + v.height) + 1) / 2));
+            if (!framebuffer.rs64ReuseTrace) {
+                rs64TimingMark(worker, RS64TimeTrace);
+                const RenderTextureBarrier toMask[] = {
+                    RenderTextureBarrier(mask, RenderTextureLayout::COLOR_WRITE), RenderTextureBarrier(ind, RenderTextureLayout::COLOR_WRITE), RenderTextureBarrier(color, RenderTextureLayout::SHADER_READ),
+                    RenderTextureBarrier(framebuffer.rs64SoftMirror.get(), RenderTextureLayout::COLOR_WRITE)
+                };
+                worker->commandList->barriers(RenderBarrierStage::GRAPHICS, toMask, uint32_t(std::size(toMask)));
+                worker->commandList->setFramebuffer(framebuffer.rs64SoftMaskFb.get());
+                worker->commandList->clearColor(0, RenderColor(0.0f, 0.0f, 0.0f, 0.0f));
+                worker->commandList->clearColor(1, RenderColor(0.0f, 0.0f, 0.0f, 0.0f));
+                worker->commandList->clearColor(2, RenderColor(0.0f, 0.0f, 0.0f, 0.0f));
+                if (framebuffer.rs64SoftHalf) {
+                    worker->commandList->setViewports(RenderViewport(v.x / 2.0f, v.y / 2.0f, v.width / 2.0f, v.height / 2.0f, v.minDepth, v.maxDepth));
+                    worker->commandList->setScissors(RenderRect(int32_t(v.x) / 2, int32_t(v.y) / 2, (int32_t(v.x + v.width) + 1) / 2, (int32_t(v.y + v.height) + 1) / 2));
+                }
+                else {
+                    worker->commandList->setViewports(v);
+                    worker->commandList->setScissors(sc);
+                }
+                worker->commandList->setPipeline(shaderLibrary->rs64ShadowsSoft.pipeline.get());
+                worker->commandList->setGraphicsPipelineLayout(shaderLibrary->rs64ShadowsSoft.pipelineLayout.get());
+                bindRS64Traced(worker, *framebuffer.rs64ShadowsSet, framebuffer.rs64ShadowsBuffer.get(), offsetof(interop::RS64ShadowsCB, cutoutDrawCount), false);
+                worker->commandList->setVertexBuffers(0, nullptr, 0, nullptr);
+                worker->commandList->drawInstanced(3, 1, 0, 0);
+                rs64TimingMark(worker, RS64TimeTrace);
             }
-            else {
-                worker->commandList->setViewports(v);
-                worker->commandList->setScissors(sc);
-            }
-            worker->commandList->setPipeline(shaderLibrary->rs64ShadowsSoft.pipeline.get());
-            worker->commandList->setGraphicsPipelineLayout(shaderLibrary->rs64ShadowsSoft.pipelineLayout.get());
-            bindRS64Traced(worker, *framebuffer.rs64ShadowsSet, framebuffer.rs64ShadowsBuffer.get(), offsetof(interop::RS64ShadowsCB, cutoutDrawCount), false);
-            worker->commandList->setVertexBuffers(0, nullptr, 0, nullptr);
-            worker->commandList->drawInstanced(3, 1, 0, 0);
-            rs64TimingMark(worker, RS64TimeTrace);
 
             // Accumulate AO and indirect light into this frame's history set, which the H blur then reads.
             if (framebuffer.rs64TemporalOn) {
                 rs64TimingMark(worker, RS64TimeTemporal);
-                const uint32_t w = framebuffer.rs64HistWrite;
+                const uint32_t w = framebuffer.rs64HistTarget;
                 RenderTexture *histMask = framebuffer.rs64HistMask[w].get();
                 RenderTexture *histInd = framebuffer.rs64HistIndirect[w].get();
                 const RenderTextureBarrier toHist[] = {
