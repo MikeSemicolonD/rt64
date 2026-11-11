@@ -25,6 +25,7 @@ namespace RT64 {
             std::unique_ptr<RenderBufferFormattedView> nativeBufferWriteView;
             std::unique_ptr<FramebufferReadChangesDescriptorBufferSet> readDescSet;
             uint32_t nativeBufferSize = 0;
+            uint32_t nativeUploadBufferSize = 0;
             uint8_t nativeBufferViewFormat = 0;
             uint8_t nativeBufferNextViewFormat = 0;
             uint8_t nativeBufferWriteViewFormat = 0;

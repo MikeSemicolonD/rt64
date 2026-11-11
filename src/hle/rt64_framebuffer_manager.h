@@ -162,6 +162,8 @@ namespace RT64 {
         std::unordered_map<uint32_t, Framebuffer> framebuffers;
         // Discarded while an upload may still read them on the GPU; freed by clearRetired.
         std::vector<std::unordered_map<uint32_t, Framebuffer>::node_type> retiredFramebuffers;
+        // Native buffers of discarded framebuffers, handed to new ones so a per-frame discard doesn't reallocate them.
+        std::vector<std::pair<std::vector<NativeTarget::ReadBuffer>, std::vector<NativeTarget::WriteBuffer>>> spareNativeBuffers;
         std::unordered_map<uint64_t, TileCopy> tileCopies;
         std::unordered_map<uint64_t, uint64_t> reinterpretTileCache;
         std::unique_ptr<RenderTexture> dummyTLUTTexture;
@@ -226,6 +228,7 @@ namespace RT64 {
 
         void performDiscards(const std::vector<uint32_t> &discards, bool retire = false);
         void clearRetired();
+        void recycleNativeBuffers(Framebuffer &fb);
 
         void destroyAllTileCopies();
         uint64_t nextWriteTimestamp();

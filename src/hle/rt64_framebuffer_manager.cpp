@@ -32,7 +32,14 @@ namespace RT64 {
     FramebufferManager::~FramebufferManager() {}
 
     Framebuffer &FramebufferManager::get(uint32_t address, uint8_t siz, uint32_t width, uint32_t height) {
-        auto &fb = framebuffers[address];
+        auto [it, inserted] = framebuffers.try_emplace(address);
+        auto &fb = it->second;
+        if (inserted && !spareNativeBuffers.empty()) {
+            fb.nativeTarget.readBufferHistory = std::move(spareNativeBuffers.back().first);
+            fb.nativeTarget.writeBufferHistory = std::move(spareNativeBuffers.back().second);
+            spareNativeBuffers.pop_back();
+        }
+
         fb.widthChanged = (fb.width != width);
         fb.sizChanged = (fb.siz != siz);
 
@@ -1090,13 +1097,36 @@ namespace RT64 {
                 retiredFramebuffers.emplace_back(framebuffers.extract(it));
             }
             else {
+                recycleNativeBuffers(it->second);
                 framebuffers.erase(it);
             }
         }
     }
 
     void FramebufferManager::clearRetired() {
+        for (auto &node : retiredFramebuffers) {
+            recycleNativeBuffers(node.mapped());
+        }
+
         retiredFramebuffers.clear();
+    }
+
+    void FramebufferManager::recycleNativeBuffers(Framebuffer &fb) {
+        const size_t MaxSpares = 2;
+        NativeTarget &nt = fb.nativeTarget;
+        if ((spareNativeBuffers.size() >= MaxSpares) || nt.readBufferHistory.empty()) {
+            return;
+        }
+
+        // Only the CPU-side buffers carry over: the write shader leaves parts of the GPU buffer untouched, so it must start fresh.
+        for (NativeTarget::ReadBuffer &readBuffer : nt.readBufferHistory) {
+            NativeTarget::ReadBuffer kept;
+            kept.nativeUploadBuffer = std::move(readBuffer.nativeUploadBuffer);
+            kept.nativeUploadBufferSize = readBuffer.nativeUploadBufferSize;
+            readBuffer = std::move(kept);
+        }
+
+        spareNativeBuffers.emplace_back(std::move(nt.readBufferHistory), std::move(nt.writeBufferHistory));
     }
 
     void FramebufferManager::destroyAllTileCopies() {

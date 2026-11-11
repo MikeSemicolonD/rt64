@@ -34,7 +34,11 @@ namespace RT64 {
         readBuffer.nativeBufferView.reset();
         readBuffer.nativeBufferNextView.reset();
         readBuffer.nativeBufferWriteView.reset();
-        readBuffer.nativeUploadBuffer.reset();
+        if (readBuffer.nativeUploadBufferSize < bufferSize) {
+            readBuffer.nativeUploadBuffer.reset();
+            readBuffer.nativeUploadBufferSize = 0;
+        }
+
         readBuffer.nativeBuffer = worker->device->createBuffer(RenderBufferDesc::DefaultBuffer(bufferSize, RenderBufferFlag::STORAGE | RenderBufferFlag::UNORDERED_ACCESS | RenderBufferFlag::FORMATTED));
         readBuffer.nativeBufferSize = bufferSize;
     }
@@ -103,6 +107,7 @@ namespace RT64 {
 
         if (readBuffer.nativeUploadBuffer == nullptr) {
             readBuffer.nativeUploadBuffer = worker->device->createBuffer(RenderBufferDesc::UploadBuffer(readBuffer.nativeBufferSize));
+            readBuffer.nativeUploadBufferSize = readBuffer.nativeBufferSize;
         }
 
         if ((readBuffer.nativeBufferView == nullptr) || (readBuffer.nativeBufferViewFormat != siz)) {
@@ -284,8 +289,11 @@ namespace RT64 {
         assert(((fmt != G_IM_FMT_DEPTH) || (siz == G_IM_SIZ_16b)) && "Depth format is not allowed outside of 16-bits.");
         
         // We need at least one read buffer in the history to use to write the output to.
-        if (readBufferHistory.empty()) {
-            readBufferHistory.emplace_back();
+        if (readBufferHistoryCount == 0) {
+            if (readBufferHistory.empty()) {
+                readBufferHistory.emplace_back();
+            }
+
             readBufferHistoryCount = 1;
         }
 
