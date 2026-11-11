@@ -596,15 +596,9 @@ namespace RT64 {
         drawCall.callIndex = workload.gameCallCount++;
 
         // Hit colours for ray-traced bounce light and reflections: the render tile's TMEM average, only when the combiner samples it.
+        // The average is owed (w bit 4) and taken in fullSync, whose TMEM replay reaches this call's state anyway.
         if (rs64lights::config().gi || rs64lights::config().reflections) {
-            const LoadTile &t0 = rdp->tiles[0];
-            float tex[3] = {};
-            float cov = 0.0f;
             const bool sampled = drawCall.colorCombiner.usesTexture(drawCall.otherMode, 0, drawCall.otherMode.cycleType() == G_CYC_1CYCLE);
-            bool ok = false;
-            if (sampled) {
-                ok = rs64lights::tmemAverage(rdp->passTMEM(workload.drawData.loadOperations, workload.drawRanges.loadOperations.first), t0.fmt, t0.siz, t0.tmem, t0.line, uint32_t(((t0.lrs - t0.uls) >> 2) + 1), uint32_t(((t0.lrt - t0.ult) >> 2) + 1), t0.palette, tex, cov);
-            }
 
             // w: bit 0 the texture average is valid, bit 1 the colour combiner reads prim (a prim it ignores must not tint the hit colour).
             bool prim = false;
@@ -614,9 +608,11 @@ namespace RT64 {
             }
             if (workload.rs64CallTex.size() <= size_t(drawCall.callIndex)) {
                 workload.rs64CallTex.resize(size_t(drawCall.callIndex) + 1, hlslpp::float4(0.0f, 0.0f, 0.0f, 0.0f));
+                workload.rs64CallTile.resize(size_t(drawCall.callIndex) + 1);
             }
-            const float flags = (ok ? 1.0f : 0.0f) + (prim ? 2.0f : 0.0f);
-            workload.rs64CallTex[drawCall.callIndex] = ok ? hlslpp::float4(tex[0], tex[1], tex[2], flags) : hlslpp::float4(0.0f, 0.0f, 0.0f, flags);
+            const float flags = (prim ? 2.0f : 0.0f) + (sampled ? 4.0f : 0.0f);
+            workload.rs64CallTex[drawCall.callIndex] = hlslpp::float4(0.0f, 0.0f, 0.0f, flags);
+            workload.rs64CallTile[drawCall.callIndex] = rdp->tiles[0];
         }
 
         // Add the draw call to the FB pair.
@@ -911,6 +907,50 @@ namespace RT64 {
         }
     }
 
+    // A call's owed hit colour (rs64CallTex w bit 4): its render tile's average from TMEM as the call sees it. TMEM only changes through loads,
+    // each bumping tmemLoadTag, so calls between two loads reuse an average of the same tile.
+    void State::rs64CallTextureAverage(Workload &workload, uint32_t callIndex) {
+        if ((callIndex >= workload.rs64CallTex.size()) || ((uint32_t((float)workload.rs64CallTex[callIndex].w) & 4u) == 0)) {
+            return;
+        }
+
+        struct AverageMemo {
+            LoadTile tile;
+            bool ok;
+            float tex[3];
+        };
+
+        static uint32_t s_tag = 0;
+        static std::vector<AverageMemo> s_memo;
+        if (s_tag != rdp->tmemLoadTag) {
+            s_tag = rdp->tmemLoadTag;
+            s_memo.clear();
+        }
+
+        const LoadTile &t0 = workload.rs64CallTile[callIndex];
+        const AverageMemo *found = nullptr;
+        for (const AverageMemo &m : s_memo) {
+            if (memcmp(&m.tile, &t0, sizeof(LoadTile)) == 0) {
+                found = &m;
+                break;
+            }
+        }
+
+        AverageMemo fresh = { t0, false, { 0.0f, 0.0f, 0.0f } };
+        if (found == nullptr) {
+            float cov = 0.0f;
+            fresh.ok = rs64lights::tmemAverage(reinterpret_cast<const uint8_t *>(rdp->TMEM), t0.fmt, t0.siz, t0.tmem, t0.line, uint32_t(((t0.lrs - t0.uls) >> 2) + 1), uint32_t(((t0.lrt - t0.ult) >> 2) + 1), t0.palette, fresh.tex, cov);
+            if (s_memo.size() < 16) {
+                s_memo.push_back(fresh);
+            }
+
+            found = &fresh;
+        }
+
+        const uint32_t flags = (uint32_t((float)workload.rs64CallTex[callIndex].w) & 2u) | (found->ok ? 1u : 0u);
+        workload.rs64CallTex[callIndex] = found->ok ? hlslpp::float4(found->tex[0], found->tex[1], found->tex[2], float(flags)) : hlslpp::float4(0.0f, 0.0f, 0.0f, float(flags));
+    }
+
     void State::fullSyncFramebufferPairTiles(Workload &workload, FramebufferPair &fbPair, uint32_t &loadOpCursor, uint32_t &rdpTileCursor) {
         auto loadOperation = [&](uint32_t loadOpIndex) {
             const auto &loadOp = workload.drawData.loadOperations[loadOpIndex];
@@ -1057,6 +1097,8 @@ namespace RT64 {
                         loadOpCursor++;
                     }
                 }
+
+                rs64CallTextureAverage(workload, gameCall.callDesc.callIndex);
 
                 // Perform all tile sampling operations.
                 if (gameCall.callDesc.tileCount > 0) {

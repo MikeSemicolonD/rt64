@@ -261,6 +261,8 @@ namespace RT64 {
         }
         // Per game call (callIndex): render-tile TMEM average rgb, w = 1 when valid. Recorded only for GI / reflections hit colours.
         std::vector<hlslpp::float4> rs64CallTex;
+        // The render tile of each call whose average is still owed (w bit 4): fullSync takes it from TMEM once the call's own loads have run.
+        std::vector<LoadTile> rs64CallTile;
         uint32_t fbPairCount;
         uint32_t fbPairSubmitted;
         uint32_t gameCallCount;

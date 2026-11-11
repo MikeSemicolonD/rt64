@@ -153,6 +153,7 @@ namespace RT64 {
         void checkRDRAM();
         void fullSync();
         void finishRDRAMUpload();
+        void rs64CallTextureAverage(Workload &workload, uint32_t callIndex);
         void fullSyncFramebufferPairTiles(Workload &workload, FramebufferPair &fbPair, uint32_t &loadOpCursor, uint32_t &rdpTileCursor);
         void listProcessBegin();
         void listProcessEnd();

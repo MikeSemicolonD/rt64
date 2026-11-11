@@ -43,6 +43,7 @@ namespace RT64 {
         rs64Rebase.clear();
         rs64Cut = false;
         rs64CallTex.clear();
+        rs64CallTile.clear();
         rs64Terrain.mixed = false;
         rs64Terrain.exact = false;
         fbChangePool.reset();
