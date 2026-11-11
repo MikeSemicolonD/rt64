@@ -14,7 +14,7 @@ namespace RT64 {
         std::unique_ptr<RenderCommandList> commandList;
         std::unique_ptr<RenderCommandFence> commandFence;
 
-        RenderWorker(RenderDevice *device, const std::string &name, RenderCommandListType commandListType);
+        RenderWorker(RenderDevice *device, const std::string &name, RenderCommandListType commandListType, bool highPriority = false);
         ~RenderWorker();
         void execute();
         void wait();

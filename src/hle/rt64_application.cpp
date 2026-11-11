@@ -333,7 +333,8 @@ namespace RT64 {
         workloadExtrasUploader = std::make_unique<BufferUploader>(device.get());
         workloadVelocityUploader = std::make_unique<BufferUploader>(device.get());
         workloadTilesUploader = std::make_unique<BufferUploader>(device.get());
-        framebufferGraphicsWorker = std::make_unique<RenderWorker>(device.get(), "Framebuffer Graphics", RenderCommandListType::DIRECT);
+        // RS64: the display list walk waits for this queue's small native-resolution render, so the GPU schedules it ahead of the full screen render.
+        framebufferGraphicsWorker = std::make_unique<RenderWorker>(device.get(), "Framebuffer Graphics", RenderCommandListType::DIRECT, true);
         textureDirectWorker = std::make_unique<RenderWorker>(device.get(), "Texture Direct", RenderCommandListType::DIRECT);
         textureCopyWorker = std::make_unique<RenderWorker>(device.get(), "Texture Copy", RenderCommandListType::COPY);
         workloadGraphicsWorker = std::make_unique<RenderWorker>(device.get(), "Workload Graphics", RenderCommandListType::DIRECT);

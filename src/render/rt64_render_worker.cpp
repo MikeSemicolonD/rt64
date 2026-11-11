@@ -7,13 +7,13 @@
 namespace RT64 {
     // RenderWorker
 
-    RenderWorker::RenderWorker(RenderDevice *device, const std::string &name, RenderCommandListType commandListType) {
+    RenderWorker::RenderWorker(RenderDevice *device, const std::string &name, RenderCommandListType commandListType, bool highPriority) {
         assert(device != nullptr);
 
         this->device = device;
         this->name = name;
 
-        commandQueue = device->createCommandQueue(commandListType);
+        commandQueue = highPriority ? device->createHighPriorityCommandQueue(commandListType) : device->createCommandQueue(commandListType);
         commandList = commandQueue->createCommandList();
         commandFence = device->createCommandFence();
     }
