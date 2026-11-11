@@ -3480,9 +3480,11 @@ namespace RT64 {
         thread_local std::unordered_map<uint32_t, rs64lights::Mat4> objects;
         thread_local std::unordered_set<uint32_t> ambiguous;
         thread_local std::vector<std::pair<uint32_t, uint32_t>> calls;
+        thread_local std::unordered_map<uint32_t, size_t> callOf;
         objects.clear();
         ambiguous.clear();
         calls.clear();
+        callOf.clear();
         for (uint32_t pr = 0; pr < fbPair.projectionCount; pr++) {
             const Projection &proj = fbPair.projections[pr];
             if ((proj.type != Projection::Type::Perspective) || proj.scissorRect.isNull() || !rs64SameView(drawData, proj.transformsIndex, transformsIndex)) {
@@ -3503,7 +3505,15 @@ namespace RT64 {
                 if (!ins.second && !rs64lights::sameMatrix(ins.first->second, m, 1e-3f)) {
                     ambiguous.insert(id);
                 }
-                calls.emplace_back(id, desc.triangleCount);
+
+                // One vote per object, weighted by all its triangles: its calls' deltas are identical, and per-call votes made the all-pairs vote quadratic in draw calls.
+                const auto slot = callOf.emplace(id, calls.size());
+                if (slot.second) {
+                    calls.emplace_back(id, desc.triangleCount);
+                }
+                else {
+                    calls[slot.first->second].second += desc.triangleCount;
+                }
             }
         }
 

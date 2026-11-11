@@ -1710,11 +1710,47 @@ namespace RT64 {
             }
         }
         // F1 Lights-tab presets attached to this part's mesh key: their lights in the part's model space, once per part per transform. Lists the key for the tab's Mesh picker.
-        static void f5_push_mesh_presets(State* state, const std::string& key) {
+        // A mesh key's matching presets and their enabled lights (with each light's flicker seed), worked out once per task: every instance of a model repeats its keys.
+        struct F5MeshPresetMatch {
+            const std::string* name;
+            const PresetLights* preset;
+            std::vector<std::pair<const PresetLights::Light*, uint32_t>> lights;
+        };
+        static const std::vector<F5MeshPresetMatch>& f5_mesh_preset_matches(State* state, const std::string& key) {
+            static std::unordered_map<std::string, std::vector<F5MeshPresetMatch>> s_matches;
+            static uint64_t s_task = ~0ull;
+            if (s_task != state->displayListCounter) {
+                s_task = state->displayListCounter;
+                s_matches.clear();
+            }
+            auto found = s_matches.find(key);
+            if (found != s_matches.end()) {
+                return found->second;
+            }
             PresetLightsLibraryInspector& inspector = state->lightsLibraryInspector;
             if (inspector.seenMeshes.size() < 4096) {
                 inspector.seenMeshes.insert(key);
             }
+            std::vector<F5MeshPresetMatch> matches;
+            for (const auto& it : state->lightsLibrary.presetMap) {
+                const PresetLights& preset = it.second;
+                if (!preset.enabled || !preset.appliesTo(inspector.currentLevel) || !PresetLights::meshMatches(preset.mesh, key)) {
+                    continue;
+                }
+                F5MeshPresetMatch m{ &it.first, &preset, {} };
+                for (const auto& lightIt : preset.lightMap) {
+                    if (lightIt.second.enabled) {
+                        // Each light flickers on its own sequence, the same on every copy of the part.
+                        const std::string id = it.first + '/' + lightIt.first;
+                        m.lights.emplace_back(&lightIt.second, uint32_t(rs64lights::fnv1a64(reinterpret_cast<const uint8_t*>(id.data()), id.size())));
+                    }
+                }
+                matches.push_back(std::move(m));
+            }
+            return s_matches.emplace(key, std::move(matches)).first->second;
+        }
+        static void f5_push_mesh_presets(State* state, const std::string& key) {
+            PresetLightsLibraryInspector& inspector = state->lightsLibraryInspector;
             const uint32_t ti = state->rsp->curTransformIndex;
             static std::string s_lastKey;
             static uint32_t s_lastTransform = UINT32_MAX;
@@ -1726,21 +1762,16 @@ namespace RT64 {
             s_lastTransform = ti;
             s_lastTask = state->displayListCounter;
             state->ext.workloadQueue->workloads[state->ext.workloadQueue->writeCursor].rs64MeshKeys[ti] = key;
-            for (const auto& it : state->lightsLibrary.presetMap) {
-                const PresetLights& preset = it.second;
-                if (!preset.enabled || !preset.appliesTo(inspector.currentLevel) || !PresetLights::meshMatches(preset.mesh, key)) {
-                    continue;
-                }
+            const bool projectile = rs64lights::laserBolt(key.c_str());
+            for (const F5MeshPresetMatch& match : f5_mesh_preset_matches(state, key)) {
+                const PresetLights& preset = *match.preset;
                 Workload& wl = state->ext.workloadQueue->workloads[state->ext.workloadQueue->writeCursor];
-                if ((it.first == inspector.selectedPresetName) && (wl.rs64MeshPickTransform == UINT32_MAX)) {
+                if ((*match.name == inspector.selectedPresetName) && (wl.rs64MeshPickTransform == UINT32_MAX)) {
                     wl.rs64MeshPickTransform = ti;
                     wl.rs64MeshPickView = state->rsp->curViewProjIndex;
                 }
-                for (const auto& lightIt : preset.lightMap) {
-                    if (!lightIt.second.enabled) {
-                        continue;
-                    }
-                    const interop::PointLight& d = lightIt.second.description;
+                for (const auto& [light, seed] : match.lights) {
+                    const interop::PointLight& d = light->description;
                     rs64lights::Candidate c;
                     c.transformIndex = ti;
                     c.local[0] = d.position.x;
@@ -1756,7 +1787,7 @@ namespace RT64 {
                     c.kind = rs64lights::KindMesh;
                     c.modelUnits = !preset.cameraUnits;
                     c.lampGated = preset.lamp;
-                    c.projectile = rs64lights::laserBolt(key.c_str());
+                    c.projectile = projectile;
                     c.priority = (preset.priority >= 0) ? preset.priority : (c.projectile ? rs64lights::PriorityLaser : rs64lights::PriorityMesh);
                     c.dir[0] = d.direction.x;
                     c.dir[1] = d.direction.y;
@@ -1764,9 +1795,7 @@ namespace RT64 {
                     c.spotMaxCos = d.spotMaxCosine;
                     c.spotFalloffCos = d.spotFalloffCosine;
                     c.flicker = d.flickerIntensity;
-                    // Each light flickers on its own sequence, the same on every copy of the part.
-                    const std::string id = it.first + '/' + lightIt.first;
-                    c.seed = uint32_t(rs64lights::fnv1a64(reinterpret_cast<const uint8_t*>(id.data()), id.size()));
+                    c.seed = seed;
                     f5_push_light(state, c);
                 }
             }

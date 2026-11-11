@@ -54,22 +54,55 @@ namespace RT64 {
     uint64_t TextureManager::uploadTexture(State *state, const LoadTile &loadTile, TextureCache *textureCache, uint64_t creationFrame, uint16_t width, uint16_t height, uint32_t tlut) {
         const uint8_t *TMEM = reinterpret_cast<const uint8_t *>(state->rdp->TMEM);
 
-        // Hash texel words written before this tile's own load as zero: a partial load leaves stale bytes from earlier textures in the sampled area, and they differ run to run. ROGUESQ_TEX_HASH_ALL_TMEM=1 restores upstream hashing.
-        static const bool hashAllTMEM = []() { const char *e = std::getenv("ROGUESQ_TEX_HASH_ALL_TMEM"); return e && e[0] == '1'; }();
-        uint64_t hashTMEM[RDP_TMEM_WORDS];
-        if (!hashAllTMEM) {
-            memcpy(hashTMEM, state->rdp->TMEM, sizeof(hashTMEM));
-            const bool RGBA32 = (loadTile.siz == G_IM_SIZ_32b) && (loadTile.fmt == G_IM_FMT_RGBA);
-            const uint32_t texelWords = ((tlut > 0) && !RGBA32) ? (RDP_TMEM_WORDS >> 1) : RDP_TMEM_WORDS;
-            const uint32_t baseTag = state->rdp->tmemWordTags[loadTile.tmem & RDP_TMEM_MASK64];
-            for (uint32_t i = 0; i < texelWords; i++) {
-                if (static_cast<int32_t>(state->rdp->tmemWordTags[i] - baseTag) < 0) {
-                    hashTMEM[i] = 0;
-                }
+        // TMEM only changes through loads, and each one bumps tmemLoadTag: until the next load, the same tile hashes the same, and draws reuse their texture many times.
+        struct HashMemo {
+            LoadTile tile;
+            uint16_t width;
+            uint16_t height;
+            uint32_t tlut;
+            uint64_t hash;
+        };
+        static const RDP *s_memoRDP = nullptr;
+        static uint32_t s_memoTag = 0;
+        static std::vector<HashMemo> s_memo;
+        if ((s_memoRDP != state->rdp.get()) || (s_memoTag != state->rdp->tmemLoadTag)) {
+            s_memoRDP = state->rdp.get();
+            s_memoTag = state->rdp->tmemLoadTag;
+            s_memo.clear();
+        }
+        uint64_t hash = 0;
+        bool memoHit = false;
+        for (const HashMemo &m : s_memo) {
+            if ((m.width == width) && (m.height == height) && (m.tlut == tlut) && (memcmp(&m.tile, &loadTile, sizeof(LoadTile)) == 0)) {
+                hash = m.hash;
+                memoHit = true;
+                break;
             }
         }
 
-        uint64_t hash = TMEMHasher::hash(hashAllTMEM ? TMEM : reinterpret_cast<const uint8_t *>(hashTMEM), loadTile, width, height, tlut, TMEMHasher::CurrentHashVersion);
+        if (!memoHit) {
+            // Hash texel words written before this tile's own load as zero: a partial load leaves stale bytes from earlier textures in the sampled area, and they differ run to run. ROGUESQ_TEX_HASH_ALL_TMEM=1 restores upstream hashing.
+            static const bool hashAllTMEM = []() { const char *e = std::getenv("ROGUESQ_TEX_HASH_ALL_TMEM"); return e && e[0] == '1'; }();
+            uint64_t hashTMEM[RDP_TMEM_WORDS];
+            if (!hashAllTMEM) {
+                memcpy(hashTMEM, state->rdp->TMEM, sizeof(hashTMEM));
+                const bool RGBA32 = (loadTile.siz == G_IM_SIZ_32b) && (loadTile.fmt == G_IM_FMT_RGBA);
+                const uint32_t texelWords = ((tlut > 0) && !RGBA32) ? (RDP_TMEM_WORDS >> 1) : RDP_TMEM_WORDS;
+                const uint32_t baseTag = state->rdp->tmemWordTags[loadTile.tmem & RDP_TMEM_MASK64];
+                for (uint32_t i = 0; i < texelWords; i++) {
+                    if (static_cast<int32_t>(state->rdp->tmemWordTags[i] - baseTag) < 0) {
+                        hashTMEM[i] = 0;
+                    }
+                }
+            }
+
+            hash = TMEMHasher::hash(hashAllTMEM ? TMEM : reinterpret_cast<const uint8_t *>(hashTMEM), loadTile, width, height, tlut, TMEMHasher::CurrentHashVersion);
+            if (s_memo.size() < 16) {
+                s_memo.push_back({ loadTile, width, height, tlut, hash });
+            }
+        }
+
+        // Even on a memo hit: the texture cache may have evicted the hash since.
         if (hashSet.find(hash) == hashSet.end()) {
             hashSet.insert(hash);
             textureCache->queueGPUUploadTMEM(hash, creationFrame, TMEM, RDP_TMEM_BYTES, width, height, tlut, loadTile, true);
