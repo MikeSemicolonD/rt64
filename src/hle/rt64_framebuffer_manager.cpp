@@ -1123,6 +1123,12 @@ namespace RT64 {
             NativeTarget::ReadBuffer kept;
             kept.nativeUploadBuffer = std::move(readBuffer.nativeUploadBuffer);
             kept.nativeUploadBufferSize = readBuffer.nativeUploadBufferSize;
+
+            // Views before the buffer: the move below frees nativeBuffer first, and a Vulkan view's destructor reaches the device through it.
+            readBuffer.readDescSet.reset();
+            readBuffer.nativeBufferWriteView.reset();
+            readBuffer.nativeBufferNextView.reset();
+            readBuffer.nativeBufferView.reset();
             readBuffer = std::move(kept);
         }
 
