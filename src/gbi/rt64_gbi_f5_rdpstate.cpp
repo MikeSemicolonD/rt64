@@ -417,6 +417,32 @@ namespace RT64 {
             state->updateDrawStatusAttribute(DrawAttribute::Scissor);
         }
 
+        // Menu text at rest is an IA8 font with on/off alpha (I<<4 | 0xF) drawn as an alpha-threshold cutout, so dim edge texels show as hard opaque squares.
+        // The same text fading is the I4 copy alpha blended; the IA8 one samples as I8 under that blend so both look the same.
+        template <typename Draw>
+        static void with_ia8_text_blended(State *state, uint32_t tile, Draw draw) {
+            RDP &rdp = *state->rdp;
+            const uint32_t H = rdp.otherMode.H;
+            const uint32_t L = rdp.otherMode.L;
+            LoadTile &t = rdp.tiles[tile & 7];
+            const bool cutoutText = (L == 0x0F0A4001u) && (t.fmt == G_IM_FMT_IA) && (t.siz == G_IM_SIZ_8b);
+
+            if (!cutoutText) {
+                draw();
+                return;
+            }
+
+            rdp.setOtherMode(H, 0x00504240u);
+            t.fmt = G_IM_FMT_I;
+            state->updateDrawStatusAttribute(DrawAttribute::Texture);
+
+            draw();
+
+            t.fmt = G_IM_FMT_IA;
+            state->updateDrawStatusAttribute(DrawAttribute::Texture);
+            rdp.setOtherMode(H, L);
+        }
+
         void texrectLLE_guarded(State *state, DisplayList **dl) {
             // Track per-color-buffer draw ACTIVITY with exponential decay → publish the
             // most-active buffer as g_most_drawn_fb. This is the buffer the game is
@@ -606,7 +632,7 @@ namespace RT64 {
                 (*dl)++;
                 return;
             }
-            with_hud_side(state, *dl, [&] { GBI_RDP::texrectLLE(state, dl); });
+            with_hud_side(state, *dl, [&] { with_ia8_text_blended(state, (*dl)->p1(24, 3), [&] { GBI_RDP::texrectLLE(state, dl); }); });
             // The ucode consumes all 16 bytes. Left in the stream, the S/T/DsDx/DtDy word runs as a command whenever S >= 0x100 (e.g. 0x0D = SETOTHERMODE_H forcing copy mode: the white flash on the game-over fade).
             (*dl)++;
         }
@@ -617,7 +643,7 @@ namespace RT64 {
                 return;
             }
             dlh_followup(*dl);
-            with_hud_side(state, *dl, [&] { GBI_RDP::texrectFlipLLE(state, dl); });
+            with_hud_side(state, *dl, [&] { with_ia8_text_blended(state, (*dl)->p1(24, 3), [&] { GBI_RDP::texrectFlipLLE(state, dl); }); });
             (*dl)++;
         }
 
