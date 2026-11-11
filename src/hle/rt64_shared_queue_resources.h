@@ -24,6 +24,9 @@ namespace RT64 {
         uint32_t available = 0;
         uint32_t count = 0;
         bool skipped = false;
+
+        // The workload's MSAA mode, as the present of that workload can run after a switch.
+        bool msaa = false;
     };
 
     struct SharedQueueResources {

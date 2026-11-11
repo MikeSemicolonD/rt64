@@ -12,6 +12,7 @@
 #include <stdexcept>
 
 #include "rt64_state.h"
+#include "rt64_application.h"
 #include "rt64_rs64_lights.h"
 #include "render/rt64_raster_shader.h"
 
@@ -791,9 +792,15 @@ namespace RT64 {
                 }
 
                 UserConfiguration &userConfig = *state.ext.userConfig;
+                const uint32_t previousMSAACount = userConfig.msaaSampleCount();
                 from_json(merged, userConfig);
                 userConfig.validate();
                 state.ext.sharedQueueResources->setUserConfig(userConfig, true);
+
+                // As the inspector does: a new sample count needs every multisampled pipeline and target rebuilt.
+                if (userConfig.msaaSampleCount() != previousMSAACount) {
+                    state.ext.app->updateMultisampling();
+                }
                 state.configurationSaveQueued = state.configurationSaveQueued || params.value("save", false);
             }
 

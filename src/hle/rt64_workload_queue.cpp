@@ -1152,6 +1152,7 @@ namespace RT64 {
                 // Create as many render targets as required to store the interpolated targets.
                 auto &interpolatedTargets = ext.sharedResources->interpolatedColorTargets;
                 const bool usingMSAA = (ext.sharedResources->renderTargetManager.multisampling.sampleCount > 1);
+                curFrameCounters.msaa = usingMSAA;
                 const bool usesHDR = ext.sharedResources->renderTargetManager.usesHDR;
                 uint32_t requiredFrames = (usingMSAA && generateInterpolatedFrames) ? displayFrames : (displayFrames - 1);
                 if ((requiredFrames > 0) && (interpolatedTargets.size() < requiredFrames)) {

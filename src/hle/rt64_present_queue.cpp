@@ -281,7 +281,6 @@ namespace RT64 {
     void PresentQueue::threadPresent(const Present &present, bool &swapChainValid) {
         FramebufferManager &fbManager = ext.sharedResources->framebufferManager;
         RenderTargetManager &targetManager = ext.sharedResources->renderTargetManager;
-        const bool usingMSAA = (targetManager.multisampling.sampleCount > 1);
         hlslpp::float2 resolutionScale;
         EnhancementConfiguration::Presentation::Mode presentationMode;
         bool removeBlackBorders;
@@ -306,6 +305,7 @@ namespace RT64 {
         int32_t framesToPresent = 1;
         bool lockedWorkloadMutex = false;
         InterpolatedFrameCounters &frameCounters = ext.sharedResources->interpolatedFrames[ext.sharedResources->interpolatedFramesIndex];
+        const bool usingMSAA = frameCounters.msaa;
 
         // TODO: There's a possible race condition interactions that can happen while the workload
         // queue is rendering extra frames and the present event is processed while it's generating

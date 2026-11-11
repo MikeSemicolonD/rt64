@@ -559,6 +559,9 @@ namespace RT64 {
         }
 #   endif
 
+        // Pipelines bake in the sample count, so a new MSAA mode rebuilds every multisampled pipeline and the shader cache.
+        std::fprintf(stderr, "[rt64] MSAA now %ux: rebuilding the multisampled pipelines and the shader cache\n", userConfig.msaaSampleCount());
+
         // Destroy shader cache by waiting for the queues to be idle.
         destroyShaderCache();
 
