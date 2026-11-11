@@ -2981,7 +2981,7 @@ namespace RT64 {
         lampMarkOf.clear();
         // Lamp rectangles are 2D and come in the game's next graphics task, so they are taken from the shared store (rs64lights::lampMarksFor).
         thread_local std::vector<rs64lights::Candidate> lampMarkSet;
-        lampMarkSet = rs64lights::lampMarksFor(p.curWorkload->workloadId, 3);
+        rs64lights::lampMarksFor(p.curWorkload->workloadId, 3, lampMarkSet);
         for (const rs64lights::Candidate &c : lampMarkSet) {
             float n[2];
             rs64lights::screenToFinalNdc(screenMap, c.local[0], c.local[1], n);

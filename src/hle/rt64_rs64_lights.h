@@ -388,22 +388,27 @@ namespace rs64lights {
         std::lock_guard<std::mutex> lock(lampMarksMutex());
         LampMarks& b = lampMarksBuilding();
         if (b.workloadId != workloadId) {
+            // Swapped, not moved: both sets keep their capacity instead of regrowing every workload.
             if (!b.marks.empty()) {
-                lampMarksPublished() = std::move(b);
+                std::swap(lampMarksPublished(), b);
             }
-            b = LampMarks{ workloadId, {} };
+            b.workloadId = workloadId;
+            b.marks.clear();
         }
         b.marks.push_back(mark);
     }
 
-    // The lamp marks for a workload: the finished set when it is from within maxAge workloads of it, else the one still building.
-    inline std::vector<Candidate> lampMarksFor(uint64_t workloadId, uint64_t maxAge) {
+    // The lamp marks for a workload into out: the finished set when it is from within maxAge workloads of it, else the one still building.
+    inline void lampMarksFor(uint64_t workloadId, uint64_t maxAge, std::vector<Candidate>& out) {
         std::lock_guard<std::mutex> lock(lampMarksMutex());
         const auto recent = [&](const LampMarks& s) { return !s.marks.empty() && ((s.workloadId > workloadId ? s.workloadId - workloadId : workloadId - s.workloadId) <= maxAge); };
+        out.clear();
         if (recent(lampMarksPublished())) {
-            return lampMarksPublished().marks;
+            out.assign(lampMarksPublished().marks.begin(), lampMarksPublished().marks.end());
         }
-        return recent(lampMarksBuilding()) ? lampMarksBuilding().marks : std::vector<Candidate>();
+        else if (recent(lampMarksBuilding())) {
+            out.assign(lampMarksBuilding().marks.begin(), lampMarksBuilding().marks.end());
+        }
     }
 
     // Native screen (x, y) -> final NDC, the space projectToScreen outputs.
