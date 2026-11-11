@@ -263,6 +263,18 @@ namespace RT64 {
         std::vector<hlslpp::float4> rs64CallTex;
         // The render tile of each call whose average is still owed (w bit 4): fullSync takes it from TMEM once the call's own loads have run.
         std::vector<LoadTile> rs64CallTile;
+        // Effect sprites whose lights (rs64Lights [first, last)) still owe their frame's brightness weight: fullSync reads it from TMEM once
+        // loadCount loads have run, the TMEM the sprite saw, and scales those lights.
+        struct RS64SpriteEmission {
+            uint32_t loadCount;
+            uint32_t first;
+            uint32_t last;
+            rs64lights::TmemTile color;
+            rs64lights::TmemTile mask;
+            bool masked;
+        };
+        std::vector<RS64SpriteEmission> rs64SpriteEmissions;
+        size_t rs64SpriteEmissionNext = 0;
         uint32_t fbPairCount;
         uint32_t fbPairSubmitted;
         uint32_t gameCallCount;

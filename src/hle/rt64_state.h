@@ -154,6 +154,7 @@ namespace RT64 {
         void fullSync();
         void finishRDRAMUpload();
         void rs64CallTextureAverage(Workload &workload, uint32_t callIndex);
+        void rs64ApplySpriteEmissions(Workload &workload, uint32_t loadCount);
         void fullSyncFramebufferPairTiles(Workload &workload, FramebufferPair &fbPair, uint32_t &loadOpCursor, uint32_t &rdpTileCursor);
         void listProcessBegin();
         void listProcessEnd();

@@ -951,6 +951,19 @@ namespace RT64 {
         workload.rs64CallTex[callIndex] = found->ok ? hlslpp::float4(found->tex[0], found->tex[1], found->tex[2], float(flags)) : hlslpp::float4(0.0f, 0.0f, 0.0f, float(flags));
     }
 
+    // Effect-sprite lights owed their frame's brightness (Workload::rs64SpriteEmissions): applied once loadCount loads have run, the TMEM the sprite saw.
+    void State::rs64ApplySpriteEmissions(Workload &workload, uint32_t loadCount) {
+        auto &pending = workload.rs64SpriteEmissions;
+        while ((workload.rs64SpriteEmissionNext < pending.size()) && (pending[workload.rs64SpriteEmissionNext].loadCount <= loadCount)) {
+            const Workload::RS64SpriteEmission &e = pending[workload.rs64SpriteEmissionNext++];
+            const float emission = rs64lights::spriteEmission(reinterpret_cast<const uint8_t *>(rdp->TMEM), e.color, e.masked ? &e.mask : nullptr);
+            const float weight = rs64lights::spriteEmitWeight(emission, rs64lights::config().spriteEmitRef);
+            for (uint32_t i = e.first; (i < e.last) && (i < workload.rs64Lights.size()); i++) {
+                workload.rs64Lights[i].intensity *= weight;
+            }
+        }
+    }
+
     void State::fullSyncFramebufferPairTiles(Workload &workload, FramebufferPair &fbPair, uint32_t &loadOpCursor, uint32_t &rdpTileCursor) {
         auto loadOperation = [&](uint32_t loadOpIndex) {
             const auto &loadOp = workload.drawData.loadOperations[loadOpIndex];
@@ -1090,11 +1103,13 @@ namespace RT64 {
                 const GameCall &gameCall = proj.gameCalls[d];
 
                 // Perform all load operations.
+                rs64ApplySpriteEmissions(workload, loadOpCursor);
                 if (gameCall.callDesc.loadCount > 0) {
                     const uint32_t loadOpLimit = gameCall.callDesc.loadIndex + gameCall.callDesc.loadCount;
                     while (loadOpCursor < loadOpLimit) {
                         loadOperation(loadOpCursor);
                         loadOpCursor++;
+                        rs64ApplySpriteEmissions(workload, loadOpCursor);
                     }
                 }
 
@@ -2024,6 +2039,9 @@ namespace RT64 {
             ext.framebufferGraphicsWorker->wait();
             ext.textureCache->waitForGPUUploads();
         }
+
+        // Sprites drawn after the last call's loads take the final TMEM.
+        rs64ApplySpriteEmissions(workload, UINT32_MAX);
 
         // Evict from the texture cache that are too old and should no longer be maintained.
         // The texture manager should also be notified of any hashes that were removed.

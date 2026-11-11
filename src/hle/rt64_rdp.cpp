@@ -503,46 +503,6 @@ namespace RT64 {
         }
     }
 
-    const uint8_t *RDP::passTMEM(const std::vector<LoadOperation> &ops, size_t passFirst) {
-        PassTMEM &p = rs64PassTMEM;
-        if ((p.workloadId != uint64_t(state->workloadId)) || (p.passFirst != passFirst) || (p.applied > ops.size())) {
-            memcpy(p.TMEM, TMEM, sizeof(p.TMEM));
-            memcpy(p.tags, tmemWordTags, sizeof(p.tags));
-            p.loadTag = tmemLoadTag;
-            p.workloadId = uint64_t(state->workloadId);
-            p.passFirst = passFirst;
-            p.applied = passFirst;
-        }
-
-        if (p.applied < ops.size()) {
-            // The load operations write the live TMEM, so the copy stands in for it while they run.
-            std::swap(TMEM, p.TMEM);
-            std::swap(tmemWordTags, p.tags);
-            std::swap(tmemLoadTag, p.loadTag);
-            for (size_t i = p.applied; i < ops.size(); ++i) {
-                const LoadOperation &op = ops[i];
-                switch (op.type) {
-                case LoadOperation::Type::Block:
-                    loadBlockOperation(op.tile, op.texture, false);
-                    break;
-                case LoadOperation::Type::Tile:
-                    loadTileOperation(op.tile, op.texture, false);
-                    break;
-                case LoadOperation::Type::TLUT:
-                    loadTLUTOperation(op.tile, op.texture, false);
-                    break;
-                }
-            }
-
-            std::swap(TMEM, p.TMEM);
-            std::swap(tmemWordTags, p.tags);
-            std::swap(tmemLoadTag, p.loadTag);
-            p.applied = ops.size();
-        }
-
-        return reinterpret_cast<const uint8_t *>(p.TMEM);
-    }
-
     void RDP::loadTileOperation(const LoadTile &loadTile, const LoadTexture &loadTexture, bool deferred) {
         const uint32_t bytesOffset = (loadTile.uls >> 2) << loadTexture.siz >> 1;
         const uint32_t bytesPerRow = loadTexture.width << loadTexture.siz >> 1;

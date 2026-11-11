@@ -44,6 +44,8 @@ namespace RT64 {
         rs64Cut = false;
         rs64CallTex.clear();
         rs64CallTile.clear();
+        rs64SpriteEmissions.clear();
+        rs64SpriteEmissionNext = 0;
         rs64Terrain.mixed = false;
         rs64Terrain.exact = false;
         fbChangePool.reset();

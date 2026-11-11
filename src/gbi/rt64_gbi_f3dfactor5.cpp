@@ -1610,20 +1610,26 @@ namespace RT64 {
             }
             return std::string();
         }
-        // The bound sprite frame's brightness (rs64lights::spriteEmission): colour from the render tile, coverage from the next tile when the combiner samples it (the mask).
-        static float f5_sprite_emission(State* state) {
+        // The bound sprite frame's brightness (rs64lights::spriteEmission) scales the lights pushed since firstLight: colour from the render tile, coverage from
+        // the next tile when the combiner samples it (the mask). TMEM holds this frame only once fullSync runs the loads, so the weight is applied there.
+        static void f5_sprite_emission(State* state, size_t firstLight) {
             const auto toTile = [](const LoadTile& t) {
                 return rs64lights::TmemTile{ t.fmt, t.siz, t.tmem, t.line, t.palette, uint32_t(((t.lrs - t.uls) >> 2) + 1), uint32_t(((t.lrt - t.ult) >> 2) + 1), t.shifts, t.shiftt };
             };
+            Workload& wl = state->ext.workloadQueue->workloads[state->ext.workloadQueue->writeCursor];
+            if (wl.rs64Lights.size() <= firstLight) {
+                return;
+            }
             const uint32_t tile = state->rsp->textureState.tile & 7u;
             const auto& cc = state->rdp->colorCombinerStack[state->rdp->colorCombinerStackSize - 1];
-            const bool masked = cc.usesTexture(state->rdp->otherMode, 1, false);
-            const rs64lights::TmemTile color = toTile(state->rdp->tiles[tile]);
-            const rs64lights::TmemTile mask = toTile(state->rdp->tiles[(tile + 1) & 7u]);
-
-            RDP& rdp = *state->rdp;
-            const Workload& wl = state->ext.workloadQueue->workloads[state->ext.workloadQueue->writeCursor];
-            return rs64lights::spriteEmission(rdp.passTMEM(wl.drawData.loadOperations, wl.drawRanges.loadOperations.first), color, masked ? &mask : nullptr);
+            Workload::RS64SpriteEmission e;
+            e.loadCount = uint32_t(wl.drawData.loadOperations.size());
+            e.first = uint32_t(firstLight);
+            e.last = uint32_t(wl.rs64Lights.size());
+            e.color = toTile(state->rdp->tiles[tile]);
+            e.mask = toTile(state->rdp->tiles[(tile + 1) & 7u]);
+            e.masked = cc.usesTexture(state->rdp->otherMode, 1, false);
+            wl.rs64SpriteEmissions.push_back(e);
         }
         // Light presets keyed by this sprite: their lights at the sprite (at: its placement), radius x its camera size (capped as the automatic light's), brightness x its PRIM
         // alpha x at.intensity (the frame's brightness weight) so they fade with it. Records the key for the Lights tab's picker. True when a preset matched (its lights, or none, replace
@@ -1639,7 +1645,7 @@ namespace RT64 {
             if (rs64lights::config().log) {
                 static std::set<std::string> s_logged;
                 if ((s_logged.size() < 512) && s_logged.insert(key).second) {
-                    std::fprintf(stderr, "[rt-lights] sprite %s prim=%08X weight=%.2f\n", key.c_str(), prim, at.intensity);
+                    std::fprintf(stderr, "[rt-lights] sprite %s prim=%08X\n", key.c_str(), prim);
                 }
             }
             bool matched = false;
@@ -3478,15 +3484,15 @@ namespace RT64 {
                             at.local[2] = (float)c.z;
                         }
                         // Explosions draw every flipbook frame at white PRIM, so the light follows the frame's own brightness: it fades as the fireball burns out.
-                        const float emitWeight = rs64lights::spriteEmitWeight(f5_sprite_emission(state), rs64lights::config().spriteEmitRef);
-                        at.intensity = emitWeight;
+                        // The lights go in at full weight and f5_sprite_emission has fullSync scale them by the frame's brightness.
+                        const size_t firstLight = state->ext.workloadQueue->workloads[state->ext.workloadQueue->writeCursor].rs64Lights.size();
+                        at.intensity = 1.0f;
                         const std::string spriteKey = f5_sprite_key(state);
                         const bool presetLit = f5_push_sprite_presets(state, spriteKey, w1, spriteSize * modelScale, at);
                         rs64lights::Candidate lc;
                         if (!presetLit && rs64lights::spriteLight(w1, spriteSize * modelScale, rs64lights::config().spriteRadius, rs64lights::config().spriteRadiusMax, lc)) {
                             lc.transformIndex = at.transformIndex;
                             std::copy(at.local, at.local + 3, lc.local);
-                            lc.intensity *= emitWeight;
                             lc.priority = rs64lights::PrioritySprite;
                             f5_push_light(state, lc);
                         }
@@ -3507,6 +3513,7 @@ namespace RT64 {
                                 s_rej.clear();
                             }
                         }
+                        f5_sprite_emission(state, firstLight);
                     }
                     if (s_sprite_xform) {
                         modelTop = savedModel;

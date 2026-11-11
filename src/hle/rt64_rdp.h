@@ -110,20 +110,6 @@ namespace RT64 {
             LoadOperation lastLoadOpByTMEM[RDP_TMEM_WORDS] = {};
         } rice;
 
-        // Loads are deferred until the framebuffer pair syncs, so TMEM still holds an earlier pass while one records: passTMEM is TMEM with the recording pass's loads, each applied once.
-        struct PassTMEM {
-            uint64_t TMEM[RDP_TMEM_WORDS];
-            uint32_t tags[RDP_TMEM_WORDS];
-            uint32_t loadTag = 0;
-            uint64_t workloadId = UINT64_MAX;
-            size_t passFirst = 0;
-            size_t applied = 0;
-        };
-
-        const uint8_t *passTMEM(const std::vector<LoadOperation> &ops, size_t passFirst);
-
-        PassTMEM rs64PassTMEM;
-
         GBI *gbi;
         std::array<uint8_t, 256> commandWordLengths;
         State *state;
