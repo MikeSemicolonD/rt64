@@ -167,6 +167,13 @@ namespace RT64 {
             uint32_t rs64LightsHalfW = 0;
             uint32_t rs64LightsHalfH = 0;
             bool rs64LightsHalf = false;
+            // MSAA colour target: the passes read depth from rs64DepthCopy (sample 0) and colour from the target's resolve.
+            std::unique_ptr<RenderTargetCopyDescriptorSet> rs64DepthResolveSet;
+            std::unique_ptr<RenderTexture> rs64DepthCopy;
+            std::unique_ptr<RenderFramebuffer> rs64DepthCopyFb;
+            uint32_t rs64DepthCopyW = 0;
+            uint32_t rs64DepthCopyH = 0;
+            bool rs64MSAA = false;
             // Glowing panel faces: the lights CB in faces-only mode, drawn over the frame (the lights pass itself only tints it).
             std::unique_ptr<RenderBuffer> rs64PanelsBuffer;
             std::unique_ptr<RS64LightsDescriptorSet> rs64PanelsSet;
@@ -418,6 +425,9 @@ namespace RT64 {
         void fillRS64Temporal(const DrawParams &p, Framebuffer &framebuffer, uint32_t transformsIndex, const rs64lights::Mat4 &viewFromScreen, interop::RS64ShadowBlurCB &bcb);
         void recordRS64Shadows(RenderWorker *worker, const Framebuffer &framebuffer, bool &depthState);
         void recordRS64Mirror(RenderWorker *worker, const Framebuffer &framebuffer, bool &depthState);
+        void prepareRS64MSAA(const DrawParams &p, Framebuffer &framebuffer);
+        void bindRS64Depth(const DrawParams &p, const Framebuffer &framebuffer, RenderDescriptorSetBase &set, uint32_t slot);
+        void recordRS64MSAAResolve(RenderWorker *worker, const Framebuffer &framebuffer, bool resolveColor, bool &depthState);
         void ensureRS64SoftTargets(RenderWorker *worker, Framebuffer &framebuffer, uint32_t width, uint32_t height, bool halfTrace);
         void buildRS64HitColors(const DrawParams &p, const std::vector<std::pair<rs64lights::IndexRange, uint32_t>> &terrainCalls, const float *floorUp);
         bool rs64ViewProj(const DrawParams &p, uint32_t transformsIndex, rs64lights::Mat4 &out);

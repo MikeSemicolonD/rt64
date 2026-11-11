@@ -36,6 +36,7 @@ namespace RT64 {
         ShaderRecord rs64Lights;
         ShaderRecord rs64LightsHalf;
         ShaderRecord rs64LightsUpsample;
+        ShaderRecord rs64DepthResolve;
         ShaderRecord rs64Terrain;
         ShaderRecord rs64TerrainWater;
         ShaderRecord rs64TerrainPacks;

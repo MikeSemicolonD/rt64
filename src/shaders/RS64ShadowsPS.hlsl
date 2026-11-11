@@ -237,7 +237,7 @@ RS64Receiver rs64Receiver(float2 px) {
     return r;
 }
 
-// The frame as drawn so far (before this pass composes), single-sampled: the trace passes skip MSAA targets.
+// The frame as drawn so far (before this pass composes), single-sampled: an MSAA target's resolve.
 Texture2D<float4> gColor : register(t12, space3);
 
 // Pixel and depth where clip-space point c lands; false behind the camera or off screen.

@@ -661,6 +661,7 @@ build_pixel_shader(  rt64 "src/shaders/RtCopyDepthToColorPS.hlsl" "src/shaders/R
 build_pixel_shader(  rt64 "src/shaders/RtCopyDepthToColorPS.hlsl" "src/shaders/RtCopyDepthToColor8XPS.hlsl" "-D SAMPLES_8X")
 build_pixel_shader(  rt64 "src/shaders/RS64LightsPS.hlsl")
 build_pixel_shader(  rt64 "src/shaders/RS64LightsUpsamplePS.hlsl")
+build_pixel_shader(  rt64 "src/shaders/RS64DepthResolvePS.hlsl")
 build_vertex_shader( rt64 "src/shaders/RS64TerrainVS.hlsl")
 build_pixel_shader(  rt64 "src/shaders/RS64TerrainPS.hlsl")
 build_pixel_shader(  rt64 "src/shaders/RS64TerrainPS.hlsl" "src/shaders/RS64TerrainPSPacks.hlsl" "-D RS64_TERRAIN_PACKS")

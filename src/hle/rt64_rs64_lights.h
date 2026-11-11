@@ -2020,8 +2020,8 @@ namespace rs64lights {
         return c.enabled || sceneCaptureEnabled(c);
     }
 
-    inline bool sceneWanted(bool shadowsWanted, bool lightsWanted, bool lightShadows, bool rayQuery, bool msaa) {
-        return shadowsWanted || (lightsWanted && lightShadows && rayQuery && !msaa);
+    inline bool sceneWanted(bool shadowsWanted, bool lightsWanted, bool lightShadows, bool rayQuery) {
+        return shadowsWanted || (lightsWanted && lightShadows && rayQuery);
     }
 
     // Shadow ray toward a point light, mirrored by RS64LightsPS: ends shadowEnd*radius short of the light so a light inside the ground is not blocked by it.

@@ -1777,6 +1777,10 @@ namespace RT64 {
                 submitDepthAccess(worker, targetDrawCall.fbStorage, false, depthState);
                 submitRasterScene(worker, framebuffer, targetDrawCall.fbStorage, rasterScene, depthState);
                 if (targetDrawCall.rs64LightsAfterScene == static_cast<int32_t>(pair.first)) {
+                    if (framebuffer.rs64MSAA && (framebuffer.rs64ShadowsOn || framebuffer.rs64FogOn || framebuffer.rs64LightsOn)) {
+                        recordRS64MSAAResolve(worker, framebuffer, framebuffer.rs64ShadowsOn && framebuffer.rs64ShadowsSoft, depthState);
+                    }
+
                     if (framebuffer.rs64ShadowsOn && rs64Shadow.ready) {
                         if (!framebuffer.rs64ShadowsSoft) {
                             rs64TimingMark(worker, RS64TimeShadows);
@@ -1870,6 +1874,7 @@ namespace RT64 {
             framebufferVector.back().rs64LightsBuffer = p.worker->device->createBuffer(RenderBufferDesc::UploadBuffer(sizeof(interop::RS64LightsCB), RenderBufferFlag::CONSTANT));
             framebufferVector.back().rs64LightsSet = std::make_unique<RS64LightsDescriptorSet>(p.worker->device);
             framebufferVector.back().rs64LightsUpsampleSet = std::make_unique<RS64LightsUpsampleDescriptorSet>(p.worker->device);
+            framebufferVector.back().rs64DepthResolveSet = std::make_unique<RenderTargetCopyDescriptorSet>(p.worker->device);
             framebufferVector.back().rs64PanelsBuffer = p.worker->device->createBuffer(RenderBufferDesc::UploadBuffer(sizeof(interop::RS64LightsCB), RenderBufferFlag::CONSTANT));
             framebufferVector.back().rs64PanelsSet = std::make_unique<RS64LightsDescriptorSet>(p.worker->device);
             if (p.worker->device->getCapabilities().rayQuery) {
@@ -2085,22 +2090,20 @@ namespace RT64 {
             }
         }
         const bool lightsMSAA = (p.fbStorage->colorTarget != nullptr) && (p.fbStorage->colorTarget->multisampling.sampleCount > 1);
-        const bool lightsWanted = lightsCfg.enabled && p.rs64Lights && (p.fbStorage->colorTarget != nullptr) && !lightsMSAA && !(p.curWorkload->rs64Lights.empty() && p.curWorkload->pointLights.empty());
-        if (lightsCfg.enabled && lightsMSAA) {
-            static bool s_warned = false;
-            if (!s_warned) {
-                s_warned = true;
-                std::fprintf(stderr, "[rt-lights] MSAA target: light pass skipped\n");
-            }
-        }
+        const bool lightsWanted = lightsCfg.enabled && p.rs64Lights && (p.fbStorage->colorTarget != nullptr) && !(p.curWorkload->rs64Lights.empty() && p.curWorkload->pointLights.empty());
         // A new view over the world (the cockpit) traces sun shadows only, onto its own pixels (the world under it is cleared depth), with its geometry
         // joining the casters; the world's terrain origin and hit colours stay as the world's pass set them.
         const bool newView = framebuffer.rs64NewView;
-        const bool shadowsWanted = (newView ? lightsCfg.shadows.load(std::memory_order_relaxed) : rs64lights::tracePassWanted(lightsCfg.shadows, lightsCfg.ao, lightsCfg.gi, lightsCfg.reflections)) && p.rs64Lights && (p.fbStorage->colorTarget != nullptr) && !lightsMSAA && p.curWorkload->rs64Sun.valid && p.worker->device->getCapabilities().rayQuery;
-        const bool fogWanted = !newView && lightsCfg.fogShafts && p.rs64Lights && (p.fbStorage->colorTarget != nullptr) && !lightsMSAA && p.curWorkload->rs64Sun.valid && p.worker->device->getCapabilities().rayQuery;
-        const bool lightShadowsWanted = !newView && rs64lights::sceneWanted(false, lightsWanted, lightsCfg.lightShadows, p.worker->device->getCapabilities().rayQuery, lightsMSAA);
+        const bool shadowsWanted = (newView ? lightsCfg.shadows.load(std::memory_order_relaxed) : rs64lights::tracePassWanted(lightsCfg.shadows, lightsCfg.ao, lightsCfg.gi, lightsCfg.reflections)) && p.rs64Lights && (p.fbStorage->colorTarget != nullptr) && p.curWorkload->rs64Sun.valid && p.worker->device->getCapabilities().rayQuery;
+        const bool fogWanted = !newView && lightsCfg.fogShafts && p.rs64Lights && (p.fbStorage->colorTarget != nullptr) && p.curWorkload->rs64Sun.valid && p.worker->device->getCapabilities().rayQuery;
+        const bool lightShadowsWanted = !newView && rs64lights::sceneWanted(false, lightsWanted, lightsCfg.lightShadows, p.worker->device->getCapabilities().rayQuery);
         const bool sceneWanted = shadowsWanted || lightShadowsWanted || fogWanted;
         const bool postWanted = lightsWanted || shadowsWanted || fogWanted;
+        framebuffer.rs64MSAA = lightsMSAA;
+        if (postWanted && lightsMSAA) {
+            prepareRS64MSAA(p, framebuffer);
+        }
+
         // The main 3D view is the perspective projection with the most draws; the pass runs after its last fragment (same view and projection), so other views such as the radar stay unlit.
         uint32_t lightsProjIndex = UINT32_MAX;
         uint32_t lightsLastIndex = UINT32_MAX;
@@ -3267,7 +3270,7 @@ namespace RT64 {
 
             RS64LightsUpsampleDescriptorSet &us = *framebuffer.rs64LightsUpsampleSet;
             us.setBuffer(us.gLights, framebuffer.rs64LightsBuffer.get(), sizeof(interop::RS64LightsCB));
-            us.setTexture(us.gDepth, p.fbStorage->depthTarget->texture.get(), RenderTextureLayout::DEPTH_READ, p.fbStorage->depthTarget->textureView.get());
+            bindRS64Depth(p, framebuffer, us, us.gDepth);
             us.setTexture(us.gHalf, framebuffer.rs64LightsHalfTex.get(), RenderTextureLayout::SHADER_READ);
         }
 
@@ -3288,11 +3291,11 @@ namespace RT64 {
         memcpy(bytes, &cb, sizeof(cb));
         framebuffer.rs64LightsBuffer->unmap();
         framebuffer.rs64LightsSet->setBuffer(framebuffer.rs64LightsSet->gLights, framebuffer.rs64LightsBuffer.get(), sizeof(interop::RS64LightsCB));
-        framebuffer.rs64LightsSet->setTexture(framebuffer.rs64LightsSet->gDepth, p.fbStorage->depthTarget->texture.get(), RenderTextureLayout::DEPTH_READ, p.fbStorage->depthTarget->textureView.get());
+        bindRS64Depth(p, framebuffer, *framebuffer.rs64LightsSet, framebuffer.rs64LightsSet->gDepth);
         if (framebuffer.rs64LightsShadowedSet) {
             framebuffer.rs64LightsShadowedSet->setBuffer(framebuffer.rs64LightsShadowedSet->gParams, framebuffer.rs64LightsBuffer.get(), sizeof(interop::RS64LightsCB));
-            framebuffer.rs64LightsShadowedSet->setTexture(framebuffer.rs64LightsShadowedSet->gDepth, p.fbStorage->depthTarget->texture.get(), RenderTextureLayout::DEPTH_READ, p.fbStorage->depthTarget->textureView.get());
-            framebuffer.rs64LightsShadowedSet->setTexture(framebuffer.rs64LightsShadowedSet->gColor, p.fbStorage->depthTarget->texture.get(), RenderTextureLayout::DEPTH_READ, p.fbStorage->depthTarget->textureView.get());
+            bindRS64Depth(p, framebuffer, *framebuffer.rs64LightsShadowedSet, framebuffer.rs64LightsShadowedSet->gDepth);
+            bindRS64Depth(p, framebuffer, *framebuffer.rs64LightsShadowedSet, framebuffer.rs64LightsShadowedSet->gColor);
         }
         framebuffer.rs64LightsDebug = (cfg.debugMode != 0);
 
@@ -3305,7 +3308,7 @@ namespace RT64 {
             memcpy(bytes, &cb, sizeof(cb));
             framebuffer.rs64PanelsBuffer->unmap();
             framebuffer.rs64PanelsSet->setBuffer(framebuffer.rs64PanelsSet->gLights, framebuffer.rs64PanelsBuffer.get(), sizeof(interop::RS64LightsCB));
-            framebuffer.rs64PanelsSet->setTexture(framebuffer.rs64PanelsSet->gDepth, p.fbStorage->depthTarget->texture.get(), RenderTextureLayout::DEPTH_READ, p.fbStorage->depthTarget->textureView.get());
+            bindRS64Depth(p, framebuffer, *framebuffer.rs64PanelsSet, framebuffer.rs64PanelsSet->gDepth);
         }
 
         return true;
@@ -3384,12 +3387,12 @@ namespace RT64 {
         memcpy(bytes, &cb, sizeof(cb));
         framebuffer.rs64ShadowsBuffer->unmap();
         framebuffer.rs64ShadowsSet->setBuffer(framebuffer.rs64ShadowsSet->gParams, framebuffer.rs64ShadowsBuffer.get(), sizeof(interop::RS64ShadowsCB));
-        framebuffer.rs64ShadowsSet->setTexture(framebuffer.rs64ShadowsSet->gDepth, p.fbStorage->depthTarget->texture.get(), RenderTextureLayout::DEPTH_READ, p.fbStorage->depthTarget->textureView.get());
+        bindRS64Depth(p, framebuffer, *framebuffer.rs64ShadowsSet, framebuffer.rs64ShadowsSet->gDepth);
         if (soft) {
-            framebuffer.rs64ShadowsSet->setTexture(framebuffer.rs64ShadowsSet->gColor, p.fbStorage->colorTarget->texture.get(), RenderTextureLayout::SHADER_READ);
+            framebuffer.rs64ShadowsSet->setTexture(framebuffer.rs64ShadowsSet->gColor, p.fbStorage->colorTarget->getResolvedTexture(), RenderTextureLayout::SHADER_READ);
         }
         else {
-            framebuffer.rs64ShadowsSet->setTexture(framebuffer.rs64ShadowsSet->gColor, p.fbStorage->depthTarget->texture.get(), RenderTextureLayout::DEPTH_READ, p.fbStorage->depthTarget->textureView.get());
+            bindRS64Depth(p, framebuffer, *framebuffer.rs64ShadowsSet, framebuffer.rs64ShadowsSet->gColor);
         }
 
         framebuffer.rs64ShadowsDebug = (cfg.shadowsDebug != 0);
@@ -3420,14 +3423,14 @@ namespace RT64 {
             RS64ShadowBlurDescriptorSet &hs = *framebuffer.rs64BlurHSet;
             RS64ShadowBlurDescriptorSet &vs = *framebuffer.rs64BlurVSet;
             hs.setBuffer(hs.gBlur, framebuffer.rs64BlurHBuffer.get(), sizeof(interop::RS64ShadowBlurCB));
-            hs.setTexture(hs.gDepth, p.fbStorage->depthTarget->texture.get(), RenderTextureLayout::DEPTH_READ, p.fbStorage->depthTarget->textureView.get());
+            bindRS64Depth(p, framebuffer, hs, hs.gDepth);
             const uint32_t w = framebuffer.rs64HistTarget;
             hs.setTexture(hs.gMask, framebuffer.rs64TemporalOn ? framebuffer.rs64HistMask[w].get() : framebuffer.rs64SoftMask.get(), RenderTextureLayout::SHADER_READ);
             hs.setTexture(hs.gIndirect, framebuffer.rs64TemporalOn ? framebuffer.rs64HistIndirect[w].get() : framebuffer.rs64SoftIndirect.get(), RenderTextureLayout::SHADER_READ);
             if (framebuffer.rs64TemporalOn) {
                 RS64ShadowTemporalDescriptorSet &ts = *framebuffer.rs64TemporalSet;
                 ts.setBuffer(ts.gBlur, framebuffer.rs64BlurHBuffer.get(), sizeof(interop::RS64ShadowBlurCB));
-                ts.setTexture(ts.gDepth, p.fbStorage->depthTarget->texture.get(), RenderTextureLayout::DEPTH_READ, p.fbStorage->depthTarget->textureView.get());
+                bindRS64Depth(p, framebuffer, ts, ts.gDepth);
                 ts.setTexture(ts.gMask, framebuffer.rs64SoftMask.get(), RenderTextureLayout::SHADER_READ);
                 ts.setTexture(ts.gIndirect, framebuffer.rs64SoftIndirect.get(), RenderTextureLayout::SHADER_READ);
                 ts.setTexture(ts.gHistMask, framebuffer.rs64HistMask[w ^ 1].get(), RenderTextureLayout::SHADER_READ);
@@ -3435,7 +3438,7 @@ namespace RT64 {
             }
             vs.setTexture(vs.gIndirect, framebuffer.rs64SoftIndirectPing.get(), RenderTextureLayout::SHADER_READ);
             vs.setBuffer(vs.gBlur, framebuffer.rs64BlurVBuffer.get(), sizeof(interop::RS64ShadowBlurCB));
-            vs.setTexture(vs.gDepth, p.fbStorage->depthTarget->texture.get(), RenderTextureLayout::DEPTH_READ, p.fbStorage->depthTarget->textureView.get());
+            bindRS64Depth(p, framebuffer, vs, vs.gDepth);
             vs.setTexture(vs.gMask, framebuffer.rs64SoftPing.get(), RenderTextureLayout::SHADER_READ);
             if (framebuffer.rs64MirrorOn) {
                 const RenderTarget *ct = p.fbStorage->colorTarget;
@@ -3448,7 +3451,7 @@ namespace RT64 {
 
                 RS64WaterMirrorDescriptorSet &ms = *framebuffer.rs64MirrorSet;
                 ms.setBuffer(ms.gBlur, framebuffer.rs64BlurVBuffer.get(), sizeof(interop::RS64ShadowBlurCB));
-                ms.setTexture(ms.gDepth, p.fbStorage->depthTarget->texture.get(), RenderTextureLayout::DEPTH_READ, p.fbStorage->depthTarget->textureView.get());
+                bindRS64Depth(p, framebuffer, ms, ms.gDepth);
                 ms.setTexture(ms.gMirror, framebuffer.rs64SoftMirror.get(), RenderTextureLayout::SHADER_READ);
                 ms.setTexture(ms.gLate, framebuffer.rs64MirrorLate.get(), RenderTextureLayout::SHADER_READ);
             }
@@ -3818,7 +3821,7 @@ namespace RT64 {
             RenderTexture *ind = framebuffer.rs64SoftIndirect.get();
             RenderTexture *indPing = framebuffer.rs64SoftIndirectPing.get();
             // The trace reads the colour target for screen-space water reflections; it is written again by the compose.
-            RenderTexture *color = targetDrawCall.fbStorage->colorTarget->texture.get();
+            RenderTexture *color = targetDrawCall.fbStorage->colorTarget->getResolvedTexture();
             if (!framebuffer.rs64ReuseTrace) {
                 rs64TimingMark(worker, RS64TimeTrace);
                 const RenderTextureBarrier toMask[] = {
@@ -3889,7 +3892,8 @@ namespace RT64 {
             worker->commandList->drawInstanced(3, 1, 0, 0);
 
             const RenderTextureBarrier toCompose[] = {
-                RenderTextureBarrier(ping, RenderTextureLayout::SHADER_READ), RenderTextureBarrier(indPing, RenderTextureLayout::SHADER_READ), RenderTextureBarrier(color, RenderTextureLayout::COLOR_WRITE)
+                RenderTextureBarrier(ping, RenderTextureLayout::SHADER_READ), RenderTextureBarrier(indPing, RenderTextureLayout::SHADER_READ),
+                RenderTextureBarrier(targetDrawCall.fbStorage->colorTarget->texture.get(), RenderTextureLayout::COLOR_WRITE)
             };
             worker->commandList->barriers(RenderBarrierStage::GRAPHICS, toCompose, uint32_t(std::size(toCompose)));
             worker->commandList->setFramebuffer(targetDrawCall.fbStorage->colorWriteDepthRead.get());
@@ -4022,17 +4026,80 @@ namespace RT64 {
         memcpy(bytes, &cb, sizeof(cb));
         framebuffer.rs64FogBuffer->unmap();
         framebuffer.rs64FogSet->setBuffer(framebuffer.rs64FogSet->gParams, framebuffer.rs64FogBuffer.get(), sizeof(interop::RS64FogShaftsCB));
-        framebuffer.rs64FogSet->setTexture(framebuffer.rs64FogSet->gDepth, p.fbStorage->depthTarget->texture.get(), RenderTextureLayout::DEPTH_READ, p.fbStorage->depthTarget->textureView.get());
-        framebuffer.rs64FogSet->setTexture(framebuffer.rs64FogSet->gColor, p.fbStorage->depthTarget->texture.get(), RenderTextureLayout::DEPTH_READ, p.fbStorage->depthTarget->textureView.get());
+        bindRS64Depth(p, framebuffer, *framebuffer.rs64FogSet, framebuffer.rs64FogSet->gDepth);
+        bindRS64Depth(p, framebuffer, *framebuffer.rs64FogSet, framebuffer.rs64FogSet->gColor);
         framebuffer.rs64FogDebug = (cfg.fogShaftsDebug != 0);
         return true;
+    }
+
+    void FramebufferRenderer::prepareRS64MSAA(const DrawParams &p, Framebuffer &framebuffer) {
+        const RenderTarget *dt = p.fbStorage->depthTarget;
+        if (!framebuffer.rs64DepthCopy || (framebuffer.rs64DepthCopyW != dt->width) || (framebuffer.rs64DepthCopyH != dt->height)) {
+            framebuffer.rs64DepthCopyFb.reset();
+            framebuffer.rs64DepthCopy = p.worker->device->createTexture(RenderTextureDesc::ColorTarget(dt->width, dt->height, RenderFormat::R32_FLOAT));
+            const RenderTexture *targets[] = { framebuffer.rs64DepthCopy.get() };
+            framebuffer.rs64DepthCopyFb = p.worker->device->createFramebuffer(RenderFramebufferDesc(targets, 1));
+            framebuffer.rs64DepthCopyW = dt->width;
+            framebuffer.rs64DepthCopyH = dt->height;
+        }
+
+        framebuffer.rs64DepthResolveSet->setTexture(framebuffer.rs64DepthResolveSet->gInput, dt->texture.get(), RenderTextureLayout::DEPTH_READ, dt->textureView.get());
+    }
+
+    void FramebufferRenderer::bindRS64Depth(const DrawParams &p, const Framebuffer &framebuffer, RenderDescriptorSetBase &set, uint32_t slot) {
+        if (framebuffer.rs64MSAA && framebuffer.rs64DepthCopy) {
+            set.setTexture(slot, framebuffer.rs64DepthCopy.get(), RenderTextureLayout::SHADER_READ);
+        }
+        else {
+            set.setTexture(slot, p.fbStorage->depthTarget->texture.get(), RenderTextureLayout::DEPTH_READ, p.fbStorage->depthTarget->textureView.get());
+        }
+    }
+
+    // Copies sample 0 of the MSAA depth (and resolves the colour when a pass reads it) for the passes that follow, then rebinds the target read-only.
+    void FramebufferRenderer::recordRS64MSAAResolve(RenderWorker *worker, const Framebuffer &framebuffer, bool resolveColor, bool &depthState) {
+        RenderFramebufferStorage *fbStorage = framebuffer.renderTargetDrawCall.fbStorage;
+        RenderTexture *copy = framebuffer.rs64DepthCopy.get();
+        if (copy == nullptr) {
+            return;
+        }
+
+        submitDepthAccess(worker, fbStorage, true, depthState);
+        worker->commandList->barriers(RenderBarrierStage::GRAPHICS, RenderTextureBarrier(copy, RenderTextureLayout::COLOR_WRITE));
+        worker->commandList->setFramebuffer(framebuffer.rs64DepthCopyFb.get());
+        worker->commandList->setViewports(RenderViewport(0.0f, 0.0f, float(framebuffer.rs64DepthCopyW), float(framebuffer.rs64DepthCopyH)));
+        worker->commandList->setScissors(RenderRect(0, 0, int32_t(framebuffer.rs64DepthCopyW), int32_t(framebuffer.rs64DepthCopyH)));
+        worker->commandList->setPipeline(shaderLibrary->rs64DepthResolve.pipeline.get());
+        worker->commandList->setGraphicsPipelineLayout(shaderLibrary->rs64DepthResolve.pipelineLayout.get());
+        worker->commandList->setGraphicsDescriptorSet(framebuffer.rs64DepthResolveSet->get(), 0);
+        worker->commandList->setVertexBuffers(0, nullptr, 0, nullptr);
+        worker->commandList->drawInstanced(3, 1, 0, 0);
+
+        RenderTarget *colorTarget = fbStorage->colorTarget;
+        if (resolveColor) {
+            // Marked again after: the frame's own resolve must still run once the rest of the frame is drawn.
+            colorTarget->markForResolve();
+            colorTarget->resolveTarget(worker, shaderLibrary);
+            colorTarget->markForResolve();
+        }
+
+        const RenderTextureBarrier toPasses[] = {
+            RenderTextureBarrier(copy, RenderTextureLayout::SHADER_READ), RenderTextureBarrier(colorTarget->getResolvedTexture(), RenderTextureLayout::SHADER_READ),
+            RenderTextureBarrier(colorTarget->texture.get(), RenderTextureLayout::COLOR_WRITE)
+        };
+
+        worker->commandList->barriers(RenderBarrierStage::GRAPHICS, toPasses, uint32_t(std::size(toPasses)));
+        worker->commandList->setFramebuffer(fbStorage->colorWriteDepthRead.get());
     }
 
     // Horizon mirror: copies the colour target after the view's last draw, then swaps the sky missed water rays reflected for what is drawn there now.
     void FramebufferRenderer::recordRS64Mirror(RenderWorker *worker, const Framebuffer &framebuffer, bool &depthState) {
 
         const RenderTargetDrawCall &targetDrawCall = framebuffer.renderTargetDrawCall;
-        RenderTexture *color = targetDrawCall.fbStorage->colorTarget->texture.get();
+        if (framebuffer.rs64MSAA) {
+            recordRS64MSAAResolve(worker, framebuffer, true, depthState);
+        }
+
+        RenderTexture *color = targetDrawCall.fbStorage->colorTarget->getResolvedTexture();
         RenderTexture *copy = framebuffer.rs64MirrorLate.get();
         const RenderTextureBarrier toCopy[] = { RenderTextureBarrier(color, RenderTextureLayout::COPY_SOURCE), RenderTextureBarrier(copy, RenderTextureLayout::COPY_DEST) };
 
@@ -4040,7 +4107,7 @@ namespace RT64 {
         worker->commandList->copyTexture(copy, color);
 
         const RenderTextureBarrier toDraw[] = {
-            RenderTextureBarrier(color, RenderTextureLayout::COLOR_WRITE), RenderTextureBarrier(copy, RenderTextureLayout::SHADER_READ),
+            RenderTextureBarrier(targetDrawCall.fbStorage->colorTarget->texture.get(), RenderTextureLayout::COLOR_WRITE), RenderTextureBarrier(copy, RenderTextureLayout::SHADER_READ),
             RenderTextureBarrier(framebuffer.rs64SoftMirror.get(), RenderTextureLayout::SHADER_READ)
         };
 

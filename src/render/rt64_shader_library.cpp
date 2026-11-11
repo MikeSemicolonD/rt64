@@ -12,6 +12,7 @@
 #include "shaders/FbChangesDrawColorPS.hlsl.spirv.h"
 #include "shaders/RS64LightsPS.hlsl.spirv.h"
 #include "shaders/RS64LightsUpsamplePS.hlsl.spirv.h"
+#include "shaders/RS64DepthResolvePS.hlsl.spirv.h"
 #include "shaders/RS64TerrainVS.hlsl.spirv.h"
 #include "shaders/RS64TerrainPS.hlsl.spirv.h"
 #ifndef __APPLE__
@@ -76,6 +77,7 @@
 #   include "shaders/FbChangesDrawColorPS.hlsl.dxil.h"
 #   include "shaders/RS64LightsPS.hlsl.dxil.h"
 #   include "shaders/RS64LightsUpsamplePS.hlsl.dxil.h"
+#   include "shaders/RS64DepthResolvePS.hlsl.dxil.h"
 #   include "shaders/RS64TerrainVS.hlsl.dxil.h"
 #   include "shaders/RS64TerrainPS.hlsl.dxil.h"
 #   include "shaders/RS64TerrainPSPacks.hlsl.dxil.h"
@@ -137,6 +139,7 @@
 #   include "shaders/FbChangesDrawColorPS.hlsl.metal.h"
 #   include "shaders/RS64LightsPS.hlsl.metal.h"
 #   include "shaders/RS64LightsUpsamplePS.hlsl.metal.h"
+#   include "shaders/RS64DepthResolvePS.hlsl.metal.h"
 #   include "shaders/RS64TerrainVS.hlsl.metal.h"
 #   include "shaders/RS64TerrainPS.hlsl.metal.h"
 #   include "shaders/FbChangesDrawDepthPS.hlsl.metal.h"
@@ -956,6 +959,19 @@ namespace RT64 {
             pipelineDesc.renderTargetBlend[0] = tint;
             pipelineDesc.pipelineLayout = rs64LightsUpsample.pipelineLayout.get();
             rs64LightsUpsample.pipeline = device->createGraphicsPipeline(pipelineDesc);
+
+            // Under MSAA the RS64 passes read sample 0 of the depth target from an R32F copy.
+            RenderTargetCopyDescriptorSet resolveSet;
+            layoutBuilder.begin();
+            layoutBuilder.addDescriptorSet(resolveSet);
+            layoutBuilder.end();
+            rs64DepthResolve.pipelineLayout = layoutBuilder.create(device);
+            std::unique_ptr<RenderShader> resolveShader = device->createShader(CREATE_SHADER_INPUTS(RS64DepthResolvePSBlobDXIL, RS64DepthResolvePSBlobSPIRV, RS64DepthResolvePSBlobMSL, "PSMain", shaderFormat));
+            RenderGraphicsPipelineDesc resolveDesc = halfDesc;
+            resolveDesc.renderTargetFormat[0] = RenderFormat::R32_FLOAT;
+            resolveDesc.pixelShader = resolveShader.get();
+            resolveDesc.pipelineLayout = rs64DepthResolve.pipelineLayout.get();
+            rs64DepthResolve.pipeline = device->createGraphicsPipeline(resolveDesc);
         }
 
         // RS64 sun shadows: inline RayQuery against the per-frame scene, only on devices with ray queries.
