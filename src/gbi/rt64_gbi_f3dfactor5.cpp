@@ -1399,6 +1399,14 @@ namespace RT64 {
         }
         // Re-snapshots the HMP map when it changed; false while no valid map is loaded.
         static bool f5_refresh_terrain_map(State* state) {
+            // The capture and the first terrain record both ask in one task, whose RDRAM is a fixed snapshot: scan and hash the map once.
+            static uint64_t s_refresh_task = ~0ull;
+            static bool s_refresh_ok = false;
+            if (state->displayListCounter == s_refresh_task) {
+                return s_refresh_ok;
+            }
+            s_refresh_task = state->displayListCounter;
+            s_refresh_ok = false;
             const uint8_t* ram = state->RDRAM;
             const uint32_t D = 0x80136DC0u;
             const uint32_t idxArr = rd_be_u32(ram, D), tab = rd_be_u32(ram, D + 4);
@@ -1465,6 +1473,7 @@ namespace RT64 {
                     if (x0 == UINT32_MAX) {
                         s_terrain_hash = h;
                         s_terrain_tab = tab;
+                        s_refresh_ok = true;
                         return true;
                     }
 
@@ -1497,6 +1506,7 @@ namespace RT64 {
                     std::fprintf(stderr, "[rt-terrain] map %ux%u tab=%08X version=%llu\n", W, H, tab, (unsigned long long)m->version);
                 }
             }
+            s_refresh_ok = true;
             return true;
         }
         static void f5_capture_terrain(State* state) {
