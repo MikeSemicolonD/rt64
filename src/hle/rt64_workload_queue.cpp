@@ -199,7 +199,7 @@ namespace RT64 {
         float resolutionMultiplier;
         const auto resolutionMode = ext.sharedResources->userConfig.resolution;
         // SSAA downsamples with a compute pass, which feature level 10 devices don't have.
-        const int ssaaMultiplier = ext.device->getCapabilities().computeShaders ? std::max(ext.sharedResources->userConfig.downsampleMultiplier, 1) : 1;
+        int ssaaMultiplier = ext.device->getCapabilities().computeShaders ? std::max(ext.sharedResources->userConfig.downsampleMultiplier, 1) : 1;
         switch (resolutionMode) {
         case UserConfiguration::Resolution::WindowIntegerScale:
 #if defined(__ANDROID__)
@@ -214,8 +214,6 @@ namespace RT64 {
             }
 #endif
 
-            // SSAA renders at the window's scale times the multiplier and downsamples to the window; without this it downsampled below it.
-            resolutionMultiplier *= float(ssaaMultiplier);
             break;
         case UserConfiguration::Resolution::Manual:
             resolutionMultiplier = float(ext.sharedResources->userConfig.resolutionMultiplier);
@@ -225,6 +223,11 @@ namespace RT64 {
             resolutionMultiplier = 1.0f;
             break;
         }
+
+        // SSAA renders at the chosen scale times the multiplier and downsamples back to it; without this it downsampled below it (3X + SSAA 2X showed 1.5X).
+        ext.sharedResources->ssaaBaseScale.store(resolutionMultiplier, std::memory_order_relaxed);
+        ssaaMultiplier = rs64CappedSsaa(ssaaMultiplier, resolutionMultiplier);
+        resolutionMultiplier *= float(ssaaMultiplier);
 
         uint32_t msaaSampleCount = ext.sharedResources->userConfig.msaaSampleCount();
 

@@ -36,6 +36,8 @@ namespace RT64 {
         uint32_t swapChainHeight = 0;
         uint32_t swapChainRate = 0;
         hlslpp::float2 resolutionScale = 1.0f;
+        // The resolution multiplier before SSAA, so the host menu offers only the SSAA steps the cap allows (rs64CappedSsaa).
+        std::atomic<float> ssaaBaseScale{ 1.0f };
         uint32_t targetRate = 0;
         UserConfiguration userConfig;
         EnhancementConfiguration enhancementConfig;

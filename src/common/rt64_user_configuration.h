@@ -9,6 +9,16 @@
 using json = nlohmann::json;
 
 namespace RT64 {
+    // RS64: SSAA halves while the resolution scale times it would pass 10x the N64 frame (2400 lines, about 4K), where no card holds speed.
+    inline int rs64CappedSsaa(int ssaa, float baseScale) {
+        const float MaxScale = 10.0f;
+        while ((ssaa > 1) && (baseScale * float(ssaa) > MaxScale)) {
+            ssaa /= 2;
+        }
+
+        return ssaa;
+    }
+
     struct UserConfiguration {
         static const int ResolutionMultiplierLimit;
 
