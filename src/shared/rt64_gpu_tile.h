@@ -55,12 +55,15 @@ namespace interop {
         float2 tcScale;
         uint2 texelShift;
         uint2 texelMask;
-        uint textureIndex;
         float3 textureDimensions;
+        uint textureIndex;
         GPUTileFlags flags;
         uint blendTextureIndex;
         float blendPrevWeight;
+        uint padding;
     };
 #ifdef HLSL_CPU
+    static_assert(sizeof(GPUTile) == 64);
+    static_assert(offsetof(GPUTile, textureDimensions) == 32);
 };
 #endif

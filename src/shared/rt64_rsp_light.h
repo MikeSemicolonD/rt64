@@ -11,12 +11,16 @@ namespace interop {
 #endif
     struct RSPLight {
         float3 posDir;
-        float3 col;
-        float3 colc;
         uint kc;
+        float3 col;
         uint kl;
+        float3 colc;
         uint kq;
     };
+#ifdef HLSL_CPU
+    static_assert(sizeof(RSPLight) == 48);
+    static_assert(offsetof(RSPLight, col) == 16);
+#endif
 
 #ifndef HLSL_CPU
     float computeAttenuation(float distance, const RSPLight light) {

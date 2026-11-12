@@ -15,8 +15,11 @@ namespace interop {
 #endif
     struct RSPLookAt {
         float3 x;
+        float xPad;
         float3 y;
+        float yPad;
     };
 #ifdef HLSL_CPU
+    static_assert(sizeof(RSPLookAt) == 32);
 };
 #endif

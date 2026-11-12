@@ -13,7 +13,9 @@ namespace interop {
 #endif
     struct RSPViewport {
         float3 scale;
+        float scalePad;
         float3 translate;
+        float translatePad;
 
         static RSPViewport identity() {
             RSPViewport viewport;
@@ -41,5 +43,6 @@ namespace interop {
 #endif
     };
 #ifdef HLSL_CPU
+    static_assert(sizeof(RSPViewport) == 32);
 };
 #endif
