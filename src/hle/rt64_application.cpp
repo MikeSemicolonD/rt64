@@ -139,11 +139,11 @@ namespace RT64 {
         chosenGraphicsAPI = UserConfiguration::resolveGraphicsAPI(userConfig.graphicsAPI);
 
 #   ifdef _WIN32
-        // Windows can try falling back to the other API option in case of failure, and then to D3D11 for older GPUs.
+        // Windows falls back to the other API option in case of failure, and then to D3D11 for older GPUs, for an explicit choice too so a saved one that fails still starts.
 #       ifdef PLUME_D3D11_ENABLED
-        const uint32_t CreationAttempts = (userConfig.graphicsAPI == UserConfiguration::GraphicsAPI::Automatic) ? 3 : 1;
+        const uint32_t CreationAttempts = 3;
 #       else
-        const uint32_t CreationAttempts = (userConfig.graphicsAPI == UserConfiguration::GraphicsAPI::Automatic) ? 2 : 1;
+        const uint32_t CreationAttempts = 2;
 #       endif
 #   else
         const uint32_t CreationAttempts = 1;
