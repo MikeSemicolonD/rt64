@@ -325,7 +325,8 @@ namespace RT64 {
             boxFilter.pipeline = device->createComputePipeline(pipelineDesc);
         }
 
-        // Raytracing compose.
+        // Raytracing compose. The browser has no raytracing, and WebGPU can't blend its RGBA32F target.
+#   ifndef PLUME_WEBGPU_ENABLED
         {
             RaytracingComposeDescriptorSet descriptorSet(samplerLibrary);
             layoutBuilder.begin();
@@ -343,6 +344,7 @@ namespace RT64 {
             pipelineDesc.pixelShader = pixelShader.get();
             compose.pipeline = device->createGraphicsPipeline(pipelineDesc);
         }
+#   endif
 
         /*
         RT64_LOG_PRINTF("Creating the Im3d pipeline state");
@@ -550,8 +552,8 @@ namespace RT64 {
             rspModify.pipeline = device->createComputePipeline(pipelineDesc);
         }
 
-        // RSP Process.
-        {
+        // RSP Process. RSPProcessor transforms on the CPU where its 21 storage buffers don't fit.
+        if (deviceCapabilities.maxStorageBuffersPerStage >= 21) {
             RSPProcessDescriptorSet descriptorSet;
             layoutBuilder.begin();
             layoutBuilder.addPushConstant(0, 0, sizeof(uint32_t) * 4, RenderShaderStageFlag::COMPUTE);
@@ -1243,7 +1245,8 @@ namespace RT64 {
             postProcess.pipeline = device->createGraphicsPipeline(pipelineDesc);
         }
         
-        // Raytracing debug.
+        // Raytracing debug. The browser build has no inspector, and DebugPS includes the RT header's typed buffers.
+#   ifndef PLUME_WEBGPU_ENABLED
         {
             FramebufferRendererDescriptorCommonSet descriptorCommonSet(samplerLibrary, deviceCapabilities.raytracing);
             FramebufferRendererDescriptorTextureSet descriptorTextureSet;
@@ -1267,6 +1270,7 @@ namespace RT64 {
             pipelineDesc.multisampling = multisampling;
             debug.pipeline = device->createGraphicsPipeline(pipelineDesc);
         }
+#   endif
 
         // RSP Vertex Test Z.
         {

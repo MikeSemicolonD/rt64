@@ -77,7 +77,13 @@ namespace RT64 {
         }
 
         changes.pixelTexture = renderWorker->device->createTexture(RenderTextureDesc::Texture2D(alignedWidth, alignedHeight, 1, pixelFormat, RenderTextureFlag::STORAGE | RenderTextureFlag::UNORDERED_ACCESS));
-        changes.booleanTexture = renderWorker->device->createTexture(RenderTextureDesc::Texture2D(alignedWidth, alignedHeight, 1, RenderFormat::R8_UINT, RenderTextureFlag::STORAGE | RenderTextureFlag::UNORDERED_ACCESS));
+#   ifdef PLUME_WEBGPU_ENABLED
+        // r8uint isn't a WebGPU storage format; FbReadAny* declare r32ui there.
+        const RenderFormat booleanFormat = RenderFormat::R32_UINT;
+#   else
+        const RenderFormat booleanFormat = RenderFormat::R8_UINT;
+#   endif
+        changes.booleanTexture = renderWorker->device->createTexture(RenderTextureDesc::Texture2D(alignedWidth, alignedHeight, 1, booleanFormat, RenderTextureFlag::STORAGE | RenderTextureFlag::UNORDERED_ACCESS));
         changes.drawDescSet = std::make_unique<FramebufferDrawChangesDescriptorSet>(renderWorker->device);
         changes.drawDescSet->setTexture(changes.drawDescSet->gColor, changes.pixelTexture.get(), RenderTextureLayout::SHADER_READ);
         changes.drawDescSet->setTexture(changes.drawDescSet->gDepth, changes.pixelTexture.get(), RenderTextureLayout::SHADER_READ);

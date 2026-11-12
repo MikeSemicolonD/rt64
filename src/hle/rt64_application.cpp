@@ -23,7 +23,9 @@ namespace plume {
     extern std::unique_ptr<RenderInterface> CreateD3D12Interface();
     extern std::unique_ptr<RenderInterface> CreateD3D11Interface();
     extern std::unique_ptr<RenderInterface> CreateMetalInterface();
-#ifdef RT64_SDL_WINDOW_VULKAN
+#if defined(PLUME_WEBGPU_ENABLED)
+    extern std::unique_ptr<RenderInterface> CreateWebGPUInterface();
+#elif defined(RT64_SDL_WINDOW_VULKAN)
     extern std::unique_ptr<RenderInterface> CreateVulkanInterface(RenderWindow renderWindow);
 #else
     extern std::unique_ptr<RenderInterface> CreateVulkanInterface();
@@ -33,8 +35,11 @@ namespace plume {
 namespace RT64 {
     // Constants
 
+    // The browser build has no Vulkan: its "Vulkan" choice is WebGPU, which takes the same SPIR-V.
     static std::unique_ptr<RenderInterface> CreateVulkanInterfaceWrapper(RenderWindow renderWindow) {
-#ifdef RT64_SDL_WINDOW_VULKAN
+#if defined(PLUME_WEBGPU_ENABLED)
+        return plume::CreateWebGPUInterface();
+#elif defined(RT64_SDL_WINDOW_VULKAN)
         return plume::CreateVulkanInterface(renderWindow);
 #else
         return plume::CreateVulkanInterface();
@@ -661,6 +666,11 @@ namespace RT64 {
         if (GetRenderHookImgui() == nullptr) {
             return;
         }
+
+#   ifdef PLUME_WEBGPU_ENABLED
+        // The inspector's ImGui backends are per native API, and none is WebGPU yet.
+        return;
+#   endif
         if (presentQueue == nullptr) {
             return;
         }
@@ -676,6 +686,9 @@ namespace RT64 {
     void Application::processDeveloperShortcut(DeveloperShortcut developerShortcut) {
         switch (developerShortcut) {
         case DeveloperShortcut::Inspector: {
+#       ifdef PLUME_WEBGPU_ENABLED
+            break;
+#       endif
             if (userConfig.developerMode) {
                 const std::lock_guard lock(presentQueue->inspectorMutex);
                 if (!inspectorVisible) {

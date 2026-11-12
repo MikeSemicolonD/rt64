@@ -111,8 +111,11 @@ namespace RT64 {
             const RenderTextureView *view = nullptr;
             bool tmem = false;
 
+            // WebGPU only: the slot's own sampler, since its 16-sampler limit can't hold the 18 shared ones.
+            const RenderSampler *sampler = nullptr;
+
             bool operator==(const SlotSource &other) const {
-                return (texture == other.texture) && (view == other.view) && (tmem == other.tmem);
+                return (texture == other.texture) && (view == other.view) && (tmem == other.tmem) && (sampler == other.sampler);
             }
         };
 
@@ -129,6 +132,7 @@ namespace RT64 {
         std::unique_ptr<RenderTexture> slotDummyTMEM;
         bool slotDummiesTransitioned = false;
         const interop::GPUTile *slotGPUTiles = nullptr;
+        const interop::RDPTile *slotRDPTiles = nullptr;
         std::unique_ptr<RenderTexture> dummyColorTarget;
         std::unique_ptr<RenderTexture> dummyDepthTarget;
         std::unique_ptr<RenderTextureView> dummyColorTargetView;

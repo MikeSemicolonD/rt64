@@ -1693,6 +1693,7 @@ namespace RT64 {
                     framebufferRenderer->createGPUTiles(&workload.drawData.callTiles[gpuTileCursor], rdpTileCursor - gpuTileCursor,
                         &workload.drawData.gpuTiles[gpuTileCursor], &framebufferManager, ext.textureCache, workload.submissionFrame);
                     framebufferRenderer->slotGPUTiles = workload.drawData.gpuTiles.data();
+                    framebufferRenderer->slotRDPTiles = workload.drawData.rdpTiles.data();
 
                     // Upload the GPU tiles.
                     ext.tilesUploader->submit(ext.framebufferGraphicsWorker, {

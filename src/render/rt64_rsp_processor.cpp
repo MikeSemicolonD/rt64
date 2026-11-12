@@ -92,7 +92,9 @@ namespace RT64 {
         modifySet = std::make_unique<RSPModifyDescriptorSet>(device);
         // ROGUESQ_CPU_RSP=1 transforms vertices on the CPU even with compute, for GPUs slower than the CPU (Raspberry Pi).
         const char *cpuSetting = std::getenv("ROGUESQ_CPU_RSP");
-        cpuProcessing = !device->getCapabilities().computeShaders || ((cpuSetting != nullptr) && (cpuSetting[0] == '1'));
+        // RSPProcessCS binds 21 storage buffers; WebGPU devices often allow fewer per stage.
+        const RenderDeviceCapabilities &capabilities = device->getCapabilities();
+        cpuProcessing = !capabilities.computeShaders || (capabilities.maxStorageBuffersPerStage < 21) || ((cpuSetting != nullptr) && (cpuSetting[0] == '1'));
     }
 
     RSPProcessor::~RSPProcessor() { }

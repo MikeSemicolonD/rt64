@@ -620,6 +620,33 @@ namespace RT64 {
         return true;
     }
     
+#ifdef PLUME_WEBGPU_ENABLED
+    // The sampler the tile's path in TextureSampler.hlsli reads: linear with mipmaps, nearest otherwise, in the tile's address modes.
+    static const RenderSampler *slotSamplerFor(const SamplerLibrary &library, const interop::RDPTile &rdpTile, const interop::GPUTile &gpuTile) {
+        const SamplerSet &set = gpuTile.flags.hasMipmaps ? library.linear : library.nearest;
+        switch (rdpTile.nativeSampler) {
+        case NATIVE_SAMPLER_WRAP_WRAP:
+            return set.wrapWrap.get();
+        case NATIVE_SAMPLER_WRAP_MIRROR:
+            return set.wrapMirror.get();
+        case NATIVE_SAMPLER_WRAP_CLAMP:
+            return set.wrapClamp.get();
+        case NATIVE_SAMPLER_MIRROR_WRAP:
+            return set.mirrorWrap.get();
+        case NATIVE_SAMPLER_MIRROR_MIRROR:
+            return set.mirrorMirror.get();
+        case NATIVE_SAMPLER_MIRROR_CLAMP:
+            return set.mirrorClamp.get();
+        case NATIVE_SAMPLER_CLAMP_WRAP:
+            return set.clampWrap.get();
+        case NATIVE_SAMPLER_CLAMP_MIRROR:
+            return set.clampMirror.get();
+        default:
+            return set.clampClamp.get();
+        }
+    }
+#endif
+
     void FramebufferRenderer::submitRasterScene(RenderWorker *worker, const Framebuffer &framebuffer, RenderFramebufferStorage *fbStorage, const RasterScene &rasterScene, bool &depthState) {
         InstanceDrawCall::Type previousCallType = InstanceDrawCall::Type::Unknown;
         bool previousVertexTestZ = false;
@@ -677,6 +704,12 @@ namespace RT64 {
                 if (textureIndex < slotSources.size()) {
                     sources[k] = slotSources[textureIndex];
                 }
+
+#           ifdef PLUME_WEBGPU_ENABLED
+                if (slotRDPTiles != nullptr) {
+                    sources[k].sampler = slotSamplerFor(shaderLibrary->samplerLibrary, slotRDPTiles[indices.rdpTileIndex + k], slotGPUTiles[indices.rdpTileIndex + k]);
+                }
+#           endif
             }
 
             if (slotSetBound && (sources == slotTextureSetSources)) {
@@ -692,6 +725,11 @@ namespace RT64 {
                 if (k < slotTMEMCount) {
                     tmemSet->setTexture(k, isTMEM ? sources[k].texture : slotDummyTMEM.get(), RenderTextureLayout::SHADER_READ, isTMEM ? sources[k].view : nullptr);
                 }
+
+#           ifdef PLUME_WEBGPU_ENABLED
+                const RenderSampler *sampler = (sources[k].sampler != nullptr) ? sources[k].sampler : shaderLibrary->samplerLibrary.nearest.clampClamp.get();
+                textureSet->setSampler(textureSet->gSlotSamplers + k, sampler);
+#           endif
             }
 
             slotTextureSetSources = sources;

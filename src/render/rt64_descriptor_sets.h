@@ -296,6 +296,7 @@ namespace RT64 {
         uint32_t textureCacheSize = 0;
         uint32_t gTextures;
         uint32_t gTMEM;
+        uint32_t gSlotSamplers = 0;
 
         // Texture-slot sets are a plain range of textureCacheSize entries: drivers without descriptor indexing (Raspberry Pi V3D) reject the boundless layout.
         FramebufferRendererDescriptorTextureSet(RenderDevice *device = nullptr, uint32_t textureCacheSize = 0, bool slots = false) {
@@ -310,6 +311,14 @@ namespace RT64 {
                 for (uint32_t k = 1; k < textureCacheSize; k++) {
                     builder.addTexture(k);
                 }
+
+#           ifdef PLUME_WEBGPU_ENABLED
+                // gSlotSampler0..7 (FbRendererCommon.hlsli).
+                gSlotSamplers = builder.addSampler(8);
+                for (uint32_t k = 1; k < 8; k++) {
+                    builder.addSampler(8 + k);
+                }
+#           endif
             }
             else {
                 gTextures = builder.addTexture(0, UpperRange);
