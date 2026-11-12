@@ -10,4 +10,6 @@
 #define HLSLPP_SCALAR
 #endif
 
+// hlsl++'s scalar path calls labs without including stdlib.h; the browser build's headers don't pull it in.
+#include <stdlib.h>
 #include "hlsl++.h"

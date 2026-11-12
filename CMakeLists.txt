@@ -122,12 +122,12 @@ else()
     add_subdirectory(src/tools/file_to_c)
 endif()
 add_subdirectory(src/contrib/re-spirv)
-if (NOT ANDROID)
+if (NOT ANDROID AND NOT EMSCRIPTEN)
     add_subdirectory(src/contrib/nativefiledialog-extended)
 endif()
 add_subdirectory(src/contrib/zstd/build/cmake)
 
-if (CMAKE_SYSTEM_NAME MATCHES "Linux" AND RT64_SDL_WINDOW_VULKAN)
+if ((CMAKE_SYSTEM_NAME MATCHES "Linux" OR EMSCRIPTEN) AND RT64_SDL_WINDOW_VULKAN)
     set(PLUME_SDL_VULKAN_ENABLED TRUE)
 elseif (APPLE)
     set(PLUME_APPLE_RETINA_ENABLED OFF)
@@ -390,7 +390,7 @@ add_compile_definitions(
     IMGUI_IMPL_VULKAN_NO_PROTOTYPES
 )
 
-if (CMAKE_SYSTEM_NAME MATCHES "Linux" AND RT64_SDL_WINDOW_VULKAN)
+if ((CMAKE_SYSTEM_NAME MATCHES "Linux" OR EMSCRIPTEN) AND RT64_SDL_WINDOW_VULKAN)
     add_compile_definitions("PLUME_SDL_VULKAN_ENABLED")
     add_compile_definitions("RT64_SDL_WINDOW_VULKAN")
 endif()
@@ -538,7 +538,7 @@ set_target_properties(rt64 PROPERTIES PREFIX "")
 
 # Add common libraries.
 target_link_libraries(rt64 re-spirv)
-if (NOT ANDROID)
+if (NOT ANDROID AND NOT EMSCRIPTEN)
     target_link_libraries(rt64 nfd)
 endif()
 target_link_libraries(rt64 libzstd_static)

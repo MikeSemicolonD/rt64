@@ -116,7 +116,7 @@ namespace RT64 {
         bounds.top = rect.top;
         bounds.width = rect.right - rect.left;
         bounds.height = rect.bottom - rect.top;
-#   elif defined(__linux__) || defined(__APPLE__) || defined(__ANDROID__)
+#   elif defined(__linux__) || defined(__APPLE__) || defined(__ANDROID__) || defined(__EMSCRIPTEN__)
         if (SDL_VideoInit(nullptr) != 0) {
             printf("Failed to init SDL2 video: %s\n", SDL_GetError());
             assert(false && "Failed to init SDL2 video");

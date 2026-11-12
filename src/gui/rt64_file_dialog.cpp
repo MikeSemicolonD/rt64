@@ -6,9 +6,9 @@
 
 #include <cassert>
 
-#if defined(__ANDROID__)
+#if defined(__ANDROID__) || defined(__EMSCRIPTEN__)
 namespace RT64 {
-    // No native file dialogs on Android.
+    // No native file dialogs on Android or in the browser.
     std::atomic<bool> FileDialog::isOpen = false;
     void FileDialog::initialize() { }
     void FileDialog::finish() { }
