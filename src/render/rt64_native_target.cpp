@@ -21,7 +21,8 @@ namespace RT64 {
     
     void NativeTarget::resetBufferHistory() {
         if (readBufferHistoryCount > 1) {
-            std::swap(readBufferHistory.front(), readBufferHistory.back());
+            // The newest buffer in use, not back(): entries past the count can be recycled spares with no nativeBuffer, which the next copyFromRAM reads as the previous frame.
+            std::swap(readBufferHistory.front(), readBufferHistory[readBufferHistoryCount - 1]);
             readBufferHistoryCount = 1;
         }
 
