@@ -57,6 +57,7 @@ namespace RT64 {
         uint32_t outWidth = 0;
         uint32_t outHeight = 0;
         uint32_t rowWidth = 0;
+        float pixelAspect = 1.0f;
         bool rgba8 = true;
         bool requested = false;
         int taken = 0;
@@ -122,6 +123,8 @@ namespace RT64 {
         const float hdH = float(nativeSize.y) * float(params.resolutionScale.y) / float(params.downsamplingScale);
         const float cropW = (nativeSize.x > 1) ? (hdW - hdW / float(nativeSize.x)) : hdW;
         const float cropH = (nativeSize.y > 1) ? (hdH - hdH / float(nativeSize.y)) : hdH;
+        // The VI pass widens each framebuffer pixel by this on screen (VIRenderer::getViewportAndScissor), so the PNG does too.
+        s.pixelAspect = (params.vi != nullptr) && params.removeBlackBorders ? params.vi->pixelAspect() : 1.0f;
         s.outWidth = (cropW >= 1.0f) ? std::min(uint32_t(cropW), s.width) : s.width;
         s.outHeight = (cropH >= 1.0f) ? std::min(uint32_t(cropH), s.height) : s.height;
 
@@ -175,12 +178,12 @@ namespace RT64 {
     static void rs64WriteScreenshot() {
         RS64Screenshot &s = rs64Screenshot;
         const uint8_t *src = static_cast<const uint8_t *>(s.buffer->map());
-        const uint32_t ow = s.outWidth;
+        const uint32_t fw = s.outWidth;
         const uint32_t oh = s.outHeight;
-        std::vector<uint8_t> rgba(size_t(ow) * oh * 4);
+        std::vector<uint8_t> raw(size_t(fw) * oh * 4);
         for (uint32_t y = 0; y < oh; y++) {
-            for (uint32_t x = 0; x < ow; x++) {
-                uint8_t *dst = &rgba[(size_t(y) * ow + x) * 4];
+            for (uint32_t x = 0; x < fw; x++) {
+                uint8_t *dst = &raw[(size_t(y) * fw + x) * 4];
                 if (s.rgba8) {
                     const uint8_t *p = &src[(size_t(y) * s.rowWidth + x) * 4];
                     dst[0] = p[0];
@@ -196,6 +199,24 @@ namespace RT64 {
                 }
 
                 dst[3] = 255;
+            }
+        }
+
+        // Stretch the rows to the width the screen shows them at, blending the two nearest source pixels.
+        const uint32_t ow = std::max(uint32_t(std::lround(double(fw) * s.pixelAspect)), 1U);
+        std::vector<uint8_t> rgba(size_t(ow) * oh * 4);
+        for (uint32_t x = 0; x < ow; x++) {
+            const double sx = std::clamp((double(x) + 0.5) * double(fw) / double(ow) - 0.5, 0.0, double(fw - 1));
+            const uint32_t x0 = uint32_t(sx);
+            const uint32_t x1 = std::min(x0 + 1, fw - 1);
+            const double t = sx - double(x0);
+            for (uint32_t y = 0; y < oh; y++) {
+                const uint8_t *a = &raw[(size_t(y) * fw + x0) * 4];
+                const uint8_t *b = &raw[(size_t(y) * fw + x1) * 4];
+                uint8_t *dst = &rgba[(size_t(y) * ow + x) * 4];
+                for (int c = 0; c < 4; c++) {
+                    dst[c] = uint8_t(std::lround(double(a[c]) * (1.0 - t) + double(b[c]) * t));
+                }
             }
         }
 
