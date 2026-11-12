@@ -13,7 +13,8 @@
 [[vk::push_constant]] ConstantBuffer<FbReinterpretCB> gConstants : register(b0);
 Texture2D<float4> gInputColor : register(t1);
 Texture1D<uint> gInputTLUT : register(t2);
-RWTexture2D<float4> gOutput : register(u3);
+// 25 is SPIR-V NonReadable: WebGPU allows these formats only as write-only storage textures.
+[[vk::ext_decorate(25)]] RWTexture2D<float4> gOutput : register(u3);
 
 float4 RGBA16toCI8(float4 inputColor, uint2 inputCoord, uint2 outputCoord) {
     // Drop down the input color to its RGBA16 version.

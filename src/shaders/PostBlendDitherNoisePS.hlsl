@@ -16,7 +16,7 @@ void PSMain(
     // Unused, but D3D12 links stages by register: without it COLOR1 lands in another register than RasterVSDynamic's and the pipeline fails.
     , nointerpolation in uint vertexRenderIndex : RIDX
     , nointerpolation in float4 vertexFlatColor : COLOR1
-    , [[vk::location(0)]] [[vk::index(0)]] out float4 resultColor : SV_TARGET0
+    , [[vk::location(0)]] out float4 resultColor : SV_TARGET0
 )
 {
     int2 pixelPosSeed = floor(vertexPosition.xy);

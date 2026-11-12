@@ -21,7 +21,7 @@ struct HistogramAverageCB {
 
 [[vk::push_constant]] ConstantBuffer<HistogramAverageCB> gConstants : register(b0);
 ByteAddressBuffer LuminanceHistogram : register(t1);
-RWTexture2D<float> LuminanceOutput : register(u2);
+[[vk::image_format("r32f")]] RWTexture2D<float> LuminanceOutput : register(u2);
 
 groupshared float HistogramShared[NUM_HISTOGRAM_BINS];
 
@@ -43,7 +43,7 @@ void CSMain(uint groupIndex : SV_GroupIndex) {
         float weightedAverage = (HistogramShared[0].x / max(float(gConstants.pixelCount) - countForThisBin, 1.0)) - 1.0;
         float weightedAverageLuminance = ((weightedAverage / 62.0) * gConstants.luminanceRange) + gConstants.minLuminance;
         float luminanceLastFrame = LuminanceOutput[uint2(0, 0)];
-        if (isinf(luminanceLastFrame) || isnan(luminanceLastFrame)) {
+        if (!(abs(luminanceLastFrame) <= 3.402823466e+38f)) {
             luminanceLastFrame = 1.0;
         }
 

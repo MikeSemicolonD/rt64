@@ -15,7 +15,8 @@ struct BicubicCB {
 
 [[vk::push_constant]] ConstantBuffer<BicubicCB> gConstants : register(b0);
 Texture2D<float4> gInput : register(t1);
-RWTexture2D<float4> gOutput : register(u2);
+// 25 is SPIR-V NonReadable: WebGPU allows these formats only as write-only storage textures.
+[[vk::ext_decorate(25)]] RWTexture2D<float4> gOutput : register(u2);
 SamplerState gSampler : register(s3);
 
 float4 cubic(float x) {

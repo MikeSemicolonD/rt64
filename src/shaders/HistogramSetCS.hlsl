@@ -11,7 +11,7 @@ struct HistogramSetCB {
 };
 
 [[vk::push_constant]] ConstantBuffer<HistogramSetCB> gConstants : register(b0);
-RWTexture2D<float> LuminanceOutput : register(u1);
+[[vk::image_format("r32f")]] RWTexture2D<float> LuminanceOutput : register(u1);
 
 [numthreads(1, 1, 1)]
 void CSMain(uint groupIndex : SV_GroupIndex) {
