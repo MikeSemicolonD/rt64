@@ -9,7 +9,13 @@ struct RSPModifyCB {
 };
 
 [[vk::push_constant]] ConstantBuffer<RSPModifyCB> gConstants : register(b0);
+#ifdef RT64_WEBGPU
+ByteAddressBuffer srcModifyPos : register(t1);
+#define MODIFY_POS(i) srcModifyPos.Load((i) * 4)
+#else
 Buffer<uint> srcModifyPos : register(t1);
+#define MODIFY_POS(i) srcModifyPos[i]
+#endif
 RWStructuredBuffer<float4> screenPos : register(u2);
 
 [numthreads(GROUP_SIZE, 1, 1)]
@@ -19,9 +25,9 @@ void CSMain(uint modifyIndex : SV_DispatchThreadID) {
     }
 
     const uint modifyOffset = modifyIndex * 2;
-    const bool modifyZ = srcModifyPos[modifyOffset] & 0x1;
-    const uint vertexIndex = srcModifyPos[modifyOffset] >> 1;
-    const uint modifyValue = srcModifyPos[modifyOffset + 1];
+    const bool modifyZ = MODIFY_POS(modifyOffset) & 0x1;
+    const uint vertexIndex = MODIFY_POS(modifyOffset) >> 1;
+    const uint modifyValue = MODIFY_POS(modifyOffset + 1);
     if (modifyZ) {
         screenPos[vertexIndex].z = modifyValue / 65536.0f;
     }

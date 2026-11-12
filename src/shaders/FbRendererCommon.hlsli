@@ -20,6 +20,35 @@ StructuredBuffer<RDPTile> RDPTiles : register(t3, space0);
 StructuredBuffer<GPUTile> GPUTiles : register(t4, space0);
 StructuredBuffer<RenderIndices> instanceRenderIndices : register(t5, space0);
 StructuredBuffer<RenderParams> DynamicRenderParams : register(t6, space0);
+#ifdef RT64_WEBGPU
+// WebGPU allows 16 samplers per stage: each texture slot has its own, set by the renderer to the tile's filter and address modes, and the named samplers only alias it (TextureSampler.hlsli samples with the slot's).
+SamplerState gSlotSampler0 : register(s8, space1);
+SamplerState gSlotSampler1 : register(s9, space1);
+SamplerState gSlotSampler2 : register(s10, space1);
+SamplerState gSlotSampler3 : register(s11, space1);
+SamplerState gSlotSampler4 : register(s12, space1);
+SamplerState gSlotSampler5 : register(s13, space1);
+SamplerState gSlotSampler6 : register(s14, space1);
+SamplerState gSlotSampler7 : register(s15, space1);
+#define gLinearWrapWrapSampler gSlotSampler0
+#define gLinearWrapMirrorSampler gSlotSampler0
+#define gLinearWrapClampSampler gSlotSampler0
+#define gLinearMirrorWrapSampler gSlotSampler0
+#define gLinearMirrorMirrorSampler gSlotSampler0
+#define gLinearMirrorClampSampler gSlotSampler0
+#define gLinearClampWrapSampler gSlotSampler0
+#define gLinearClampMirrorSampler gSlotSampler0
+#define gLinearClampClampSampler gSlotSampler0
+#define gNearestWrapWrapSampler gSlotSampler0
+#define gNearestWrapMirrorSampler gSlotSampler0
+#define gNearestWrapClampSampler gSlotSampler0
+#define gNearestMirrorWrapSampler gSlotSampler0
+#define gNearestMirrorMirrorSampler gSlotSampler0
+#define gNearestMirrorClampSampler gSlotSampler0
+#define gNearestClampWrapSampler gSlotSampler0
+#define gNearestClampMirrorSampler gSlotSampler0
+#define gNearestClampClampSampler gSlotSampler0
+#else
 SamplerState gLinearWrapWrapSampler : register(s7, space0);
 SamplerState gLinearWrapMirrorSampler : register(s8, space0);
 SamplerState gLinearWrapClampSampler : register(s9, space0);
@@ -38,6 +67,7 @@ SamplerState gNearestMirrorClampSampler : register(s21, space0);
 SamplerState gNearestClampWrapSampler : register(s22, space0);
 SamplerState gNearestClampMirrorSampler : register(s23, space0);
 SamplerState gNearestClampClampSampler : register(s24, space0);
+#endif
 
 #ifdef RT64_TEXTURE_SLOTS
 // Sets 1 and 2 - the draw's tiles 0-7 (SM 5.0 can't index resource arrays at run time; see TextureSampler.hlsli).

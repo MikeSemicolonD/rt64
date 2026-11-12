@@ -70,6 +70,12 @@ void computeLOD(OtherMode otherMode, uint rdpTileCount, float2 primLOD, float re
     }
 }
 
+#ifdef RT64_WEBGPU
+#define RT64_SLOT_SAMPLER(k, s) gSlotSampler##k
+#else
+#define RT64_SLOT_SAMPLER(k, s) s
+#endif
+
 #ifdef RT64_TEXTURE_SLOTS
 #define TileTexture uint
 #define TILE_TEXTURE(gpuTile) gTextureSlot
@@ -90,7 +96,7 @@ float4 tileTextureLoad(uint textureIndex, int3 coord) {
 
 float4 tileTextureSampleLevel(TileTexture texture, SamplerState samplerState, float2 uv, float lod) {
 #ifdef RT64_TEXTURE_SLOTS
-#   define RT64_CASE(k) return gTextures##k.SampleLevel(samplerState, uv, lod);
+#   define RT64_CASE(k) return gTextures##k.SampleLevel(RT64_SLOT_SAMPLER(k, samplerState), uv, lod);
     RT64_SLOT_SWITCH(RT64_CASE)
 #   undef RT64_CASE
 #else
@@ -100,7 +106,7 @@ float4 tileTextureSampleLevel(TileTexture texture, SamplerState samplerState, fl
 
 float4 tileTextureSampleGrad(TileTexture texture, SamplerState samplerState, float2 uv, float2 ddxUV, float2 ddyUV) {
 #ifdef RT64_TEXTURE_SLOTS
-#   define RT64_CASE(k) return gTextures##k.SampleGrad(samplerState, uv, ddxUV, ddyUV);
+#   define RT64_CASE(k) return gTextures##k.SampleGrad(RT64_SLOT_SAMPLER(k, samplerState), uv, ddxUV, ddyUV);
     RT64_SLOT_SWITCH(RT64_CASE)
 #   undef RT64_CASE
 #else

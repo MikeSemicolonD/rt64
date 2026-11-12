@@ -6,7 +6,13 @@
 #include "FbCommon.hlsli"
 
 [[vk::push_constant]] ConstantBuffer<FbCommonCB> gConstants : register(b0, space0);
+#ifdef RT64_WEBGPU
+RWByteAddressBuffer gOutput : register(u1, space0);
+#define STORE_OUTPUT(i, v) storeUint(gOutput, i, FbBufferBytes(gConstants.siz), v)
+#else
 RWBuffer<uint> gOutput : register(u1, space0);
+#define STORE_OUTPUT(i, v) gOutput[i] = v
+#endif
 #ifdef MULTISAMPLING
 Texture2DMS<float> gInput : register(t0, space1);
 #else
@@ -25,6 +31,6 @@ void CSMain(uint2 coord : SV_DispatchThreadID) {
 #   endif
         float z = clamp(inputDepth, 0.0f, 1.0f);
         float dz = 0.0f; // TODO
-        gOutput[dstIndex] = EndianSwapUINT16(FloatToDepth16(z, dz));
+        STORE_OUTPUT(dstIndex, EndianSwapUINT16(FloatToDepth16(z, dz)));
     }
 }

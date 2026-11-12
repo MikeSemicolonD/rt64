@@ -36,6 +36,15 @@ uint EndianSwapUINT(uint i, uint siz) {
     }
 }
 
+#ifdef RT64_WEBGPU
+#include "TypedLoads.hlsli"
+
+// Element width of the framebuffer buffer views (NativeTarget::getBufferFormat).
+uint FbBufferBytes(uint siz) {
+    return (siz == G_IM_SIZ_32b) ? 4 : ((siz == G_IM_SIZ_16b) ? 2 : 1);
+}
+#endif
+
 float4 UINT16ToFloat4(uint i, uint fmt) {
     switch (fmt) {
     case G_IM_FMT_RGBA:

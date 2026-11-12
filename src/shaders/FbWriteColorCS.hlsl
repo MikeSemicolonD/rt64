@@ -6,7 +6,13 @@
 #include "Random.hlsli"
 
 [[vk::push_constant]] ConstantBuffer<FbCommonCB> gConstants : register(b0, space0);
+#ifdef RT64_WEBGPU
+RWByteAddressBuffer gOutput : register(u1, space0);
+#define STORE_OUTPUT(i, v) storeUint(gOutput, i, FbBufferBytes(gConstants.siz), v)
+#else
 RWBuffer<uint> gOutput : register(u1, space0);
+#define STORE_OUTPUT(i, v) gOutput[i] = v
+#endif
 Texture2D<float4> gInput : register(t0, space1);
 
 [numthreads(FB_COMMON_WORKGROUP_SIZE, FB_COMMON_WORKGROUP_SIZE, 1)]
@@ -19,6 +25,6 @@ void CSMain(uint2 coord : SV_DispatchThreadID) {
         uint randomSeed = initRand(gConstants.ditherRandomSeed, dstIndex, 16);
         uint ditherValue = DitherPatternValue(gConstants.ditherPattern, offsetCoord, randomSeed);
         uint nativeUint = Float4ToUINT(color, gConstants.siz, gConstants.fmt, oddColumn, ditherValue, gConstants.usesHDR);
-        gOutput[dstIndex] = EndianSwapUINT(nativeUint, gConstants.siz);
+        STORE_OUTPUT(dstIndex, EndianSwapUINT(nativeUint, gConstants.siz));
     }
 }
