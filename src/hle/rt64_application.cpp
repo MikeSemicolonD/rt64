@@ -667,10 +667,6 @@ namespace RT64 {
             return;
         }
 
-#   ifdef PLUME_WEBGPU_ENABLED
-        // The inspector's ImGui backends are per native API, and none is WebGPU yet.
-        return;
-#   endif
         if (presentQueue == nullptr) {
             return;
         }
@@ -686,9 +682,6 @@ namespace RT64 {
     void Application::processDeveloperShortcut(DeveloperShortcut developerShortcut) {
         switch (developerShortcut) {
         case DeveloperShortcut::Inspector: {
-#       ifdef PLUME_WEBGPU_ENABLED
-            break;
-#       endif
             if (userConfig.developerMode) {
                 const std::lock_guard lock(presentQueue->inspectorMutex);
                 if (!inspectorVisible) {

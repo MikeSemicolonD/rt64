@@ -518,6 +518,10 @@ if (DEFINED RS64_MCP_GENEX)
     set_source_files_properties("${PROJECT_SOURCE_DIR}/src/hle/rt64_state.cpp" PROPERTIES COMPILE_DEFINITIONS "$<${RS64_MCP_GENEX}:RS64_MCP>")
 endif()
 
+if (EMSCRIPTEN)
+    list(APPEND SOURCES "${PROJECT_SOURCE_DIR}/src/imgui/imgui_impl_wgpu_custom.cpp")
+endif()
+
 include_directories(
     "${SDL2_INCLUDE_DIRS}"
     "${PROJECT_SOURCE_DIR}/src"

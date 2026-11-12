@@ -30,6 +30,11 @@
 #   include "plume_d3d12.h"
 #endif
 
+#ifdef PLUME_WEBGPU_ENABLED
+#   include "imgui/backends/imgui_impl_wgpu.h"
+#   include "plume_webgpu.h"
+#endif
+
 #ifdef PLUME_D3D11_ENABLED
 #   include "imgui/backends/imgui_impl_dx11.h"
 #   include "plume_d3d11.h"
@@ -112,6 +117,21 @@ namespace RT64 {
             break;
         }
         case UserConfiguration::GraphicsAPI::Vulkan: {
+#       ifdef PLUME_WEBGPU_ENABLED
+            // The browser's "Vulkan" is WebGPU; device objects are made on the main thread, which owns the device.
+            const WebGPUDevice *webDevice = static_cast<const WebGPUDevice *>(device);
+            const WebGPUSwapChain *webSwapChain = static_cast<const WebGPUSwapChain *>(swapChain);
+            webgpuRunOnMain([&]() {
+                ImGui_ImplWGPU_InitInfo initInfo;
+                initInfo.Device = webDevice->device;
+                initInfo.NumFramesInFlight = 3;
+                initInfo.RenderTargetFormat = webSwapChain->format;
+                ImGui_ImplWGPU_Init(&initInfo);
+                ImGui_ImplWGPU_CreateDeviceObjects();
+            });
+
+            break;
+#       endif
             VulkanDevice *interfaceDevice = static_cast<VulkanDevice *>(device);
             const VulkanSwapChain *interfaceSwapChain = static_cast<const VulkanSwapChain *>(swapChain);
             ImGui_ImplVulkan_LoadFunctions([](const char *functionName, void *vulkanInstance) {
@@ -166,6 +186,10 @@ namespace RT64 {
             break;
         }
         case UserConfiguration::GraphicsAPI::Vulkan: {
+#       ifdef PLUME_WEBGPU_ENABLED
+            webgpuRunOnMain([]() { ImGui_ImplWGPU_Shutdown(); });
+            break;
+#       endif
             ImGui_ImplVulkan_Shutdown();
             vulkanContext.reset(nullptr);
             break;
@@ -225,6 +249,10 @@ namespace RT64 {
             break;
         }
         case UserConfiguration::GraphicsAPI::Vulkan: {
+#       ifdef PLUME_WEBGPU_ENABLED
+            // ImGui_ImplWGPU_NewFrame only creates device objects, done at init on the main thread.
+            break;
+#       endif
             ImGui_ImplVulkan_NewFrame();
             break;
         }
@@ -329,6 +357,26 @@ namespace RT64 {
                 break;
             }
             case UserConfiguration::GraphicsAPI::Vulkan: {
+#           ifdef PLUME_WEBGPU_ENABLED
+                // Commands replay on the main thread at submission, after ImGui may have started the next frame, so the draw lists are copied.
+                std::shared_ptr<ImDrawData> webCopy(new ImDrawData(*drawData), [](ImDrawData *data) {
+                    for (ImDrawList *drawList : data->CmdLists) {
+                        IM_DELETE(drawList);
+                    }
+
+                    delete data;
+                });
+
+                for (ImDrawList *&drawList : webCopy->CmdLists) {
+                    drawList = drawList->CloneOutput();
+                }
+
+                webgpuRecordRenderPassJob(commandList, [webCopy](WGPURenderPassEncoder pass) {
+                    ImGui_ImplWGPU_RenderDrawData(webCopy.get(), pass);
+                });
+
+                break;
+#           endif
                 VulkanCommandList *interfaceCommandList = static_cast<VulkanCommandList *>(commandList);
                 ImGui_ImplVulkan_RenderDrawData(drawData, interfaceCommandList->vk);
                 break;
