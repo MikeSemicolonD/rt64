@@ -80,7 +80,7 @@ void computeLOD(OtherMode otherMode, uint rdpTileCount, float2 primLOD, float re
 
 float4 tileTextureLoad(uint textureIndex, int3 coord) {
 #ifdef RT64_TEXTURE_SLOTS
-#   define RT64_CASE(k) return gTextures[k].Load(coord);
+#   define RT64_CASE(k) return gTextures##k.Load(coord);
     RT64_SLOT_SWITCH(RT64_CASE)
 #   undef RT64_CASE
 #else
@@ -90,7 +90,7 @@ float4 tileTextureLoad(uint textureIndex, int3 coord) {
 
 float4 tileTextureSampleLevel(TileTexture texture, SamplerState samplerState, float2 uv, float lod) {
 #ifdef RT64_TEXTURE_SLOTS
-#   define RT64_CASE(k) return gTextures[k].SampleLevel(samplerState, uv, lod);
+#   define RT64_CASE(k) return gTextures##k.SampleLevel(samplerState, uv, lod);
     RT64_SLOT_SWITCH(RT64_CASE)
 #   undef RT64_CASE
 #else
@@ -100,7 +100,7 @@ float4 tileTextureSampleLevel(TileTexture texture, SamplerState samplerState, fl
 
 float4 tileTextureSampleGrad(TileTexture texture, SamplerState samplerState, float2 uv, float2 ddxUV, float2 ddyUV) {
 #ifdef RT64_TEXTURE_SLOTS
-#   define RT64_CASE(k) return gTextures[k].SampleGrad(samplerState, uv, ddxUV, ddyUV);
+#   define RT64_CASE(k) return gTextures##k.SampleGrad(samplerState, uv, ddxUV, ddyUV);
     RT64_SLOT_SWITCH(RT64_CASE)
 #   undef RT64_CASE
 #else
@@ -111,7 +111,7 @@ float4 tileTextureSampleGrad(TileTexture texture, SamplerState samplerState, flo
 float4 tileSampleTMEM(uint textureIndex, int2 texelInt, uint siz, uint fmt, uint address, uint stride, uint tlut, uint palette) {
 #ifdef RT64_TEXTURE_SLOTS
     // The TMEM fetches inside switch on the slot (TextureDecoder.hlsli), so this resource is unused.
-    return sampleTMEM(texelInt, siz, fmt, address, stride, tlut, palette, gTMEM[0]);
+    return sampleTMEM(texelInt, siz, fmt, address, stride, tlut, palette, gTMEM0);
 #else
     return sampleTMEM(texelInt, siz, fmt, address, stride, tlut, palette, gTMEM[NonUniformResourceIndex(textureIndex)]);
 #endif

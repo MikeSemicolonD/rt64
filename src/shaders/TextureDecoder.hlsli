@@ -17,7 +17,7 @@
 #ifdef RT64_TEXTURE_SLOTS
 // Only the word fetch switches on the draw's slot, so FXC compiles the decode once instead of once per slot (over a minute per shader).
 uint slotLoadTMEM(uint tmemAddress) {
-#   define RT64_CASE(k) return gTMEM[k].Load(int2(tmemAddress, 0));
+#   define RT64_CASE(k) return gTMEM##k.Load(int2(tmemAddress, 0));
     RT64_TMEM_SLOT_SWITCH(RT64_CASE)
 #   undef RT64_CASE
 }

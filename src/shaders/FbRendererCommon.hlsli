@@ -45,8 +45,26 @@ SamplerState gNearestClampClampSampler : register(s24, space0);
 #ifndef RT64_TMEM_SLOTS
 #define RT64_TMEM_SLOTS 8
 #endif
-Texture2D<float4> gTextures[8] : register(t0, space1);
-Texture1D<uint> gTMEM[RT64_TMEM_SLOTS] : register(t0, space2);
+// One binding per slot rather than an array: WGSL has no arrays of textures.
+Texture2D<float4> gTextures0 : register(t0, space1);
+Texture2D<float4> gTextures1 : register(t1, space1);
+Texture2D<float4> gTextures2 : register(t2, space1);
+Texture2D<float4> gTextures3 : register(t3, space1);
+Texture2D<float4> gTextures4 : register(t4, space1);
+Texture2D<float4> gTextures5 : register(t5, space1);
+Texture2D<float4> gTextures6 : register(t6, space1);
+Texture2D<float4> gTextures7 : register(t7, space1);
+Texture1D<uint> gTMEM0 : register(t0, space2);
+Texture1D<uint> gTMEM1 : register(t1, space2);
+Texture1D<uint> gTMEM2 : register(t2, space2);
+Texture1D<uint> gTMEM3 : register(t3, space2);
+
+#if RT64_TMEM_SLOTS == 8
+Texture1D<uint> gTMEM4 : register(t4, space2);
+Texture1D<uint> gTMEM5 : register(t5, space2);
+Texture1D<uint> gTMEM6 : register(t6, space2);
+Texture1D<uint> gTMEM7 : register(t7, space2);
+#endif
 
 // RasterPS sets the tile slot before sampling; each switch folds to one case once the slot is a constant.
 static uint gTextureSlot = 0;

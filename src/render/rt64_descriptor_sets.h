@@ -302,7 +302,19 @@ namespace RT64 {
             this->textureCacheSize = textureCacheSize;
 
             builder.begin();
-            gTextures = builder.addTexture(0, slots ? textureCacheSize : UpperRange);
+
+            // Slots are one binding each (the shaders declare gTextures0..7, gTMEM0..N), at the same indices an array would use.
+            if (slots) {
+                gTextures = builder.addTexture(0);
+
+                for (uint32_t k = 1; k < textureCacheSize; k++) {
+                    builder.addTexture(k);
+                }
+            }
+            else {
+                gTextures = builder.addTexture(0, UpperRange);
+            }
+
             gTMEM = gTextures;
             builder.end(!slots, textureCacheSize);
 
