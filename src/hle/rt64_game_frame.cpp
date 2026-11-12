@@ -984,7 +984,13 @@ namespace RT64 {
         const bool teleport = s_teleport && (miss > std::max(float(hlslpp::length(prevVelocity)), 0.25f * std::min(prevDist, curDist)));
         s_pairJumpRejects += (teleport && curTransformMap.rigidBody.lerpTranslation) ? 1u : 0u;
 
-        if (curTransformMap.rigidBody.lerpTranslation && (teleport || ((std::min(prevDist, curDist) > 256.0f) && (midDist < 0.3f * std::min(prevDist, curDist))))) {
+        // The 1-unit floor spares small close motion, but a pair on opposite sides of the camera plane (a laser bolt kept for RT shadows flying past the eye) blends
+        // straight through it at any distance. ROGUESQ_INTERP_CROSS_GUARD=0 restores the floor for those.
+        static const bool s_crossGuard = [](){ const char *e = std::getenv("ROGUESQ_INTERP_CROSS_GUARD"); return !(e && e[0] == '0'); }();
+        const bool crossesEye = s_crossGuard && ((float(prevTransform[3].z) * float(curTransform[3].z)) < 0.0f);
+        const bool passesEye = (crossesEye || (std::min(prevDist, curDist) > 256.0f)) && (midDist < 0.3f * std::min(prevDist, curDist));
+
+        if (curTransformMap.rigidBody.lerpTranslation && (teleport || passesEye)) {
             RigidBody &body = curTransformMap.rigidBody;
 
             body.lerpTranslation = false;
