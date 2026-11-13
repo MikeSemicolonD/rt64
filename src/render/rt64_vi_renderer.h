@@ -34,11 +34,13 @@ namespace RT64 {
             UserConfiguration::Filtering filtering = UserConfiguration::Filtering::Linear;
             const VI *vi = nullptr;
             bool removeBlackBorders = false;
+            bool letterbox43 = false;
         };
 
         VIRenderer();
         ~VIRenderer();
         void render(const RenderParams &p);
-        static void getViewportAndScissor(const RenderSwapChain *swapChain, const VI &vi, hlslpp::float2 resolutionScale, uint32_t downsamplingScale, bool removeBlackBorders, RenderViewport &viewport, RenderRect &scissor);
+        // letterbox43: a letterboxed frame (a cutscene's short VI region) is shown inside a 4:3 screen, as on a TV, instead of filling the window.
+        static void getViewportAndScissor(const RenderSwapChain *swapChain, const VI &vi, hlslpp::float2 resolutionScale, uint32_t downsamplingScale, bool removeBlackBorders, bool letterbox43, RenderViewport &viewport, RenderRect &scissor);
     };
 };

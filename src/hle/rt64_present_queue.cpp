@@ -341,6 +341,7 @@ namespace RT64 {
         hlslpp::float2 resolutionScale;
         EnhancementConfiguration::Presentation::Mode presentationMode;
         bool removeBlackBorders;
+        bool letterbox43;
         UserConfiguration::RefreshRate refreshRate;
         UserConfiguration::Filtering filtering;
         bool fxaa;
@@ -351,6 +352,7 @@ namespace RT64 {
             resolutionScale = ext.sharedResources->resolutionScale;
             presentationMode = ext.sharedResources->enhancementConfig.presentation.mode;
             removeBlackBorders = ext.sharedResources->enhancementConfig.presentation.removeBlackBorders;
+            letterbox43 = (ext.sharedResources->userConfig.aspectRatio == UserConfiguration::AspectRatio::Original);
             refreshRate = ext.sharedResources->userConfig.refreshRate;
             filtering = ext.sharedResources->userConfig.filtering;
             fxaa = ext.sharedResources->userConfig.fxaa;
@@ -769,6 +771,7 @@ namespace RT64 {
                     renderParams.filtering = filtering;
                     renderParams.vi = &present.screenVI;
                     renderParams.removeBlackBorders = removeBlackBorders;
+                    renderParams.letterbox43 = letterbox43;
 
                     const bool useDownsampling = (colorTarget->downsampleMultiplier > 1);
                     if (useDownsampling) {
