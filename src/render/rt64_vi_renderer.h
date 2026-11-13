@@ -16,6 +16,9 @@ namespace RT64 {
     // Fraction of the window height the presented picture is moved up by (the host sets it while an on-screen keyboard covers the bottom).
     extern std::atomic<float> presentShiftY;
 
+    // Whether letterbox43 applies to the current frame; the host clears it on menus so their letterboxed scenes fit the window.
+    extern std::atomic<bool> letterboxInBox;
+
     struct VIRenderer {
         std::unique_ptr<VideoInterfaceDescriptorSet> descriptorSet;
         const RenderSampler *descriptorSetSampler = nullptr;

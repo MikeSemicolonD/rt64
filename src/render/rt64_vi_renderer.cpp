@@ -13,6 +13,7 @@
 
 namespace RT64 {
     std::atomic<float> presentShiftY{ 0.0f };
+    std::atomic<bool> letterboxInBox{ true };
 
     // VIRenderer
 
@@ -154,7 +155,7 @@ namespace RT64 {
 
         // A frame wider than 16:10 is a letterbox inside the 4:3 TV picture; fit it to a centred 4:3 box so the bars show.
         constexpr float LetterboxAspect = 1.6f;
-        if (letterbox43 && removeBlackBorders && (float(hdSize.x / hdSize.y) > LetterboxAspect)) {
+        if (letterbox43 && letterboxInBox.load(std::memory_order_relaxed) && removeBlackBorders &&(float(hdSize.x / hdSize.y) > LetterboxAspect)) {
             const float boxWidth = std::min(float(fullWindow.x), float(fullWindow.y) * 4.0f / 3.0f);
             windowSize = { boxWidth, boxWidth * 3.0f / 4.0f };
             windowOrigin = (fullWindow - windowSize) / 2.0f;
