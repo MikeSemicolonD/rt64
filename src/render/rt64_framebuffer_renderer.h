@@ -268,7 +268,7 @@ namespace RT64 {
             std::shared_ptr<const rs64lights::TerrainMap> terrainMap;
             uint64_t terrainBuiltVersion = 0;
             std::unique_ptr<RenderBuffer> terrainPosBuffer, terrainIndexBuffer, terrainBlasBuffer, terrainScratch;
-            std::unique_ptr<RenderBuffer> terrainNormalBuffer, terrainIndexGpu, terrainNormalGpu;
+            std::unique_ptr<RenderBuffer> terrainNormalBuffer, terrainIndexGpu, terrainNormalGpu, terrainPosGpu;
             uint64_t terrainIndexBytes = 0, terrainNormalBytes = 0;
             // First water triangle in the terrain mesh (the water quads follow the ground); 0 when the map has none.
             uint32_t terrainWaterPrim = 0;

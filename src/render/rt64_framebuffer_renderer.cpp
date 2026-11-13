@@ -4738,13 +4738,24 @@ namespace RT64 {
         }
         const uint64_t posBytes = pos.size() * sizeof(float);
         const uint64_t idxBytes = idx.size() * sizeof(uint32_t);
-        s.terrainPosBuffer = device->createBuffer(RenderBufferDesc::UploadBuffer(posBytes, RenderBufferFlag::ACCELERATION_STRUCTURE_INPUT));
+        s.terrainPosBuffer = device->createBuffer(RenderBufferDesc::UploadBuffer(posBytes));
         memcpy(s.terrainPosBuffer->map(), pos.data(), posBytes);
         s.terrainPosBuffer->unmap();
-        s.terrainIndexBuffer = device->createBuffer(RenderBufferDesc::UploadBuffer(idxBytes, RenderBufferFlag::ACCELERATION_STRUCTURE_INPUT));
+        s.terrainIndexBuffer = device->createBuffer(RenderBufferDesc::UploadBuffer(idxBytes));
         memcpy(s.terrainIndexBuffer->map(), idx.data(), idxBytes);
         s.terrainIndexBuffer->unmap();
-        const RenderBottomLevelASMesh mesh(RenderBufferReference(s.terrainIndexBuffer.get()), RenderBufferReference(s.terrainPosBuffer.get()), RenderFormat::R32_UINT, RenderFormat::R32G32B32_FLOAT, uint32_t(idx.size()), uint32_t(pos.size() / 3), sizeof(float) * 3, true);
+
+        // The BLAS builds from GPU-local copies: on Vulkan a build straight from the upload buffers came out empty (no ray hit the terrain).
+        s.terrainPosGpu = device->createBuffer(RenderBufferDesc::DefaultBuffer(posBytes, RenderBufferFlag::ACCELERATION_STRUCTURE_INPUT));
+        s.terrainIndexGpu = device->createBuffer(RenderBufferDesc::DefaultBuffer(idxBytes, RenderBufferFlag::STORAGE | RenderBufferFlag::ACCELERATION_STRUCTURE_INPUT));
+        const RenderBufferBarrier inputsIn[] = { RenderBufferBarrier(s.terrainPosGpu.get(), RenderBufferAccess::WRITE), RenderBufferBarrier(s.terrainIndexGpu.get(), RenderBufferAccess::WRITE) };
+        worker->commandList->barriers(RenderBarrierStage::COPY, inputsIn, uint32_t(std::size(inputsIn)));
+        worker->commandList->copyBufferRegion(RenderBufferReference(s.terrainPosGpu.get()), RenderBufferReference(s.terrainPosBuffer.get()), posBytes);
+        worker->commandList->copyBufferRegion(RenderBufferReference(s.terrainIndexGpu.get()), RenderBufferReference(s.terrainIndexBuffer.get()), idxBytes);
+        const RenderBufferBarrier inputsOut[] = { RenderBufferBarrier(s.terrainPosGpu.get(), RenderBufferAccess::READ), RenderBufferBarrier(s.terrainIndexGpu.get(), RenderBufferAccess::READ) };
+        worker->commandList->barriers(RenderBarrierStage::COMPUTE, inputsOut, uint32_t(std::size(inputsOut)));
+
+        const RenderBottomLevelASMesh mesh(RenderBufferReference(s.terrainIndexGpu.get()), RenderBufferReference(s.terrainPosGpu.get()), RenderFormat::R32_UINT, RenderFormat::R32G32B32_FLOAT, uint32_t(idx.size()), uint32_t(pos.size() / 3), sizeof(float) * 3, true);
         RenderBottomLevelASBuildInfo info;
         device->setBottomLevelASBuildInfo(info, &mesh, 1, false, true);
         s.terrainBlasBuffer = device->createBuffer(RenderBufferDesc::AccelerationStructureBuffer(info.accelerationStructureSize));
@@ -4762,12 +4773,9 @@ namespace RT64 {
         s.terrainNormalBuffer = device->createBuffer(RenderBufferDesc::UploadBuffer(s.terrainNormalBytes));
         memcpy(s.terrainNormalBuffer->map(), nrm.data(), s.terrainNormalBytes);
         s.terrainNormalBuffer->unmap();
-        s.terrainIndexGpu = device->createBuffer(RenderBufferDesc::DefaultBuffer(idxBytes, RenderBufferFlag::STORAGE));
         s.terrainNormalGpu = device->createBuffer(RenderBufferDesc::DefaultBuffer(s.terrainNormalBytes, RenderBufferFlag::STORAGE));
-        const RenderBufferBarrier copyIn[] = { RenderBufferBarrier(s.terrainIndexGpu.get(), RenderBufferAccess::WRITE), RenderBufferBarrier(s.terrainNormalGpu.get(), RenderBufferAccess::WRITE),
-            RenderBufferBarrier(s.terrainColorGpu.get(), RenderBufferAccess::WRITE) };
+        const RenderBufferBarrier copyIn[] = { RenderBufferBarrier(s.terrainNormalGpu.get(), RenderBufferAccess::WRITE), RenderBufferBarrier(s.terrainColorGpu.get(), RenderBufferAccess::WRITE) };
         worker->commandList->barriers(RenderBarrierStage::COPY, copyIn, uint32_t(std::size(copyIn)));
-        worker->commandList->copyBufferRegion(RenderBufferReference(s.terrainIndexGpu.get()), RenderBufferReference(s.terrainIndexBuffer.get()), idxBytes);
         worker->commandList->copyBufferRegion(RenderBufferReference(s.terrainNormalGpu.get()), RenderBufferReference(s.terrainNormalBuffer.get()), s.terrainNormalBytes);
         worker->commandList->copyBufferRegion(RenderBufferReference(s.terrainColorGpu.get()), RenderBufferReference(s.terrainColorBuffer.get()), s.terrainColorBytes);
         const RenderBufferBarrier copyOut[] = { RenderBufferBarrier(s.terrainIndexGpu.get(), RenderBufferAccess::READ), RenderBufferBarrier(s.terrainNormalGpu.get(), RenderBufferAccess::READ),

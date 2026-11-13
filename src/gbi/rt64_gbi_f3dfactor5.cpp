@@ -2839,11 +2839,13 @@ namespace RT64 {
             // The water level [0x801375C0]: water (flag 0x08) and shore (0x10) cells are drawn flat at it, without the game's wave tiles.
             pass.waterLevel = (int32_t)rd_be_u32(state->RDRAM, 0x801375C0u);
             // Missions and cutscenes advance the game clock [0x80130BA4] by each frame's time, which keeps the animations at their speed at any frame
-            // rate; menus (the briefing hologram) don't, and step one 30 Hz tick per task.
+            // rate; menus (the briefing hologram) and the pause screen don't, and step at 30 Hz of wall time (one tick per task ran faster above 30 fps).
             {
                 static uint64_t s_lastTask = 0;
                 static uint32_t s_lastClock = 0;
                 static double s_ticks = 0.0;
+                static auto s_lastWall = std::chrono::steady_clock::now();
+                const auto wall = std::chrono::steady_clock::now();
                 const uint32_t clockBits = rd_be_u32(state->RDRAM, 0x80130BA4u);
                 float clock;
                 float lastClock;
@@ -2854,8 +2856,9 @@ namespace RT64 {
                     s_ticks += double(clock - lastClock) * 30.0;
                 }
                 else if (task > s_lastTask) {
-                    s_ticks += double(std::min<uint64_t>(task - s_lastTask, 30));
+                    s_ticks += std::min(std::chrono::duration<double>(wall - s_lastWall).count() * 30.0, 30.0);
                 }
+                s_lastWall = wall;
                 s_lastTask = task;
                 s_lastClock = clockBits;
                 pass.task = uint64_t(s_ticks);
