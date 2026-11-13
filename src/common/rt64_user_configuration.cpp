@@ -74,9 +74,9 @@ namespace RT64 {
         downsampleMultiplier = 1;
         filtering = Filtering::AntiAliasedPixelScaling;
         aspectRatio = AspectRatio::Original;
-        aspectTarget = 16.0f / 9.0f;
+        aspectTarget = 16.0 / 9.0;
         extAspectRatio = AspectRatio::Original;
-        extAspectTarget = 16.0f / 9.0f;
+        extAspectTarget = 16.0 / 9.0;
         upscale2D = Upscale2D::ScaledOnly;
         threePointFiltering = true;
         fxaa = false;
