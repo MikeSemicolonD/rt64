@@ -162,4 +162,13 @@ extern "C" {
 
     // Present thread: brightness of the frames it ends from now on (1 = full, 0 = black), for the fade between the virtual screen and the 3D view.
     void rs64_vr_set_brightness(float brightness);
+
+    // Present thread, after rs64_vr_begin_frame: this frame's eye views and both controllers' grip poses (OpenXR axes, meters). 1 = some controller to draw.
+    int rs64_vr_hands_frame(rs64vr::EyeViews *views, rs64vr::Pose hands[2], int valid[2]);
+
+    // Present thread: the runtime's model of one controller (0 left, 1 right) as triangles of position and normal, 6 floats a vertex, in grip space. 0 = not loaded.
+    int rs64_vr_hand_model(int hand, const float **vertices, uint32_t *count);
+
+    // Present thread: the controller layer's image for one eye (RGBA8, clear and draw it whole); once both are acquired the frame ends with the layer on top.
+    plume::RenderTexture *rs64_vr_acquire_hands(int eye, uint32_t *width, uint32_t *height);
 }

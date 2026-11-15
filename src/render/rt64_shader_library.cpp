@@ -15,6 +15,9 @@
 #include "shaders/RS64DepthResolvePS.hlsl.spirv.h"
 #include "shaders/RS64TerrainVS.hlsl.spirv.h"
 #include "shaders/RS64TerrainPS.hlsl.spirv.h"
+#include "shaders/RS64VrHandsVS.hlsl.spirv.h"
+#include "shaders/RS64VrHandsMeshVS.hlsl.spirv.h"
+#include "shaders/RS64VrHandsPS.hlsl.spirv.h"
 #ifndef __APPLE__
 #   include "shaders/RS64TerrainPSPacks.hlsl.spirv.h"
 #   include "shaders/RS64ShadowsPS.hlsl.spirv.h"
@@ -80,6 +83,9 @@
 #   include "shaders/RS64DepthResolvePS.hlsl.dxil.h"
 #   include "shaders/RS64TerrainVS.hlsl.dxil.h"
 #   include "shaders/RS64TerrainPS.hlsl.dxil.h"
+#   include "shaders/RS64VrHandsVS.hlsl.dxil.h"
+#   include "shaders/RS64VrHandsMeshVS.hlsl.dxil.h"
+#   include "shaders/RS64VrHandsPS.hlsl.dxil.h"
 #   include "shaders/RS64TerrainPSPacks.hlsl.dxil.h"
 #   include "shaders/RS64ShadowsPS.hlsl.dxil.h"
 #   include "shaders/RS64LightsShadowedPS.hlsl.dxil.h"
@@ -142,6 +148,9 @@
 #   include "shaders/RS64DepthResolvePS.hlsl.metal.h"
 #   include "shaders/RS64TerrainVS.hlsl.metal.h"
 #   include "shaders/RS64TerrainPS.hlsl.metal.h"
+#   include "shaders/RS64VrHandsVS.hlsl.metal.h"
+#   include "shaders/RS64VrHandsMeshVS.hlsl.metal.h"
+#   include "shaders/RS64VrHandsPS.hlsl.metal.h"
 #   include "shaders/FbChangesDrawDepthPS.hlsl.metal.h"
 #   include "shaders/FbReadAnyChangesCS.hlsl.metal.h"
 #   include "shaders/FbReadAnyFullCS.hlsl.metal.h"
@@ -190,6 +199,7 @@
 #include "shared/rt64_fb_common.h"
 #include "shared/rt64_fb_reinterpret.h"
 #include "shared/rt64_rs64_terrain_cb.h"
+#include "shared/rt64_rs64_vr_hands_cb.h"
 #include "shared/rt64_texture_copy.h"
 #include "shared/rt64_video_interface.h"
 
@@ -675,6 +685,50 @@ namespace RT64 {
             pipelineDesc.pixelShader = fxaaShader.get();
             pipelineDesc.pipelineLayout = fxaa.pipelineLayout.get();
             fxaa.pipeline = device->createGraphicsPipeline(pipelineDesc);
+        }
+
+        // VR controllers: drawn from the vertex index into the controller layer's RGBA8 images, depth tested against each other.
+        {
+            layoutBuilder.begin();
+            layoutBuilder.addPushConstant(0, 0, sizeof(interop::RS64VrHandsCB), RenderShaderStageFlag::VERTEX);
+            layoutBuilder.end();
+            rs64VrHands.pipelineLayout = layoutBuilder.create(device);
+
+            std::unique_ptr<RenderShader> handsVS = device->createShader(CREATE_SHADER_INPUTS(RS64VrHandsVSBlobDXIL, RS64VrHandsVSBlobSPIRV, RS64VrHandsVSBlobMSL, "VSMain", shaderFormat));
+            std::unique_ptr<RenderShader> handsPS = device->createShader(CREATE_SHADER_INPUTS(RS64VrHandsPSBlobDXIL, RS64VrHandsPSBlobSPIRV, RS64VrHandsPSBlobMSL, "PSMain", shaderFormat));
+            RenderGraphicsPipelineDesc pipelineDesc;
+            pipelineDesc.vertexShader = handsVS.get();
+            pipelineDesc.pixelShader = handsPS.get();
+            pipelineDesc.renderTargetFormat[0] = RenderFormat::R8G8B8A8_UNORM;
+            pipelineDesc.renderTargetBlend[0] = RenderBlendDesc::Copy();
+            pipelineDesc.renderTargetCount = 1;
+            pipelineDesc.depthTargetFormat = RenderFormat::D32_FLOAT;
+            pipelineDesc.depthEnabled = true;
+            pipelineDesc.depthFunction = RenderComparisonFunction::LESS;
+            pipelineDesc.depthWriteEnabled = true;
+            pipelineDesc.cullMode = RenderCullMode::NONE;
+            pipelineDesc.pipelineLayout = rs64VrHands.pipelineLayout.get();
+            rs64VrHands.pipeline = device->createGraphicsPipeline(pipelineDesc);
+
+            // The runtime's controller model: one vertex buffer of position and normal.
+            static const RenderInputSlot meshSlot(0, sizeof(float) * 6);
+            static const RenderInputElement meshElements[2] = {
+                RenderInputElement("POSITION", 0, 0, RenderFormat::R32G32B32_FLOAT, 0, 0),
+                RenderInputElement("NORMAL", 0, 1, RenderFormat::R32G32B32_FLOAT, 0, sizeof(float) * 3)
+            };
+
+            std::unique_ptr<RenderShader> meshVS = device->createShader(CREATE_SHADER_INPUTS(RS64VrHandsMeshVSBlobDXIL, RS64VrHandsMeshVSBlobSPIRV, RS64VrHandsMeshVSBlobMSL, "VSMain", shaderFormat));
+            pipelineDesc.vertexShader = meshVS.get();
+            pipelineDesc.inputSlots = &meshSlot;
+            pipelineDesc.inputSlotsCount = 1;
+            pipelineDesc.inputElements = meshElements;
+            pipelineDesc.inputElementsCount = 2;
+            layoutBuilder.begin(false, true);
+            layoutBuilder.addPushConstant(0, 0, sizeof(interop::RS64VrHandsCB), RenderShaderStageFlag::VERTEX);
+            layoutBuilder.end();
+            rs64VrHandsMesh.pipelineLayout = layoutBuilder.create(device);
+            pipelineDesc.pipelineLayout = rs64VrHandsMesh.pipelineLayout.get();
+            rs64VrHandsMesh.pipeline = device->createGraphicsPipeline(pipelineDesc);
         }
     }
 

@@ -7,6 +7,7 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <cmath>
 #include <condition_variable>
 #include <cstdio>
 #include <cstdlib>
@@ -14,6 +15,7 @@
 #include <filesystem>
 #include <mutex>
 #include <string>
+#include <unordered_map>
 #include <unordered_set>
 #include <vector>
 
@@ -27,6 +29,7 @@
 #include "rt64_rs64_transition.h"
 #include "rt64_rs64_vr.h"
 #include "rt64_workload_queue.h"
+#include "shared/rt64_rs64_vr_hands_cb.h"
 
 // Most draw-active color buffer, published by the F3DFACTOR5 GBI module. Present
 // mode 4 presents it so offscreen-rendered content (e.g. the cinematic explosion
@@ -216,11 +219,174 @@ namespace RT64 {
         }
     }
 
+    // Row-major 4x4 for column vectors.
+    struct RS64VrMat {
+        float m[4][4] = {};
+    };
+
+    static RS64VrMat rs64VrMul(const RS64VrMat &a, const RS64VrMat &b) {
+        RS64VrMat r;
+        for (int i = 0; i < 4; i++) {
+            for (int j = 0; j < 4; j++) {
+                for (int k = 0; k < 4; k++) {
+                    r.m[i][j] += a.m[i][k] * b.m[k][j];
+                }
+            }
+        }
+
+        return r;
+    }
+
+    // The pose as a transform into the tracking space, or (inverse) out of it.
+    static RS64VrMat rs64VrPoseMatrix(const rs64vr::Pose &p, bool inverse) {
+        const float x = p.qx, y = p.qy, z = p.qz, w = p.qw;
+        const float r[3][3] = {
+            { 1.0f - 2.0f * (y * y + z * z), 2.0f * (x * y - z * w), 2.0f * (x * z + y * w) },
+            { 2.0f * (x * y + z * w), 1.0f - 2.0f * (x * x + z * z), 2.0f * (y * z - x * w) },
+            { 2.0f * (x * z - y * w), 2.0f * (y * z + x * w), 1.0f - 2.0f * (x * x + y * y) }
+        };
+        const float t[3] = { p.px, p.py, p.pz };
+        RS64VrMat out;
+        for (int i = 0; i < 3; i++) {
+            for (int j = 0; j < 3; j++) {
+                out.m[i][j] = inverse ? r[j][i] : r[i][j];
+            }
+
+            out.m[i][3] = inverse ? -(r[0][i] * t[0] + r[1][i] * t[1] + r[2][i] * t[2]) : t[i];
+        }
+
+        out.m[3][3] = 1.0f;
+        return out;
+    }
+
+    // OpenXR's asymmetric projection, depth 0 at the near plane and 1 at the far one; clip y is up (the vertex shaders build with -fvk-invert-y).
+    static RS64VrMat rs64VrProjection(const rs64vr::Fov &fov) {
+        constexpr float kNear = 0.05f;
+        constexpr float kFar = 100.0f;
+        const float tl = std::tan(fov.left), tr = std::tan(fov.right);
+        const float tu = std::tan(fov.up), td = std::tan(fov.down);
+        RS64VrMat p;
+        p.m[0][0] = 2.0f / (tr - tl);
+        p.m[0][2] = (tr + tl) / (tr - tl);
+        p.m[1][1] = 2.0f / (tu - td);
+        p.m[1][2] = (tu + td) / (tu - td);
+        p.m[2][2] = -kFar / (kFar - kNear);
+        p.m[2][3] = -kFar * kNear / (kFar - kNear);
+        p.m[3][2] = -1.0f;
+        return p;
+    }
+
+    // VR: both controllers into the controller layer's images at this headset frame's eye poses; the frame then ends with that layer on top.
+    static void rs64VrDrawHands(RenderDevice *device, RenderWorker *worker, const ShaderLibrary *shaderLibrary) {
+        constexpr uint32_t kHandVertices = 3 * 24 * 13 * 6;
+        rs64vr::EyeViews views;
+        rs64vr::Pose hands[2] = {};
+        int valid[2] = {};
+        if (!rs64_vr_hands_frame(&views, hands, valid)) {
+            return;
+        }
+
+        RenderTexture *images[2] = {};
+        uint32_t width = 0;
+        uint32_t height = 0;
+        for (int e = 0; e < 2; e++) {
+            images[e] = rs64_vr_acquire_hands(e, &width, &height);
+            if (images[e] == nullptr) {
+                return;
+            }
+        }
+
+        static std::unique_ptr<RenderTexture> depth;
+        static uint32_t depthWidth = 0;
+        static uint32_t depthHeight = 0;
+        static std::unordered_map<RenderTexture *, std::unique_ptr<RenderFramebuffer>> framebuffers;
+
+        // The runtime's controller models, uploaded once each when they load.
+        static std::unique_ptr<RenderBuffer> models[2];
+        static uint32_t modelVertices[2] = {};
+        for (int h = 0; h < 2; h++) {
+            const float *vertices = nullptr;
+            uint32_t count = 0;
+            if ((models[h] == nullptr) && rs64_vr_hand_model(h, &vertices, &count) && (count > 0)) {
+                const size_t size = size_t(count) * sizeof(float) * 6;
+                models[h] = device->createBuffer(RenderBufferDesc::VertexBuffer(size, RenderHeapType::UPLOAD));
+                std::memcpy(models[h]->map(), vertices, size);
+                models[h]->unmap();
+                modelVertices[h] = count;
+            }
+        }
+        if ((depth == nullptr) || (depthWidth != width) || (depthHeight != height)) {
+            framebuffers.clear();
+            depth = device->createTexture(RenderTextureDesc::DepthTarget(width, height, RenderFormat::D32_FLOAT));
+            depth->setName("VR Controllers Depth");
+            depthWidth = width;
+            depthHeight = height;
+        }
+
+        RenderCommandList *commandList = worker->commandList.get();
+        commandList->begin();
+        for (int e = 0; e < 2; e++) {
+            std::unique_ptr<RenderFramebuffer> &framebuffer = framebuffers[images[e]];
+            if (framebuffer == nullptr) {
+                const RenderTexture *color = images[e];
+                framebuffer = device->createFramebuffer(RenderFramebufferDesc(&color, 1, depth.get()));
+            }
+
+            commandList->barriers(RenderBarrierStage::GRAPHICS, RenderTextureBarrier(images[e], RenderTextureLayout::COLOR_WRITE));
+            commandList->barriers(RenderBarrierStage::GRAPHICS, RenderTextureBarrier(depth.get(), RenderTextureLayout::DEPTH_WRITE));
+            commandList->setFramebuffer(framebuffer.get());
+            commandList->clearColor(0, RenderColor(0.0f, 0.0f, 0.0f, 0.0f));
+            commandList->clearDepth();
+            commandList->setViewports(RenderViewport(0.0f, 0.0f, float(width), float(height)));
+            commandList->setScissors(RenderRect(0, 0, int32_t(width), int32_t(height)));
+
+            const RS64VrMat viewProj = rs64VrMul(rs64VrProjection(views.fov[e]), rs64VrPoseMatrix(views.eye[e], true));
+            for (int h = 0; h < 2; h++) {
+                if (!valid[h]) {
+                    continue;
+                }
+
+                const RS64VrMat grip = rs64VrPoseMatrix(hands[h], false);
+                const RS64VrMat clip = rs64VrMul(viewProj, grip);
+                interop::RS64VrHandsCB cb;
+                for (int r = 0; r < 4; r++) {
+                    cb.clip[r] = { clip.m[r][0], clip.m[r][1], clip.m[r][2], clip.m[r][3] };
+                }
+
+                for (int r = 0; r < 3; r++) {
+                    cb.rotation[r] = { grip.m[r][0], grip.m[r][1], grip.m[r][2], 0.0f };
+                }
+
+                cb.color = { 0.16f, 0.16f, 0.18f, 1.0f };
+                if (models[h] != nullptr) {
+                    const RenderVertexBufferView view(RenderBufferReference(models[h].get()), modelVertices[h] * uint32_t(sizeof(float) * 6));
+                    const RenderInputSlot slot(0, sizeof(float) * 6);
+                    commandList->setPipeline(shaderLibrary->rs64VrHandsMesh.pipeline.get());
+                    commandList->setGraphicsPipelineLayout(shaderLibrary->rs64VrHandsMesh.pipelineLayout.get());
+                    commandList->setGraphicsPushConstants(0, &cb);
+                    commandList->setVertexBuffers(0, &view, 1, &slot);
+                    commandList->drawInstanced(modelVertices[h], 1, 0, 0);
+                }
+                else {
+                    commandList->setPipeline(shaderLibrary->rs64VrHands.pipeline.get());
+                    commandList->setGraphicsPipelineLayout(shaderLibrary->rs64VrHands.pipelineLayout.get());
+                    commandList->setGraphicsPushConstants(0, &cb);
+                    commandList->drawInstanced(kHandVertices, 1, 0, 0);
+                }
+            }
+        }
+
+        commandList->end();
+        worker->execute();
+        worker->wait();
+    }
+
     // VR: one headset frame showing the last eyes again, while the game presents nothing (loads, holds); without it the runtime shows its loading screen.
-    static void rs64VrKeepAlive() {
+    static void rs64VrKeepAlive(RenderDevice *device, RenderWorker *worker, const ShaderLibrary *shaderLibrary) {
         const int render = rs64_vr_begin_frame();
         rs64VrFade(false, false);
         if (render == 1) {
+            rs64VrDrawHands(device, worker, shaderLibrary);
             rs64VrRepeat();
             rs64VrStats.keepAlive++;
         }
@@ -897,6 +1063,10 @@ namespace RT64 {
             if (vrSession && (i < framesToPresent)) {
                 RS64VrStats &vs = rs64VrStats;
                 const int vrRender = rs64_vr_begin_frame();
+                if (vrRender == 1) {
+                    rs64VrDrawHands(ext.device, ext.presentGraphicsWorker, ext.shaderLibrary);
+                }
+
                 std::vector<std::unique_ptr<RenderTarget>> &vrRight = ext.sharedResources->vrRightTargets[vrSet];
                 std::vector<rs64vr::EyeViews> &vrViews = ext.sharedResources->vrTargetViews[vrSet];
                 // Only a workload that rendered both eyes into its own targets has a pair; the vectors keep older frames' eyes otherwise.
@@ -1190,7 +1360,7 @@ namespace RT64 {
                     }
                     else if (!cursorCondition.wait_for(cursorLock, keepAliveWait, presentReady)) {
                         cursorLock.unlock();
-                        rs64VrKeepAlive();
+                        rs64VrKeepAlive(ext.device, ext.presentGraphicsWorker, ext.shaderLibrary);
                         cursorLock.lock();
                         keepAliveWait = std::chrono::milliseconds(0);
                     }

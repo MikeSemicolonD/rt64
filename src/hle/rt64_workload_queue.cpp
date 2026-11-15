@@ -819,6 +819,11 @@ namespace RT64 {
 
             // Record all framebuffer pairs.
             uint32_t framebufferIndex = 0;
+            // VR: the scene's image starts black at the first pair that draws into it (a mission's sky can come in an earlier pair than the cockpit). The game
+            // leaves what its camera never sees undrawn (the briefing room's ceiling opening), and a head turned there showed older frames from other viewpoints.
+            const bool vrClear = (rs64_vr_active() != 0) && (overrideTargetFbPairIndex >= 0) && (uint32_t(overrideTargetFbPairIndex) < fbPairCount);
+            const uint32_t vrClearAddress = vrClear ? workload.fbPairs[overrideTargetFbPairIndex].colorImage.address : 0;
+            bool vrCleared = !vrClear;
             for (uint32_t f = 0; f < fbPairCount; f++) {
                 const FramebufferPair &fbPair = workload.fbPairs[f];
                 bool validTargets = getTargetsFromPair(f);
@@ -859,6 +864,11 @@ namespace RT64 {
                             }
 
                             colorFb->readHeight = colorFb->height;
+                        }
+
+                        if (!vrCleared && (colorImg.address == vrClearAddress)) {
+                            colorTarget->clearColorTarget(ext.workloadGraphicsWorker);
+                            vrCleared = true;
                         }
                     }
 
