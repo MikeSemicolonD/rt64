@@ -38,6 +38,9 @@ namespace RT64 {
             const VI *vi = nullptr;
             bool removeBlackBorders = false;
             bool letterbox43 = false;
+            // Draw into a target of this size instead of the swap chain's (VR's virtual screen); 0 = the swap chain.
+            uint32_t targetWidth = 0;
+            uint32_t targetHeight = 0;
         };
 
         VIRenderer();
@@ -45,5 +48,6 @@ namespace RT64 {
         void render(const RenderParams &p);
         // letterbox43: a letterboxed frame (a cutscene's short VI region) is shown inside a 4:3 screen, as on a TV, instead of filling the window.
         static void getViewportAndScissor(const RenderSwapChain *swapChain, const VI &vi, hlslpp::float2 resolutionScale, uint32_t downsamplingScale, bool removeBlackBorders, bool letterbox43, RenderViewport &viewport, RenderRect &scissor);
+        static void getViewportAndScissor(hlslpp::float2 fullWindow, const VI &vi, hlslpp::float2 resolutionScale, uint32_t downsamplingScale, bool removeBlackBorders, bool letterbox43, RenderViewport &viewport, RenderRect &scissor);
     };
 };

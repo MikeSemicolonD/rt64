@@ -76,7 +76,12 @@ namespace RT64 {
 
         RenderViewport viewport;
         RenderRect scissor;
-        getViewportAndScissor(p.swapChain, *p.vi, p.resolutionScale, p.downsamplingScale, p.removeBlackBorders, p.letterbox43, viewport, scissor);
+        if ((p.targetWidth > 0) && (p.targetHeight > 0)) {
+            getViewportAndScissor(hlslpp::float2(float(p.targetWidth), float(p.targetHeight)), *p.vi, p.resolutionScale, p.downsamplingScale, p.removeBlackBorders, p.letterbox43, viewport, scissor);
+        }
+        else {
+            getViewportAndScissor(p.swapChain, *p.vi, p.resolutionScale, p.downsamplingScale, p.removeBlackBorders, p.letterbox43, viewport, scissor);
+        }
         p.commandList->setViewports(viewport);
         p.commandList->setScissors(scissor);
 
@@ -130,6 +135,10 @@ namespace RT64 {
     }
 
     void VIRenderer::getViewportAndScissor(const RenderSwapChain *swapChain, const VI &vi, hlslpp::float2 resolutionScale, uint32_t downsamplingScale, bool removeBlackBorders, bool letterbox43, RenderViewport &viewport, RenderRect &scissor) {
+        getViewportAndScissor(hlslpp::float2(float(swapChain->getWidth()), float(swapChain->getHeight())), vi, resolutionScale, downsamplingScale, removeBlackBorders, letterbox43, viewport, scissor);
+    }
+
+    void VIRenderer::getViewportAndScissor(hlslpp::float2 fullWindow, const VI &vi, hlslpp::float2 resolutionScale, uint32_t downsamplingScale, bool removeBlackBorders, bool letterbox43, RenderViewport &viewport, RenderRect &scissor) {
         // We define three different coordinate spaces to work with to translate the VI parameters into the Window.
         //
         // VideoSD: This corresponds to the SD TV Scanline space, which is what the VI natively works on.
@@ -149,7 +158,6 @@ namespace RT64 {
             hdSize.x *= vi.pixelAspect();
         }
 
-        const hlslpp::float2 fullWindow = { float(swapChain->getWidth()), float(swapChain->getHeight()) };
         hlslpp::float2 windowSize = fullWindow;
         hlslpp::float2 windowOrigin = { 0.0f, 0.0f };
 

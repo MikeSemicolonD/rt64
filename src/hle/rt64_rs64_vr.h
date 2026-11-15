@@ -6,6 +6,7 @@
 #include "rt64_rs64_lights.h"
 
 #include <cmath>
+#include <cstdlib>
 
 namespace rs64vr {
     using rs64lights::Mat4;
@@ -96,8 +97,17 @@ namespace rs64vr {
         m.m[0][0] = sx * 2.0f * wz / (tr - tl);
         m.m[2][0] = -sx * (tr + tl) * wz / (tr - tl);
         m.m[1][1] = sy * 2.0f * wz / (tu - td);
-        m.m[2][1] = -sy * (tu + td) * wz / (tu - td);
+        m.m[2][1] = sy * (tu + td) * wz / (tu - td);
         return m;
+    }
+
+    // ROGUESQ_LOG_VR=1: headset frame paths and eye-less workloads every 2 s, and the eye target size when it changes.
+    inline bool logEnabled() {
+        static const bool enabled = []() {
+            const char *v = std::getenv("ROGUESQ_LOG_VR");
+            return (v != nullptr) && (v[0] != '\0') && (v[0] != '0');
+        }();
+        return enabled;
     }
 }
 
@@ -119,6 +129,9 @@ extern "C" {
     // 1 in a mission: only the mission HUD becomes quads; menus keep their texrect effects.
     int rs64_vr_hud_quads(void);
 
+    // The front end's say on the VR view: 1 virtual screen (menu tree, results, even with models on them), 0 3D view (SELECT LEVEL), -1 none.
+    int rs64_vr_menu_tree(void);
+
     // Headset rate RT64 interpolates to (0 = no session) and the per-eye image size.
     uint32_t rs64_vr_target_rate(void);
     void rs64_vr_eye_size(uint32_t *width, uint32_t *height);
@@ -137,4 +150,16 @@ extern "C" {
 
     // Present thread: releases acquired images and ends the frame with `views` (null = no layers).
     void rs64_vr_end_frame(const rs64vr::EyeViews *views);
+
+    // 1 when the session has a virtual screen: 2D screens (menus, boot screens) go to it as one flat image instead of the 3D view.
+    int rs64_vr_has_screen(void);
+
+    // Present thread: the virtual screen's image (B8G8R8A8), acquired and waited on; null without one.
+    plume::RenderTexture *rs64_vr_acquire_screen(uint32_t *width, uint32_t *height);
+
+    // Present thread: releases acquired images and ends the frame showing the virtual screen.
+    void rs64_vr_end_frame_screen(void);
+
+    // Present thread: brightness of the frames it ends from now on (1 = full, 0 = black), for the fade between the virtual screen and the 3D view.
+    void rs64_vr_set_brightness(float brightness);
 }

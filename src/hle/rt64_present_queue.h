@@ -56,6 +56,11 @@ namespace RT64 {
         std::unique_ptr<VideoInterfaceDescriptorSet> fxaaDescriptorSet;
         uint32_t fxaaWidth = 0;
         uint32_t fxaaHeight = 0;
+        // VR: the 2D screen drawn by the VI pass, then copied raw into the virtual screen's image.
+        std::unique_ptr<RenderTexture> vrScreenTexture;
+        std::unique_ptr<RenderFramebuffer> vrScreenFramebuffer;
+        uint32_t vrScreenWidth = 0;
+        uint32_t vrScreenHeight = 0;
         std::unique_ptr<RenderCommandSemaphore> acquiredSemaphore;
         std::vector<std::unique_ptr<RenderCommandSemaphore>> drawSemaphores;
         std::unique_ptr<VIRenderer> viRenderer;
@@ -82,6 +87,8 @@ namespace RT64 {
         void waitForPresentId(uint64_t waitId);
         void setup(const External &ext);
         void threadPresent(const Present &present, bool &swapChainValid);
+        // VR, inside a headset frame: draws the frame with the VI pass into the virtual screen's image and ends the frame with it. False = no image.
+        bool rs64SubmitScreen(RenderTarget *colorTarget, const VI &vi, UserConfiguration::Filtering filtering, bool removeBlackBorders, bool letterbox43);
         void skipInterpolation();
         void notifyPresentId(const Present &present);
         void threadAdvanceBarrier();

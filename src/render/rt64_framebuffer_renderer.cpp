@@ -75,6 +75,7 @@ static constexpr uint32_t RS64TerrainChunkCells = 8;
 // Host (hook_helpers.cpp): the ROM's terrain texture bank and a level's lv_X_TEX table; 0 when the level has none.
 extern "C" int rs64_terrain_textures(uint32_t level, const uint8_t **bank, uint32_t *bankSize, const uint8_t **ids, uint32_t *idsSize);
 extern "C" int rs64_terrain_tessellation(void);
+extern "C" int rs64_vr_active(void);
 
 namespace RT64 {
     // ROGUESQ_LOG_BATCH: per-vertex renderIndex stamp collisions (a vertex stamped
@@ -3403,7 +3404,8 @@ namespace RT64 {
         cb.rippleTime = rs64lights::rippleClock();
         cb.rippleStrength = cfg.waterRipple;
         cb.fogParams = { fog.mul, fog.offset, fog.valid ? 1.0f : 0.0f, fog.tailEnd };
-        cb.fogColor = { fog.color[0], fog.color[1], fog.color[2], 0.0f };
+        // w: VR, so the fog follows the game camera's depth like the vertex fog (rs64FogDepth).
+        cb.fogColor = { fog.color[0], fog.color[1], fog.color[2], (rs64_vr_active() != 0) ? 1.0f : 0.0f };
         const hlslpp::float4 &skyH = rs64Shadow.skyHorizon, &skyZ = rs64Shadow.skyZenith;
         cb.skyHorizon = { (float)skyH.x, (float)skyH.y, (float)skyH.z, cfg.waterShadow };
         cb.skyZenith = { (float)skyZ.x, (float)skyZ.y, (float)skyZ.z, ((float)skyZ.w > 0.0f) ? cfg.reflSky : 0.0f };
@@ -4060,7 +4062,7 @@ namespace RT64 {
         memcpy(&cb.viewProj, &viewProj, sizeof(viewProj));
         cb.viewport = { framebuffer.viewport.x, framebuffer.viewport.y, framebuffer.viewport.width, framebuffer.viewport.height };
         cb.sunDir = { sun.dir[0], sun.dir[1], sun.dir[2], 0.0f };
-        cb.fogColor = { fog.color[0], fog.color[1], fog.color[2], 0.0f };
+        cb.fogColor = { fog.color[0], fog.color[1], fog.color[2], (rs64_vr_active() != 0) ? 1.0f : 0.0f };
         cb.debugMode = static_cast<uint32_t>(cfg.fogShaftsDebug);
         cb.steps = static_cast<uint32_t>(cfg.fogShaftsSteps);
         cb.strength = cfg.fogShaftsStrength;

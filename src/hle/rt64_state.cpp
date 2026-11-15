@@ -32,6 +32,7 @@
 #include "rhi/rt64_render_hooks.h"
 #include "rt64_rs64_transition.h"
 #include "rt64_rs64_lights.h"
+#include "rt64_rs64_vr.h"
 
 #include <atomic>
 // Per-frame RT64 workload accumulators feeding the F5 profiler HUD's RDP slots
@@ -39,6 +40,8 @@
 // osDpGetCounters_recomp. tris->white(pipe), draws->magenta(cmd), texloads->green(tmem).
 extern "C" float rs64_fog_tail_end(void);
 extern "C" uint32_t rs64_level_fog_rgb(void);
+// F3DFACTOR5: 1 while the game shows a 2D screen (tasks under 64 3D faces, held for 10 tasks before it changes).
+extern "C" int rs64_f5_screen2d(void);
 extern "C" { std::atomic<uint32_t> g_rs64_frame_tris{0}; }
 extern "C" { std::atomic<uint32_t> g_rs64_frame_draws{0}; }
 extern "C" { std::atomic<uint32_t> g_rs64_frame_texloads{0}; }
@@ -2077,6 +2080,8 @@ namespace RT64 {
         else {
             workload.viOriginalRate = viHistory.logicalRateFromFactors();
         }
+
+        workload.vrScreen = (rs64_vr_session() != 0) && (rs64_vr_has_screen() != 0) && (rs64_f5_screen2d() != 0);
 
         // VIs since the previous workload: the game's real duration for this frame (its logic is VI-clocked).
         workload.viFrameTicks = uint32_t(std::min<uint64_t>(viTickCounter - lastWorkloadViTick, 0xFF));

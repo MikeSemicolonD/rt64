@@ -29,9 +29,11 @@ float rs64FogAlpha(float3 p) {
     }
     float4 c = mul(gShadows.screenFromView, float4(p, 1.0f));
     if (c.w <= 0.0f) {
-        c = mul(gShadows.screenFromView, float4(-p, 1.0f));
+        p = -p;
+        c = mul(gShadows.screenFromView, float4(p, 1.0f));
     }
-    return (c.w > 0.0f) ? rs64FogCurve(((max(c.z, 0.0f) / c.w) * gShadows.fogParams.x + gShadows.fogParams.y) / 255.0f, gShadows.fogParams.w) : 1.0f;
+    const RSPFog fog = { gShadows.fogParams.x, gShadows.fogParams.y, gShadows.fogParams.w, gShadows.fogColor.w };
+    return (c.w > 0.0f) ? rs64FogCurve((rs64FogDepth(gShadows.screenFromView, p, fog) * fog.mul + fog.offset) / 255.0f, fog.tailEnd) : 1.0f;
 }
 
 // The fog the terrain pass gives water at camera-space point p: the vertex fog, or past the map edge its fade toward the far plane (farPlaneFade in

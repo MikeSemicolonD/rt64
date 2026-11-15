@@ -10,7 +10,8 @@ Texture2D<float> gDepth : register(t2, space3);
 // Mirrors rs64lights::fogFactor (RSPProcessCS vertex fog).
 float fogFactor(float3 q) {
     const float4 c = mul(gFog.viewProj, float4(q, 1.0f));
-    const float a = (c.w > 1e-6f) ? ((max(c.z, 0.0f) / c.w) * gFog.fogMul + gFog.fogOffset) : gFog.fogOffset;
+    const RSPFog fog = { gFog.fogMul, gFog.fogOffset, gFog.fogTail, gFog.fogColor.w };
+    const float a = (c.w > 1e-6f) ? (rs64FogDepth(gFog.viewProj, q, fog) * gFog.fogMul + gFog.fogOffset) : gFog.fogOffset;
     return rs64FogCurve(a / 255.0f, gFog.fogTail);
 }
 

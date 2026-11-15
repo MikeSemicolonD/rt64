@@ -130,7 +130,7 @@ namespace RT64 {
         framebufferRenderer->updateMultisampling();
     }
 
-    void WorkloadQueue::threadConfigurationUpdate(hlslpp::uint2 viFbSize, float viPixelAspect, WorkloadConfiguration &workloadConfig) {
+    void WorkloadQueue::threadConfigurationUpdate(hlslpp::uint2 viFbSize, float viPixelAspect, bool vrScreen, WorkloadConfiguration &workloadConfig) {
         const std::scoped_lock lock(ext.sharedResources->configurationMutex);
         const bool sizeChanged = ext.sharedResources->swapChainSizeChanged;
         ext.sharedResources->swapChainSizeChanged = false;
@@ -244,6 +244,12 @@ namespace RT64 {
             workloadConfig.aspectRatioScale = 1.0f;
             workloadConfig.resolutionScale = { float(vrEyeWidth) / float(viFbSize[0]), float(vrEyeHeight) / float(viFbSize[1]) };
             workloadConfig.downsampleMultiplier = 1;
+
+            // A 2D screen renders at a whole-number scale as on desktop: a fractional one left the results wipe's unfilled last column showing.
+            if (vrScreen) {
+                const float multiplier = float(std::max<uint32_t>((vrEyeHeight + referenceHeight - 1) / referenceHeight, 1));
+                workloadConfig.resolutionScale = { multiplier, multiplier };
+            }
         }
 
         ext.sharedResources->resolutionScale = workloadConfig.resolutionScale;
@@ -1044,9 +1050,14 @@ namespace RT64 {
                     continue;
                 }
 
+                // VR: a screen that keeps presenting one buffer (the main menu) never fills the VI factor ring; the game caps itself at 30 fps.
+                if ((workload.viOriginalRate == 0) && (rs64_vr_session() != 0)) {
+                    workload.viOriginalRate = 30;
+                }
+
                 ElapsedTimer workloadTimer;
                 workloadProfiler.start();
-                threadConfigurationUpdate(workload.viFbSize, workload.viPixelAspect, workloadConfig);
+                threadConfigurationUpdate(workload.viFbSize, workload.viPixelAspect, workload.vrScreen, workloadConfig);
 
                 // FIXME: This is a very hacky way to find out if we need to advance the frame if the workload was paused for the first time.
                 if (!workload.paused || (!gameFrames[curFrameIndex].workloads.empty() && (gameFrames[curFrameIndex].workloads[0] != (uint32_t)processCursor))) {
@@ -1104,7 +1115,8 @@ namespace RT64 {
                         }
 
                         Framebuffer *interpolationFb = fbManager.find(colorImg.address);
-                        if ((interpolationFb != nullptr) && interpolationFb->interpolationEnabled) {
+                        // VR takes the presentable image even when the game presents it later or discarded it (the menus repaint theirs every frame): without a target, a frame gets no eye views and no right eye.
+                        if ((rs64_vr_session() != 0) || ((interpolationFb != nullptr) && interpolationFb->interpolationEnabled)) {
                             interpolationTargetKey.fbType = Framebuffer::Type::Color;
                             interpolationTargetKey.address = fbPair.colorImage.address;
                             interpolationTargetKey.siz = fbPair.colorImage.siz;
@@ -1129,8 +1141,30 @@ namespace RT64 {
                     matchingProfiler.end();
                     matchingProfiler.log();
 
-                    const bool displayRateAboveOriginal = (workload.viOriginalRate > 0) && (workloadConfig.targetRate > workload.viOriginalRate);
+                    // VR always tweens: every headset frame needs its own render at its own pose, and a cutscene can run below the rate this estimate assumes.
+                    const bool displayRateAboveOriginal = (workload.viOriginalRate > 0) && ((workloadConfig.targetRate > workload.viOriginalRate) || (rs64_vr_session() != 0));
                     generateInterpolatedFrames = !workload.paused && displayRateAboveOriginal && !interpolationTargetKey.isEmpty();
+
+                    // VR: workloads that render no eyes, by cause, every 2 s.
+                    if (rs64vr::logEnabled() && (rs64_vr_session() != 0)) {
+                        static uint32_t s_screen = 0, s_eyes = 0, s_paused = 0, s_noRate = 0, s_noTarget = 0, s_noCandidate = 0;
+                        static Timestamp s_stamp;
+                        if (workload.vrScreen) s_screen++;
+                        else if (generateInterpolatedFrames) s_eyes++;
+                        else if (workload.paused) s_paused++;
+                        else if (!displayRateAboveOriginal) s_noRate++;
+                        else if (ext.sharedResources->colorImageAddressVector.empty()) s_noCandidate++;
+                        else s_noTarget++;
+
+                        if ((s_stamp == Timestamp()) || (Timer::current() - s_stamp >= std::chrono::seconds(2))) {
+                            if (!(s_stamp == Timestamp())) {
+                                fprintf(stderr, "[vr] workloads 2s: screen %u, eyes %u, paused %u, no vi rate %u, no candidate %u, no fb %u (pairs %u)\n", s_screen, s_eyes, s_paused, s_noRate, s_noCandidate, s_noTarget, workload.fbPairCount);
+                            }
+
+                            s_stamp = Timer::current();
+                            s_screen = s_eyes = s_paused = s_noRate = s_noTarget = s_noCandidate = 0;
+                        }
+                    }
 
                     // ROGUESQ_INTERP_VARIABLE: time each real frame by its own VI count instead of the averaged rate, so a frame the game stretched to 3 VIs tweens over 3 VIs.
                     static const bool s_variable = [](){ const char *e = std::getenv("ROGUESQ_INTERP_VARIABLE"); return !(e && e[0] == '0'); }();
@@ -1202,9 +1236,14 @@ namespace RT64 {
                 // Create as many render targets as required to store the interpolated targets.
                 auto &interpolatedTargets = ext.sharedResources->interpolatedColorTargets;
                 const bool usingMSAA = (ext.sharedResources->renderTargetManager.multisampling.sampleCount > 1);
-                curFrameCounters.msaa = usingMSAA;
+                // VR renders the first frame into a target of its own too, as MSAA does, so its left eye pairs with the right eye of the same pose.
+                const bool vrFrames = generateInterpolatedFrames && (rs64_vr_session() != 0) && !workload.vrScreen;
+                const bool allFramesTargeted = usingMSAA || vrFrames;
+                curFrameCounters.msaa = allFramesTargeted;
+                curFrameCounters.vr = vrFrames;
+                curFrameCounters.vrScreen = workload.vrScreen;
                 const bool usesHDR = ext.sharedResources->renderTargetManager.usesHDR;
-                uint32_t requiredFrames = (usingMSAA && generateInterpolatedFrames) ? displayFrames : (displayFrames - 1);
+                uint32_t requiredFrames = (allFramesTargeted && generateInterpolatedFrames) ? displayFrames : (displayFrames - 1);
                 if ((requiredFrames > 0) && (interpolatedTargets.size() < requiredFrames)) {
                     uint32_t previousSize = uint32_t(interpolatedTargets.size());
                     interpolatedTargets.resize(requiredFrames);
@@ -1243,7 +1282,7 @@ namespace RT64 {
                         curFrameWeight = std::clamp((frameSpan + displayTicks - logicalTicks) / float(frameSpan), 0.0f, 1.0f);
 
                         // Override the render target.
-                        if (usingMSAA || (frame > 0)) {
+                        if (allFramesTargeted || (frame > 0)) {
                             overrideTarget = interpolatedTargets[targetIndex].get();
                             overrideModifier = (targetIndex + 1);
 
@@ -1280,7 +1319,7 @@ namespace RT64 {
                     // VR: both eyes of this rendered frame use poses located now, stored per counter set and rendered frame so the present thread submits the same ones.
                     const uint32_t vrSet = ext.sharedResources->interpolatedFramesIndex;
                     const rs64vr::EyeViews *vrViews = nullptr;
-                    if (rs64_vr_session() && !interpolationTargetKey.isEmpty()) {
+                    if (rs64_vr_session() && !workload.vrScreen && !interpolationTargetKey.isEmpty()) {
                         std::vector<rs64vr::EyeViews> &views = ext.sharedResources->vrTargetViews[vrSet];
                         if (views.size() <= framesRendered) {
                             views.resize(framesRendered + 1);
@@ -1319,7 +1358,7 @@ namespace RT64 {
                     }
 
                     // For every additional frame, we increase the frames available and notify the present queue.
-                    if (generateInterpolatedFrames && (usingMSAA || (frame > 0))) {
+                    if (generateInterpolatedFrames && (allFramesTargeted || (frame > 0))) {
                         {
                             std::scoped_lock<std::mutex> cursorLock(cursorMutex);
                             skipWorkloadNow = ((frame + 1) < displayFrames) && (writeCursor != threadCursor);

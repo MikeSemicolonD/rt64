@@ -140,6 +140,101 @@ namespace RT64 {
         return true;
     }
 
+    // VR headset frame paths, logged every 2 s: fresh eyes, the last eyes again (and the check that failed), kept alive while the game presents nothing, no render asked, wait or begin failed.
+    struct RS64VrStats {
+        uint32_t fresh = 0, screen = 0, fadeHeld = 0, noColor = 0, noEyes = 0, noRight = 0, noViews = 0, submitFail = 0, keepAlive = 0, noRender = 0, failed = 0;
+        Timestamp stamp;
+    };
+
+    static RS64VrStats rs64VrStats;
+    // The poses of the eyes last copied to the headset; a repeated frame shows those images at these poses.
+    static rs64vr::EyeViews rs64VrLastViews;
+    // The last fresh frame went to the virtual screen, so a repeat shows the screen again.
+    static bool rs64VrLastScreen = false;
+
+    // Fade through black when the headset changes between the virtual screen and the 3D view: the old image dims out, then the new one comes up.
+    static constexpr std::chrono::milliseconds kVrFadeHalf(150);
+    static bool rs64VrFading = false;
+    static Timestamp rs64VrFadeStamp;
+
+    // Sets this headset frame's brightness. newIsScreen is the view a fresh frame would show (startsFade false when there is none);
+    // true back means hold the old image instead, while it fades out.
+    static bool rs64VrFade(bool startsFade, bool newIsScreen) {
+        const bool shownSomething = rs64VrLastViews.valid || rs64VrLastScreen;
+        if (!rs64VrFading && startsFade && shownSomething && (newIsScreen != rs64VrLastScreen)) {
+            rs64VrFading = true;
+            rs64VrFadeStamp = Timer::current();
+        }
+
+        bool holdOld = false;
+        float brightness = 1.0f;
+        if (rs64VrFading) {
+            const auto elapsed = Timer::current() - rs64VrFadeStamp;
+            const float half = float(std::chrono::duration_cast<std::chrono::microseconds>(kVrFadeHalf).count());
+            const float t = float(std::chrono::duration_cast<std::chrono::microseconds>(elapsed).count()) / half;
+            if (t < 1.0f) {
+                holdOld = true;
+                brightness = 1.0f - t;
+            }
+            else if (t < 2.0f) {
+                brightness = t - 1.0f;
+            }
+            else {
+                rs64VrFading = false;
+            }
+        }
+
+        rs64_vr_set_brightness(brightness);
+        return holdOld;
+    }
+
+    // Ends a headset frame with the last image again: the virtual screen or the eyes at their poses.
+    static void rs64VrRepeat() {
+        if (rs64VrLastScreen) {
+            rs64_vr_end_frame_screen();
+        }
+        else {
+            rs64_vr_end_frame(&rs64VrLastViews);
+        }
+    }
+
+    static void rs64VrLogStats() {
+        RS64VrStats &s = rs64VrStats;
+        if (!rs64vr::logEnabled()) {
+            return;
+        }
+
+        if ((s.stamp == Timestamp()) || (Timer::current() - s.stamp >= std::chrono::seconds(2))) {
+            if (!(s.stamp == Timestamp())) {
+                fprintf(stderr, "[vr] 2s: fresh %u, screen %u, held for fade %u, repeat (no color %u, no eyes %u, no right %u, no views %u, submit failed %u), kept alive %u, no render %u, failed %u, rate %u Hz\n",
+                    s.fresh, s.screen, s.fadeHeld, s.noColor, s.noEyes, s.noRight, s.noViews, s.submitFail, s.keepAlive, s.noRender, s.failed, rs64_vr_target_rate());
+            }
+
+            const Timestamp now = Timer::current();
+            s = RS64VrStats();
+            s.stamp = now;
+        }
+    }
+
+    // VR: one headset frame showing the last eyes again, while the game presents nothing (loads, holds); without it the runtime shows its loading screen.
+    static void rs64VrKeepAlive() {
+        const int render = rs64_vr_begin_frame();
+        rs64VrFade(false, false);
+        if (render == 1) {
+            rs64VrRepeat();
+            rs64VrStats.keepAlive++;
+        }
+        else if (render == 0) {
+            rs64_vr_end_frame(nullptr);
+            rs64VrStats.noRender++;
+        }
+        else {
+            rs64VrStats.failed++;
+        }
+
+        rs64VrLogStats();
+    }
+
     // VR: raw copies of both eye targets into the headset's swapchain images, then the frame ends with the poses they were rendered at.
     // The targets hold display-encoded RGBA8 and the images are sRGB, so the bytes go across unchanged.
     static bool rs64SubmitEyes(RenderWorker *worker, const ShaderLibrary *shaderLibrary, RenderTarget *left, RenderTarget *right, const rs64vr::EyeViews &views) {
@@ -153,6 +248,13 @@ namespace RT64 {
 
         if ((images[0] == nullptr) || (images[1] == nullptr)) {
             return false;
+        }
+
+        static uint32_t s_loggedSize = 0;
+        const uint32_t sizeKey = (left->width << 16) ^ left->height;
+        if (rs64vr::logEnabled() && (sizeKey != s_loggedSize)) {
+            s_loggedSize = sizeKey;
+            fprintf(stderr, "[vr] eye target %ux%u (right %ux%u), swapchain %ux%u\n", left->width, left->height, right->width, right->height, width, height);
         }
 
         RenderCommandList *commandList = worker->commandList.get();
@@ -333,6 +435,75 @@ namespace RT64 {
 
         presentThreadRunning = true;
         presentThread = new std::thread(&PresentQueue::threadLoop, this);
+    }
+
+    bool PresentQueue::rs64SubmitScreen(RenderTarget *colorTarget, const VI &vi, UserConfiguration::Filtering filtering, bool removeBlackBorders, bool letterbox43) {
+        uint32_t width = 0;
+        uint32_t height = 0;
+        RenderTexture *image = rs64_vr_acquire_screen(&width, &height);
+        if (image == nullptr) {
+            return false;
+        }
+
+        if ((vrScreenTexture == nullptr) || (vrScreenWidth != width) || (vrScreenHeight != height)) {
+            vrScreenFramebuffer.reset();
+            vrScreenTexture = ext.device->createTexture(RenderTextureDesc::ColorTarget(width, height, SwapChainFormat));
+            vrScreenTexture->setName("VR Screen");
+            const RenderTexture *screenTarget = vrScreenTexture.get();
+            vrScreenFramebuffer = ext.device->createFramebuffer(RenderFramebufferDesc(&screenTarget, 1));
+            vrScreenWidth = width;
+            vrScreenHeight = height;
+        }
+
+        RenderCommandList *commandList = ext.presentGraphicsWorker->commandList.get();
+        commandList->begin();
+
+        // The same VI pass the window uses (crop, letterbox, pixel aspect), sized to the virtual screen.
+        VIRenderer::RenderParams params;
+        params.device = ext.device;
+        params.commandList = commandList;
+        params.swapChain = ext.swapChain;
+        params.shaderLibrary = ext.shaderLibrary;
+        params.textureFormat = colorTarget->format;
+        params.resolutionScale = colorTarget->resolutionScale;
+        params.downsamplingScale = 1;
+        params.filtering = filtering;
+        params.vi = &vi;
+        params.removeBlackBorders = removeBlackBorders;
+        params.letterbox43 = letterbox43;
+        params.targetWidth = width;
+        params.targetHeight = height;
+        if (colorTarget->downsampleMultiplier > 1) {
+            colorTarget->downsampleTarget(ext.presentGraphicsWorker, ext.shaderLibrary);
+            params.texture = colorTarget->downsampledTexture.get();
+            params.textureWidth = colorTarget->width / colorTarget->downsampleMultiplier;
+            params.textureHeight = colorTarget->height / colorTarget->downsampleMultiplier;
+            params.downsamplingScale = colorTarget->downsampleMultiplier;
+        }
+        else {
+            colorTarget->resolveTarget(ext.presentGraphicsWorker, ext.shaderLibrary);
+            params.texture = colorTarget->getResolvedTexture();
+            params.textureWidth = colorTarget->width;
+            params.textureHeight = colorTarget->height;
+        }
+
+        commandList->barriers(RenderBarrierStage::GRAPHICS, RenderTextureBarrier(vrScreenTexture.get(), RenderTextureLayout::COLOR_WRITE));
+        commandList->setFramebuffer(vrScreenFramebuffer.get());
+        commandList->clearColor();
+        commandList->barriers(RenderBarrierStage::GRAPHICS, RenderTextureBarrier(params.texture, RenderTextureLayout::SHADER_READ));
+        viRenderer->render(params);
+
+        // Display-encoded BGRA8 into the B8G8R8A8 sRGB image, bytes unchanged, as the eyes do.
+        const RenderBox box(0, 0, int32_t(width), int32_t(height));
+        commandList->barriers(RenderBarrierStage::COPY, RenderTextureBarrier(vrScreenTexture.get(), RenderTextureLayout::COPY_SOURCE));
+        commandList->barriers(RenderBarrierStage::COPY, RenderTextureBarrier(image, RenderTextureLayout::COPY_DEST));
+        commandList->copyTextureRegion(RenderTextureCopyLocation::Subresource(image), RenderTextureCopyLocation::Subresource(vrScreenTexture.get()), 0, 0, 0, &box);
+        commandList->barriers(RenderBarrierStage::GRAPHICS, RenderTextureBarrier(image, RenderTextureLayout::COLOR_WRITE));
+        commandList->end();
+        ext.presentGraphicsWorker->execute();
+        ext.presentGraphicsWorker->wait();
+        rs64_vr_end_frame_screen();
+        return true;
     }
 
     void PresentQueue::threadPresent(const Present &present, bool &swapChainValid) {
@@ -691,7 +862,7 @@ namespace RT64 {
         
         for (int32_t i = 0; i < framesToPresent; i++) {
             uint32_t frameCountersNextPresented = 0;
-            if ((framesToPresent > 1) && (usingMSAA || (i > 0))) {
+            if (((framesToPresent > 1) || frameCounters.vr) && (usingMSAA || (i > 0))) {
                 // Stall until the interpolated color target is available.
                 const uint32_t targetIndex = usingMSAA ? i : (i - 1);
                 std::unique_lock<std::mutex> interpolatedLock(ext.sharedResources->interpolatedMutex);
@@ -722,22 +893,46 @@ namespace RT64 {
 
             // VR: xrWaitFrame paces this loop. A frame with no new eyes shows the last ones again (the layer keeps each swapchain's last
             // released image); ending a frame with no layers would clear the display.
-            static rs64vr::EyeViews vrLastViews;
             const bool vrSession = (rs64_vr_session() != 0);
             if (vrSession && (i < framesToPresent)) {
+                RS64VrStats &vs = rs64VrStats;
                 const int vrRender = rs64_vr_begin_frame();
                 std::vector<std::unique_ptr<RenderTarget>> &vrRight = ext.sharedResources->vrRightTargets[vrSet];
                 std::vector<rs64vr::EyeViews> &vrViews = ext.sharedResources->vrTargetViews[vrSet];
-                const bool haveEyes = (colorTarget != nullptr) && (uint32_t(i) < vrRight.size()) && (uint32_t(i) < vrViews.size()) && vrViews[i].valid;
-                if ((vrRender == 1) && haveEyes && rs64SubmitEyes(ext.presentGraphicsWorker, ext.shaderLibrary, colorTarget, vrRight[i].get(), vrViews[i])) {
-                    vrLastViews = vrViews[i];
+                // Only a workload that rendered both eyes into its own targets has a pair; the vectors keep older frames' eyes otherwise.
+                const bool haveEyes = frameCounters.vr && (colorTarget != nullptr) && (uint32_t(i) < vrRight.size()) && (uint32_t(i) < vrViews.size()) && vrViews[i].valid;
+                const bool vrFresh = (vrRender == 1) && (colorTarget != nullptr) && (frameCounters.vrScreen || haveEyes);
+                const bool vrHoldOld = rs64VrFade(vrFresh, frameCounters.vrScreen);
+                if ((vrRender == 1) && vrHoldOld) {
+                    rs64VrRepeat();
+                    vs.fadeHeld++;
+                }
+                else if ((vrRender == 1) && frameCounters.vrScreen && (colorTarget != nullptr) && rs64SubmitScreen(colorTarget, present.screenVI, filtering, removeBlackBorders, letterbox43)) {
+                    rs64VrLastScreen = true;
+                    vs.screen++;
+                }
+                else if ((vrRender == 1) && !frameCounters.vrScreen && haveEyes && rs64SubmitEyes(ext.presentGraphicsWorker, ext.shaderLibrary, colorTarget, vrRight[i].get(), vrViews[i])) {
+                    rs64VrLastViews = vrViews[i];
+                    rs64VrLastScreen = false;
+                    vs.fresh++;
                 }
                 else if (vrRender == 1) {
-                    rs64_vr_end_frame(&vrLastViews);
+                    rs64VrRepeat();
+                    if (colorTarget == nullptr) vs.noColor++;
+                    else if (!frameCounters.vr) vs.noEyes++;
+                    else if (uint32_t(i) >= vrRight.size()) vs.noRight++;
+                    else if ((uint32_t(i) >= vrViews.size()) || !vrViews[i].valid) vs.noViews++;
+                    else vs.submitFail++;
                 }
                 else if (vrRender == 0) {
                     rs64_vr_end_frame(nullptr);
+                    vs.noRender++;
                 }
+                else {
+                    vs.failed++;
+                }
+
+                rs64VrLogStats();
             }
 
             // The window mirrors the left eye at most 30 times a second, so a 60 Hz FIFO swapchain never holds back the headset.
@@ -983,9 +1178,23 @@ namespace RT64 {
         while (presentThreadRunning) {
             {
                 std::unique_lock<std::mutex> cursorLock(cursorMutex);
-                cursorCondition.wait(cursorLock, [&]() {
+                const auto presentReady = [&]() {
                     return (writeCursor != threadCursor) || !presentThreadRunning;
-                });
+                };
+
+                // VR: past 50 ms without a present the headset gets the last eyes again each frame (xrWaitFrame paces the loop) until the game presents.
+                auto keepAliveWait = std::chrono::milliseconds(50);
+                while (!presentReady()) {
+                    if ((rs64_vr_session() == 0) || !(rs64VrLastViews.valid || rs64VrLastScreen)) {
+                        cursorCondition.wait(cursorLock, presentReady);
+                    }
+                    else if (!cursorCondition.wait_for(cursorLock, keepAliveWait, presentReady)) {
+                        cursorLock.unlock();
+                        rs64VrKeepAlive();
+                        cursorLock.lock();
+                        keepAliveWait = std::chrono::milliseconds(0);
+                    }
+                }
 
                 if (presentThreadRunning) {
                     processCursor = threadCursor;

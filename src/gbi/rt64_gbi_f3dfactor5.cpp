@@ -952,6 +952,12 @@ namespace RT64 {
         static GBIFunction s_inner[UCODE_MAP_SIZE];
         static constexpr int F5_MAX_DEPTH = 64;
         static uint32_t s_task_faces = 0;
+        // VR: a task under this many 3D faces is a 2D screen (menu, boot screen). The mode changes only after 10 tasks in a row on the other side,
+        // so a screen whose small models hover around the line (SELECT GAME) does not flip between the virtual screen and the 3D view.
+        static constexpr uint32_t kScreenFaces = 64;
+        static constexpr uint32_t kScreenSwitchTasks = 10;
+        static bool s_screen_mode = false;
+        static uint32_t s_screen_run = 0;
         // True once the game sent G_SETPRIMDEPTH (0xEE) for the current zSource=PRIM state (the sky
         // pins itself to 0x7FBE this way). Cleared when a 0xB9 turns zSource off. Effect meshes set
         // zSource=PRIM without an 0xEE and rely on the synthesized per-face depth instead.
@@ -1075,6 +1081,30 @@ namespace RT64 {
             if (state->displayListCounter != s_chunk_counter) {   // new task: root chunk starts here
                 s_chunk_counter = state->displayListCounter;
                 g_f5_task_hops = s_chunk_hops; g_f5_task_faces = s_task_faces;
+
+                // Cutscenes stay in the 3D view from their first frame: the N64 logo draws few faces before its explosion.
+                // The menu tree and results are 2D even with models on them (SELECT GAME, the medal); SELECT LEVEL is 3D.
+                // Cutscenes and the front end's screen come from the game's state, so they switch at once; only the face count waits.
+                const bool cutscene = (g_active_overlay == 2);
+                const int menuView = cutscene ? -1 : rs64_vr_menu_tree();
+                const bool task2D = (menuView >= 0) ? (menuView == 1) : (!cutscene && (s_task_faces < kScreenFaces));
+
+                if ((cutscene || (menuView >= 0)) && (task2D != s_screen_mode)) {
+                    s_screen_run = kScreenSwitchTasks;
+                }
+
+                if (task2D == s_screen_mode) {
+                    s_screen_run = 0;
+                }
+                else if (++s_screen_run >= kScreenSwitchTasks) {
+                    s_screen_mode = task2D;
+                    s_screen_run = 0;
+
+                    if (rs64vr::logEnabled()) {
+                        std::fprintf(stderr, "[vr] %s at task %llu (%u faces)\n", task2D ? "virtual screen" : "3D view", (unsigned long long)s_chunk_counter, s_task_faces);
+                    }
+                }
+
                 // ROGUESQ_LOG_GFX_TASK: one line per finished F5 task (faces/entries/hops + whether a
                 // budget cap ended it) to correlate object flicker with dropped geometry.
                 { static bool s_tl = env_on("ROGUESQ_LOG_GFX_TASK", false);
@@ -3543,7 +3573,7 @@ namespace RT64 {
             (*dl) += 2;
         }
 
-        static bool f5_texrect_quad(State* state, const DisplayList* dl, uint32_t id, const char* probe, float dx, float dy, bool stIsZero = false, float pushDepth = 0.0f);
+        static bool f5_texrect_quad(State* state, const DisplayList* dl, uint32_t id, const char* probe, float dx, float dy, bool stIsZero = false, float pushDepth = 0.0f, bool screenFrustum = false);
 
         // VR: a HUD element's texrect becomes a camera-space quad at the radar's depth, so it stays with the ship and lines up with the 3D radar disc
         // (the HUD pass places the radar node 0.9 world units ahead; camera space is world units x 256). The id is the rect's corner, which a still HUD element keeps.
@@ -3555,31 +3585,50 @@ namespace RT64 {
             return f5_texrect_quad(state, dl, id, "vr-hud", 0.0f, 0.0f, false, kHudDepth);
         }
 
-        // VR outside missions: a texrect drawn before any 3D face of its task is a backdrop (the crawl's planet), placed at half the far plane; menu text and
-        // pictures drawn over the 3D scene sit a meter ahead. Both stay where the game camera faces instead of following the head.
+        // VR outside missions: a texrect drawn before any 3D face of its task is a backdrop (the crawl's planet), placed at half the far plane; menu text,
+        // pictures and cutscene subtitles drawn over the 3D scene sit a meter ahead. Both stay where the game camera faces instead of following the head.
+        // A 2D screen with a small model on it (the memory pak icon, 46 faces) keeps all its texrects on one plane; text pulled a meter ahead would shift between eyes.
         bool f5_vr_scene_quad(State* state, const DisplayList* dl) {
-            const bool backdrop = (s_task_faces == 0);
+            static uint64_t s_screenTask = ~0ull;
+            static float s_screenDepth = 0.0f;
+            const bool onScreen = (s_screenTask == state->displayListCounter);
+            const bool screen2D = (s_task_faces < kScreenFaces) && (g_f5_task_faces < kScreenFaces);
 
-            if (!backdrop && (g_active_overlay != 1)) {
+            // With a virtual screen the whole 2D screen is drawn as on desktop and shown flat, so its texrects stay texrects.
+            if (s_screen_mode && (rs64_vr_session() != 0) && (rs64_vr_has_screen() != 0)) {
+                return false;
+            }
+
+            const bool backdrop = (s_task_faces == 0) || onScreen || screen2D;
+
+            if (!backdrop && (g_active_overlay != 1) && (g_active_overlay != 2)) {
                 return false;
             }
 
             float depth = rs64_vr_units_per_meter();
 
-            if (backdrop) {
+            if (onScreen) {
+                depth = s_screenDepth;
+            }
+            else if (backdrop) {
                 const hlslpp::float4x4 proj = state->rsp->viewProjMatrixStack[state->rsp->projectionMatrixStackSize - 1];
                 const float w = float(proj[2][3]);
 
-                if (std::fabs(w) < 1e-6f) {
-                    return false;
+                // NDC z = a + b / z; the far plane is where it reaches +-1. Without a usable projection the screen sits 3 m ahead.
+                depth = 3.0f * rs64_vr_units_per_meter();
+
+                if (std::fabs(w) >= 1e-6f) {
+                    const float a = float(proj[2][2]) / w;
+                    const float b = float(proj[3][2]) / w;
+                    const float farPlane = std::max(std::fabs(b / (1.0f - a)), std::fabs(b / (-1.0f - a)));
+
+                    if (std::isfinite(farPlane) && (farPlane > 0.0f)) {
+                        depth = 0.5f * farPlane;
+                    }
                 }
 
-                // NDC z = a + b / z; the far plane is where it reaches +-1.
-                const float a = float(proj[2][2]) / w;
-                const float b = float(proj[3][2]) / w;
-                const float farPlane = std::max(std::fabs(b / (1.0f - a)), std::fabs(b / (-1.0f - a)));
-
-                depth = 0.5f * farPlane;
+                s_screenTask = state->displayListCounter;
+                s_screenDepth = depth;
             }
 
             if (!std::isfinite(depth) || !(depth > 0.0f)) {
@@ -3607,7 +3656,11 @@ namespace RT64 {
             const uint32_t ulx = (dl[0].w1 >> 14) & 0x3FFu;
             const uint32_t uly = (dl[0].w1 >> 2) & 0x3FFu;
             const uint32_t id = 0x83000000u | (ulx << 10) | uly;
-            return f5_texrect_quad(state, dl, id, "vr-scene", 0.0f, 0.0f, false, depth);
+            return f5_texrect_quad(state, dl, id, "vr-scene", 0.0f, 0.0f, false, depth, backdrop);
+        }
+
+        extern "C" int rs64_f5_screen2d(void) {
+            return s_screen_mode ? 1 : 0;
         }
 
         // Crosshair rings are texrects, which RT64 never interpolates. A texrect that matches a ring element of the HUD struct draws instead as a camera-space quad on its own transform id. ROGUESQ_F5_XHAIR_QUAD=0 keeps the texrect.
@@ -3711,7 +3764,7 @@ namespace RT64 {
 
         // Draws the texrect at dl, moved by dx, dy pixels, as a camera-space quad on transform `id`; false leaves it to the texrect path. stIsZero: dl's S and T hold something else and the texture starts at 0.
         // pushDepth > 0 slides the quad along its view rays to that camera-space depth: the same screen spot flat, that distance in stereo.
-        static bool f5_texrect_quad(State* state, const DisplayList* dl, uint32_t id, const char* probe, float dx, float dy, bool stIsZero, float pushDepth) {
+        static bool f5_texrect_quad(State* state, const DisplayList* dl, uint32_t id, const char* probe, float dx, float dy, bool stIsZero, float pushDepth, bool screenFrustum) {
             const uint32_t w0 = dl[0].w0, w1 = dl[0].w1;
             const rs64xhair::Rect r{ ((w1 >> 12) & 0xFFFu) / 4.0f + dx, (w1 & 0xFFFu) / 4.0f + dy, ((w0 >> 12) & 0xFFFu) / 4.0f + dx, (w0 & 0xFFFu) / 4.0f + dy };
             const uint8_t tile = (uint8_t)((w1 >> 24) & 7u);
@@ -3723,7 +3776,18 @@ namespace RT64 {
             const auto &vp = state->rsp->viewportStack[state->rsp->viewportStackSize - 1];
             const hlslpp::float4x4 inv = hlslpp::inverse(proj);
             constexpr float ScreenDepth = 0.1f;
+            // A 2D screen keeps no projection of its own (it inherits the last 3D scene's, view included), so it gets a fixed virtual screen centred ahead: the frame's width spans kScreenTanX each side.
+            constexpr float kScreenTanX = 0.55f;
+            const float pixelAspect = std::max(state->viHistory.top().vi.pixelAspect(), 0.25f);
+            const float screenTan = kScreenTanX / std::max(float(state->rdp->colorImage.width) * 0.5f, 1.0f);
             auto unproject = [&](float sx, float sy, float out[3]) {
+                if (screenFrustum) {
+                    out[0] = (sx - (float)vp.translate.x) * screenTan;
+                    out[1] = (sy - (float)vp.translate.y) * screenTan / pixelAspect;
+                    out[2] = 1.0f;
+                    return true;
+                }
+
                 const float nx = (sx - (float)vp.translate.x) / (float)vp.scale.x;
                 const float ny = -(sy - (float)vp.translate.y) / (float)vp.scale.y;
                 const float nz = (ScreenDepth - (float)vp.translate.z) / (float)vp.scale.z;
@@ -3749,7 +3813,7 @@ namespace RT64 {
             }
             // F5 projections carry no view, so the eye is the origin and scaling every point keeps it on its view ray. Only a perspective has rays.
             if (pushDepth > 0.0f) {
-                const bool perspective = std::fabs(float(proj[3][3])) < 1e-6f;
+                const bool perspective = screenFrustum || (std::fabs(float(proj[3][3])) < 1e-6f);
                 if (!perspective || !(centre[2] > 0.0f)) {
                     return false;
                 }

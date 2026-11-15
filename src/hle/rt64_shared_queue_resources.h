@@ -28,6 +28,10 @@ namespace RT64 {
 
         // The workload's MSAA mode, as the present of that workload can run after a switch.
         bool msaa = false;
+        // VR: every rendered frame, the first too, has its own target and eye views, so the present side always pairs a left and right eye of one pose.
+        bool vr = false;
+        // VR: a 2D screen for the virtual screen, rendered once with no eyes.
+        bool vrScreen = false;
     };
 
     struct SharedQueueResources {

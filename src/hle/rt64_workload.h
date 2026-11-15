@@ -285,6 +285,8 @@ namespace RT64 {
         FramebufferStorage fbStorage;
         uint32_t viOriginalRate;
         uint32_t viFrameTicks = 0;
+        // VR: a 2D screen (menu, boot screen), rendered once as on desktop and shown on the virtual screen instead of in the 3D view.
+        bool vrScreen = false;
         hlslpp::uint2 viFbSize = {};
         float viPixelAspect = 1.0f;
         DebuggerRenderer debuggerRenderer;
