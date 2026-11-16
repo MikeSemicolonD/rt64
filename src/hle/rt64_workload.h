@@ -232,11 +232,14 @@ namespace RT64 {
         // The light-preset level code of a front-end frame (PresetLights::BriefingRoom / Hangar), else PresetLights::NoLevel (-1).
         int rs64PresetScene = -1;
         rs64lights::Sun rs64Sun;
+        rs64lights::Haze rs64Haze;
         rs64lights::TerrainFrame rs64Terrain;
         rs64lights::TerrainPassFrame rs64TerrainPass;
         std::vector<uint32_t> rs64NoCast;
         // Glow-card transforms: their cutout faces never cast (opaque parts on the transform still do).
         std::vector<uint32_t> rs64NoCastCutout;
+        // translucentOnly emissive presets: these transforms' translucent draws are self-lit; their opaque draws still cast.
+        std::vector<uint32_t> rs64EmissiveXlu;
         // Flying craft transforms (rs64lights::movingCraft): they cast every frame but stay out of the history snapshots.
         std::vector<uint32_t> rs64Craft;
         // Triangles the RSP clipper dropped as wholly outside the view, kept for the shadow casters while RT shadows are on.

@@ -197,6 +197,13 @@ namespace RT64 {
             std::unique_ptr<RS64TracedDescriptorSet> rs64FogSet;
             bool rs64FogDebug = false;
             bool rs64FogOn = false;
+            bool rs64FogShade = false;
+            bool rs64HazeOn = false;
+            // Haze at half resolution: traced into rs64HazeHalfTex (bound as the fog set's gColor), then added to the frame by the upsample.
+            std::unique_ptr<RenderTexture> rs64HazeHalfTex;
+            std::unique_ptr<RenderFramebuffer> rs64HazeHalfFb;
+            uint32_t rs64HazeHalfW = 0;
+            uint32_t rs64HazeHalfH = 0;
             std::unique_ptr<RenderTexture> rs64SoftMask;
             std::unique_ptr<RenderTexture> rs64SoftPing;
             std::unique_ptr<RenderTexture> rs64SoftIndirect;
@@ -435,7 +442,7 @@ namespace RT64 {
         void ensureRS64SoftTargets(RenderWorker *worker, Framebuffer &framebuffer, uint32_t width, uint32_t height, bool halfTrace);
         void buildRS64HitColors(const DrawParams &p, const std::vector<std::pair<rs64lights::IndexRange, uint32_t>> &terrainCalls, const float *floorUp);
         bool rs64ViewProj(const DrawParams &p, uint32_t transformsIndex, rs64lights::Mat4 &out);
-        bool fillRS64FogShafts(const DrawParams &p, Framebuffer &framebuffer, uint32_t transformsIndex, hlslpp::float2 screenScale, hlslpp::float2 screenOffset, const rs64lights::Sun &sun, const rs64lights::FogParams &fog);
+        bool fillRS64FogShafts(const DrawParams &p, Framebuffer &framebuffer, uint32_t transformsIndex, hlslpp::float2 screenScale, hlslpp::float2 screenOffset, const rs64lights::Sun &sun, const rs64lights::FogParams &fog, bool fogOn, bool hazeOn);
         void recordRS64FogShafts(RenderWorker *worker, const Framebuffer &framebuffer, bool &depthState);
         void bindRS64Traced(RenderWorker *worker, RS64TracedDescriptorSet &set, RenderBuffer *paramsBuffer, uint64_t countOffset, bool countAsFloat);
         void recordRS64ShadowScene(RenderWorker *worker, bool dynamic);

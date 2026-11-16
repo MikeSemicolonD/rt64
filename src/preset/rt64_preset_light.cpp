@@ -82,8 +82,23 @@ namespace RT64 {
         cameraUnits = jsonObj.value("cameraUnits", false);
         lamp = jsonObj.value("lamp", false);
         emissive = jsonObj.value("emissive", false);
+        translucentOnly = jsonObj.value("translucentOnly", false);
         priority = jsonObj.value("priority", -1);
         sprite = jsonObj.value("sprite", std::string());
+        hazeAmount = 0.0f;
+        hazeRange = 0.0f;
+        hazeColor[0] = hazeColor[1] = hazeColor[2] = -1.0f;
+        auto jhaze = jsonObj.find("haze");
+        if ((jhaze != jsonObj.end()) && jhaze->is_object()) {
+            hazeAmount = std::clamp(jhaze->value("amount", 0.0f), 0.0f, 0.99f);
+            hazeRange = std::max(jhaze->value("range", 0.0f), 0.0f);
+            auto jcolor = jhaze->find("color");
+            if ((jcolor != jhaze->end()) && jcolor->is_array() && (jcolor->size() == 3)) {
+                for (int i = 0; i < 3; i++) {
+                    hazeColor[i] = std::max((*jcolor)[i].get<float>(), 0.0f);
+                }
+            }
+        }
 
         return true;
     }
@@ -123,12 +138,25 @@ namespace RT64 {
             jsonObj["emissive"] = true;
         }
 
+        if (translucentOnly) {
+            jsonObj["translucentOnly"] = true;
+        }
+
         if (priority >= 0) {
             jsonObj["priority"] = priority;
         }
 
         if (!sprite.empty()) {
             jsonObj["sprite"] = sprite;
+        }
+
+        if (hazeAmount > 0.0f) {
+            json jhaze = { { "amount", hazeAmount }, { "range", hazeRange } };
+            if (hazeColor[0] >= 0.0f) {
+                jhaze["color"] = { hazeColor[0], hazeColor[1], hazeColor[2] };
+            }
+
+            jsonObj["haze"] = jhaze;
         }
 
         return true;

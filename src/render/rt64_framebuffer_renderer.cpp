@@ -2722,7 +2722,9 @@ namespace RT64 {
                     const bool oneTransform = (call.callDesc.minWorldMatrix == call.callDesc.maxWorldMatrix);
                     const auto &noCast = p.curWorkload->rs64NoCast;
                     const auto &noCastCutout = p.curWorkload->rs64NoCastCutout;
-                    const bool emissive = oneTransform && (std::find(noCast.begin(), noCast.end(), call.callDesc.minWorldMatrix) != noCast.end());
+                    const auto &emissiveXlu = p.curWorkload->rs64EmissiveXlu;
+                    const bool emissive = oneTransform && ((std::find(noCast.begin(), noCast.end(), call.callDesc.minWorldMatrix) != noCast.end())
+                        || (cm.xlu && (std::find(emissiveXlu.begin(), emissiveXlu.end(), call.callDesc.minWorldMatrix) != emissiveXlu.end())));
                     const bool glowCard = oneTransform && (std::find(noCastCutout.begin(), noCastCutout.end(), call.callDesc.minWorldMatrix) != noCastCutout.end());
                     const rs64lights::CasterClass cc = rs64lights::casterAfterDeny(rs64lights::casterClass(cm), emissive, glowCard, lightsCfg.shadowCutout);
                     if (hitColors && drawnTerrain) {
@@ -2903,12 +2905,15 @@ namespace RT64 {
             const rs64lights::FogParams &fog = rs64lights::workloadFog(rs64FogCache, p.curWorkload->workloadId, fogPick);
             shadowsFilled = shadowsWanted && sceneHasCasters && fillRS64Shadows(p, framebuffer, lightsTransformsIndex, lightsScreenScale, lightsScreenOffset, sun, fog);
             if (fogWanted && sceneHasCasters) {
-                const bool fogVisible = (lightsCfg.fogShaftsDebug != 0) || rs64lights::fogShaftsVisible(fog.color, lightsCfg.fogShaftsStrength);
-                fogFilled = fogVisible && fillRS64FogShafts(p, framebuffer, lightsTransformsIndex, lightsScreenScale, lightsScreenOffset, sun, fog);
+                const bool fogDebug = (lightsCfg.fogShaftsDebug != 0);
+                const bool fogVisible = fog.valid && (fogDebug || rs64lights::fogShaftsVisible(fog.color, lightsCfg.fogShaftsStrength));
+                const rs64lights::Haze &haze = p.curWorkload->rs64Haze;
+                const bool hazeVisible = !fogDebug && (haze.amount > 0.0f) && (haze.range > 0.0f) && (lightsCfg.hazeStrength > 0.0f);
+                fogFilled = (fogVisible || hazeVisible) && fillRS64FogShafts(p, framebuffer, lightsTransformsIndex, lightsScreenScale, lightsScreenOffset, sun, fog, fogVisible, hazeVisible);
                 if (lightsCfg.log) {
                     static uint32_t s_f = 0;
                     if ((++s_f % 120) == 1) {
-                        std::fprintf(stderr, "[rt-fog] pick: valid=%d tris=%u mul=%.2f offset=%.2f color=(%.3f,%.3f,%.3f) filled=%d\n", (int)fog.valid, fog.tris, fog.mul, fog.offset, fog.color[0], fog.color[1], fog.color[2], (int)fogFilled);
+                        std::fprintf(stderr, "[rt-fog] pick: valid=%d tris=%u mul=%.2f offset=%.2f color=(%.3f,%.3f,%.3f) filled=%d haze=%.2f/%.0f\n", (int)fog.valid, fog.tris, fog.mul, fog.offset, fog.color[0], fog.color[1], fog.color[2], (int)fogFilled, hazeVisible ? haze.amount : 0.0f, haze.range);
                     }
                 }
             }
@@ -4049,10 +4054,10 @@ namespace RT64 {
         worker->commandList->setGraphicsDescriptorSet(set.get(), 3);
     }
 
-    bool FramebufferRenderer::fillRS64FogShafts(const DrawParams &p, Framebuffer &framebuffer, uint32_t transformsIndex, hlslpp::float2 screenScale, hlslpp::float2 screenOffset, const rs64lights::Sun &sun, const rs64lights::FogParams &fog) {
+    bool FramebufferRenderer::fillRS64FogShafts(const DrawParams &p, Framebuffer &framebuffer, uint32_t transformsIndex, hlslpp::float2 screenScale, hlslpp::float2 screenOffset, const rs64lights::Sun &sun, const rs64lights::FogParams &fog, bool fogOn, bool hazeOn) {
         rs64lights::Mat4 inv;
         rs64lights::Mat4 viewProj;
-        if (!sun.valid || !fog.valid || !framebuffer.rs64FogSet || !rs64ViewProj(p, transformsIndex, viewProj) || !rs64ViewFromScreen(p, transformsIndex, screenScale, screenOffset, inv)) {
+        if (!sun.valid || !framebuffer.rs64FogSet || !rs64ViewProj(p, transformsIndex, viewProj) || !rs64ViewFromScreen(p, transformsIndex, screenScale, screenOffset, inv)) {
             return false;
         }
 
@@ -4075,13 +4080,39 @@ namespace RT64 {
         cb.skyDepth = rs64lights::fogSkyDepth();
         cb.visBias = cfg.shadowNormalBias;
 
+        const rs64lights::Haze &haze = p.curWorkload->rs64Haze;
+        const float *hazeColor = (haze.color[0] >= 0.0f) ? haze.color : sun.color;
+        cb.hazeColor = { hazeColor[0] * cfg.hazeStrength, hazeColor[1] * cfg.hazeStrength, hazeColor[2] * cfg.hazeStrength, 0.0f };
+        cb.hazeRange = haze.range;
+        cb.hazeDensity = hazeOn ? (-std::log(1.0f - haze.amount) / haze.range) : 0.0f;
+
         void *bytes = framebuffer.rs64FogBuffer->map();
         memcpy(bytes, &cb, sizeof(cb));
         framebuffer.rs64FogBuffer->unmap();
         framebuffer.rs64FogSet->setBuffer(framebuffer.rs64FogSet->gParams, framebuffer.rs64FogBuffer.get(), sizeof(interop::RS64FogShaftsCB));
         bindRS64Depth(p, framebuffer, *framebuffer.rs64FogSet, framebuffer.rs64FogSet->gDepth);
-        bindRS64Depth(p, framebuffer, *framebuffer.rs64FogSet, framebuffer.rs64FogSet->gColor);
+        if (hazeOn) {
+            const RenderTarget *ct = p.fbStorage->colorTarget;
+            const uint32_t hw = (ct->width + 1) / 2;
+            const uint32_t hh = (ct->height + 1) / 2;
+            if (!framebuffer.rs64HazeHalfTex || (framebuffer.rs64HazeHalfW != hw) || (framebuffer.rs64HazeHalfH != hh)) {
+                framebuffer.rs64HazeHalfFb.reset();
+                framebuffer.rs64HazeHalfTex = p.worker->device->createTexture(RenderTextureDesc::ColorTarget(hw, hh, RenderFormat::R16G16B16A16_FLOAT));
+                const RenderTexture *halfTargets[] = { framebuffer.rs64HazeHalfTex.get() };
+                framebuffer.rs64HazeHalfFb = p.worker->device->createFramebuffer(RenderFramebufferDesc(halfTargets, 1));
+                framebuffer.rs64HazeHalfW = hw;
+                framebuffer.rs64HazeHalfH = hh;
+            }
+
+            framebuffer.rs64FogSet->setTexture(framebuffer.rs64FogSet->gColor, framebuffer.rs64HazeHalfTex.get(), RenderTextureLayout::SHADER_READ);
+        }
+        else {
+            bindRS64Depth(p, framebuffer, *framebuffer.rs64FogSet, framebuffer.rs64FogSet->gColor);
+        }
+
         framebuffer.rs64FogDebug = (cfg.fogShaftsDebug != 0);
+        framebuffer.rs64FogShade = fogOn;
+        framebuffer.rs64HazeOn = hazeOn;
         return true;
     }
 
@@ -4186,15 +4217,39 @@ namespace RT64 {
         const RenderTargetDrawCall &targetDrawCall = framebuffer.renderTargetDrawCall;
         submitDepthAccess(worker, targetDrawCall.fbStorage, true, depthState);
         framebuffer.rs64FogSet->setAccelerationStructure(framebuffer.rs64FogSet->gScene, rs64Shadow.tlas.get());
-        const ShaderRecord &record = framebuffer.rs64FogDebug ? shaderLibrary->rs64FogShaftsDebug : shaderLibrary->rs64FogShafts;
         const RenderViewport &v = framebuffer.viewport;
         worker->commandList->setViewports(v);
         worker->commandList->setScissors(RenderRect(int32_t(v.x), int32_t(v.y), int32_t(v.x + v.width), int32_t(v.y + v.height)));
-        worker->commandList->setPipeline(record.pipeline.get());
-        worker->commandList->setGraphicsPipelineLayout(record.pipelineLayout.get());
-        bindRS64Traced(worker, *framebuffer.rs64FogSet, framebuffer.rs64FogBuffer.get(), offsetof(interop::RS64FogShaftsCB, cutoutDrawCount), false);
         worker->commandList->setVertexBuffers(0, nullptr, 0, nullptr);
-        worker->commandList->drawInstanced(3, 1, 0, 0);
+        auto draw = [&](const ShaderRecord &record) {
+            worker->commandList->setPipeline(record.pipeline.get());
+            worker->commandList->setGraphicsPipelineLayout(record.pipelineLayout.get());
+            bindRS64Traced(worker, *framebuffer.rs64FogSet, framebuffer.rs64FogBuffer.get(), offsetof(interop::RS64FogShaftsCB, cutoutDrawCount), false);
+            worker->commandList->drawInstanced(3, 1, 0, 0);
+        };
+
+        if (framebuffer.rs64FogShade) {
+            draw(framebuffer.rs64FogDebug ? shaderLibrary->rs64FogShaftsDebug : shaderLibrary->rs64FogShafts);
+        }
+
+        if (framebuffer.rs64HazeOn && (framebuffer.rs64HazeHalfFb != nullptr)) {
+            RenderTexture *halfTex = framebuffer.rs64HazeHalfTex.get();
+            const RenderTextureBarrier toHalf[] = { RenderTextureBarrier(halfTex, RenderTextureLayout::COLOR_WRITE) };
+            worker->commandList->barriers(RenderBarrierStage::GRAPHICS, toHalf, uint32_t(std::size(toHalf)));
+            worker->commandList->setFramebuffer(framebuffer.rs64HazeHalfFb.get());
+            worker->commandList->clearColor(0, RenderColor(0.0f, 0.0f, 0.0f, 0.0f));
+            worker->commandList->setViewports(RenderViewport(v.x / 2.0f, v.y / 2.0f, v.width / 2.0f, v.height / 2.0f, v.minDepth, v.maxDepth));
+            worker->commandList->setScissors(RenderRect(int32_t(v.x) / 2, int32_t(v.y) / 2, (int32_t(v.x + v.width) + 1) / 2, (int32_t(v.y + v.height) + 1) / 2));
+            draw(shaderLibrary->rs64HazeShafts);
+
+            RenderTexture *color = targetDrawCall.fbStorage->colorTarget->texture.get();
+            const RenderTextureBarrier toUpsample[] = { RenderTextureBarrier(halfTex, RenderTextureLayout::SHADER_READ), RenderTextureBarrier(color, RenderTextureLayout::COLOR_WRITE) };
+            worker->commandList->barriers(RenderBarrierStage::GRAPHICS, toUpsample, uint32_t(std::size(toUpsample)));
+            worker->commandList->setFramebuffer(targetDrawCall.fbStorage->colorWriteDepthRead.get());
+            worker->commandList->setViewports(v);
+            worker->commandList->setScissors(RenderRect(int32_t(v.x), int32_t(v.y), int32_t(v.x + v.width), int32_t(v.y + v.height)));
+            draw(shaderLibrary->rs64HazeUpsample);
+        }
     }
 
     // A terrain tile as the game loads it: the bank entry's CI4 texels at TMEM 0 and its 16 RGBA5551 colours as palette 15 (each 4 times, as a

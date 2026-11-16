@@ -2087,7 +2087,7 @@ namespace RT64 {
             f5_next_chunk(state, dl);
         }
 
-        // Mesh i's no-cast mark: the registry's (laser bolts 1, glow cards 2), or 1 when an enabled emissive light preset names its key.
+        // Mesh i's no-cast mark: the registry's (laser bolts 1, glow cards 2), or 1 when an enabled emissive light preset names its key (3 when the preset is translucentOnly).
         static uint8_t f5_mesh_nocast(State* state, F5MeshRegistry& reg, uint32_t i) {
             if ((reg.noCast[i] != 0) || state->rs64EmissiveMeshes.empty()) {
                 return reg.noCast[i];
@@ -2099,9 +2099,9 @@ namespace RT64 {
             if (reg.emissiveGen[i] != state->rs64EmissiveGeneration) {
                 reg.emissiveGen[i] = state->rs64EmissiveGeneration;
                 reg.emissive[i] = 0;
-                for (const std::string& mesh : state->rs64EmissiveMeshes) {
-                    if (PresetLights::meshMatches(mesh, reg.names[i])) {
-                        reg.emissive[i] = 1;
+                for (size_t m = 0; m < state->rs64EmissiveMeshes.size(); m++) {
+                    if (PresetLights::meshMatches(state->rs64EmissiveMeshes[m], reg.names[i])) {
+                        reg.emissive[i] = ((m < state->rs64EmissiveTranslucent.size()) && state->rs64EmissiveTranslucent[m]) ? 3 : 1;
                         if (rs64lights::config().log) {
                             std::fprintf(stderr, "[rt-lights] emissive mesh %s\n", reg.names[i].c_str());
                         }
@@ -3287,7 +3287,8 @@ namespace RT64 {
                 // Laser bolts (pure light) and light-source glow cards never cast; a torpedo body does.
                 if ((s_pending_nocast != 0) && rs64lights::sceneCaptureEnabled(rs64lights::config())) {
                     Workload &wl = state->ext.workloadQueue->workloads[state->ext.workloadQueue->writeCursor];
-                    (s_pending_nocast == 1 ? wl.rs64NoCast : wl.rs64NoCastCutout).push_back(state->rsp->curTransformIndex);
+                    auto &marked = (s_pending_nocast == 1) ? wl.rs64NoCast : ((s_pending_nocast == 3) ? wl.rs64EmissiveXlu : wl.rs64NoCastCutout);
+                    marked.push_back(state->rsp->curTransformIndex);
                 }
             }
             s_pending_nocast = 0;

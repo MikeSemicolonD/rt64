@@ -50,12 +50,19 @@ namespace RT64 {
         // RS64: the matched mesh parts are self-lit (an exhaust, light strips): never casters, bright in bounce light and reflections, and left
         // unshadowed where they are drawn. Works with or without lights of its own.
         bool emissive = false;
+        // RS64: with emissive, only the parts' translucent draws are self-lit (a shuttle's exhaust inside its hull part); the rest still casts.
+        bool translucentOnly = false;
         // RS64: rank for the 32 light slots, higher kept first; -1 = the light's type default (rs64lights::PriorityMesh etc.).
         int priority = -1;
 
         // RS64: effect-sprite keys, '|'-separated ("spr:<texture name>"). A matching sprite's automatic light is replaced by this
         // preset's enabled lights at the sprite (radius = attenuation radius x the sprite's size, brightness following its fade); none = no light.
         std::string sprite;
+
+        // RS64: haze for the preset's level ("haze": { "amount", "range", "color" }), drawn with the light shafts (rs64lights::Haze); amount 0 = none.
+        float hazeAmount = 0.0f;
+        float hazeRange = 0.0f;
+        float hazeColor[3] = { -1.0f, -1.0f, -1.0f };
 
         // A key matches one of the mesh's keys exactly or extends it at a '#' or '.' boundary ("red_laser" matches "red_laser#s2.p0.0").
         static bool meshMatches(const std::string &mesh, const std::string &key) {

@@ -569,6 +569,14 @@ namespace rs64lights {
         float world[3] = {};
     };
 
+    // A level preset's haze: sunlit air near the camera that shows shafts on its own, whatever the game's fog. amount = the share of light a
+    // fully sunlit ray of length range scatters; color < 0 = the sun's colour.
+    struct Haze {
+        float amount = 0.0f;
+        float range = 0.0f;
+        float color[3] = { -1.0f, -1.0f, -1.0f };
+    };
+
     // The level light points toward the sun with y flipped relative to the y-down world (Tatooine's sun meshes); R maps world to camera as out = R * v.
     // A sun stored below the horizon (level 6; the game never shades with it) is mirrored above it.
     // Rotation of a row-vector view matrix (v * M) as sunCameraDir's R (out = R * v), each axis normalised.
@@ -1722,6 +1730,8 @@ namespace rs64lights {
         // Blinn-Phong highlight strength (0 = off) and exponent for the light pass.
         float specular;
         float specularPower;
+        // Scale on every level preset's haze brightness (0 = no haze).
+        float hazeStrength;
     };
 
     // ROGUESQ_RT_LIGHTS=1 enables the pass; the rest are tuning and debug knobs.
@@ -1798,6 +1808,7 @@ namespace rs64lights {
             std::max(envFloat("ROGUESQ_RT_LIGHTS_MIN_REACH", 0.01f), 0.0f),
             std::max(envFloat("ROGUESQ_RT_LIGHTS_SPEC", 0.5f), 0.0f),
             std::clamp(envFloat("ROGUESQ_RT_LIGHTS_SPEC_POWER", 32.0f), 1.0f, 512.0f),
+            std::max(envFloat("ROGUESQ_RT_HAZE_STRENGTH", 1.0f), 0.0f),
         };
         return c;
     }

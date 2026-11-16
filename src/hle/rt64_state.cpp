@@ -2142,15 +2142,25 @@ namespace RT64 {
         }
 
         thread_local std::vector<std::string> emissiveMeshes;
+        thread_local std::vector<uint8_t> emissiveTranslucent;
         emissiveMeshes.clear();
+        emissiveTranslucent.clear();
         for (const auto &it : lightsLibrary.presetMap) {
             if (it.second.enabled && it.second.emissive && !it.second.mesh.empty() && it.second.appliesTo(presetLevel)) {
                 emissiveMeshes.push_back(it.second.mesh);
+                emissiveTranslucent.push_back(it.second.translucentOnly ? 1 : 0);
+            }
+
+            if (it.second.enabled && (it.second.hazeAmount > 0.0f) && (it.second.hazeRange > 0.0f) && it.second.appliesTo(presetLevel)) {
+                workload.rs64Haze.amount = it.second.hazeAmount;
+                workload.rs64Haze.range = it.second.hazeRange;
+                memcpy(workload.rs64Haze.color, it.second.hazeColor, sizeof(workload.rs64Haze.color));
             }
         }
 
-        if (emissiveMeshes != rs64EmissiveMeshes) {
+        if ((emissiveMeshes != rs64EmissiveMeshes) || (emissiveTranslucent != rs64EmissiveTranslucent)) {
             rs64EmissiveMeshes = emissiveMeshes;
+            rs64EmissiveTranslucent = emissiveTranslucent;
             rs64EmissiveGeneration++;
             if (rs64lights::config().log) {
                 fprintf(stderr, "[rt-lights] emissive presets: %zu mesh keys (generation %u)\n", rs64EmissiveMeshes.size(), rs64EmissiveGeneration);

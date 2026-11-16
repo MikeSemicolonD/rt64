@@ -32,6 +32,71 @@ float sunVisible(float3 q) {
     return rs64SunHit(ray, gFog.cutoutDrawCount, hitT, id) ? 0.0f : 1.0f;
 }
 
+float3 viewPoint(float2 xy, float depth) {
+    const float2 rel = (xy - gFog.viewport.xy) / gFog.viewport.zw;
+    const float4 v4 = mul(gFog.viewFromScreen, float4(rel.x * 2.0f - 1.0f, 1.0f - rel.y * 2.0f, depth, 1.0f));
+    return v4.xyz / ((abs(v4.w) < 1e-20f) ? 1e-20f : v4.w);
+}
+
+// Length of the haze march through a full-resolution pixel: to the receiver, capped at hazeRange (the sky takes the full range).
+float hazeDist(float2 xy, float depth) {
+    return (depth >= gFog.skyDepth) ? gFog.hazeRange : min(length(viewPoint(xy, depth)), gFog.hazeRange);
+}
+
+#if defined(RS64_HAZE)
+
+// Level haze, independent of the game's fog: sunlit air along the view ray, brightest toward the sun. Drawn at half resolution, march length in alpha.
+float4 PSMain(in float4 pos : SV_Position, in float2 uv : TEXCOORD0) : SV_TARGET {
+    const int2 px = min(int2(pos.xy) * 2, int2(gFog.viewport.xy + gFog.viewport.zw) - 1);
+    const float2 xy = float2(px) + 0.5f;
+    const float depth = gDepth.Load(int3(px, 0));
+    const float3 dir = normalize(viewPoint(xy, 0.5f));
+    const float dist = hazeDist(xy, depth);
+    const float jitter = interleavedNoise(pos.xy);
+    // Every haze step traces (the fog pass skips steps where its fog does not grow), so it takes half the steps; the jitter hides the banding.
+    const uint n = max(gFog.steps / 2u, 4u);
+    float lit = 0.0f;
+    for (uint i = 0; i < n; i++) {
+        lit += sunVisible(dir * (dist * (float(i) + jitter) / float(n)));
+    }
+
+    const float g = 0.6f;
+    const float hg = (1.0f - g * g) / pow(1.0f + g * g - 2.0f * g * dot(dir, gFog.sunDir.xyz), 1.5f);
+    const float phase = 0.25f + 0.75f * hg * (1.0f - g) * (1.0f - g) * (1.0f - g) / (1.0f - g * g);
+    const float scatter = 1.0f - exp(-gFog.hazeDensity * dist * lit / float(n));
+    return float4(gFog.hazeColor.rgb * phase * scatter, dist);
+}
+
+#elif defined(RS64_HAZE_UPSAMPLE)
+
+Texture2D<float4> gColor : register(t12, space3);
+
+// Adds the half-resolution haze to the frame: the four nearest half texels, those with this pixel's march length counting most.
+float4 PSMain(in float4 pos : SV_Position, in float2 uv : TEXCOORD0) : SV_TARGET {
+    const int2 px = int2(pos.xy);
+    const float dist = hazeDist(pos.xy, gDepth.Load(int3(px, 0)));
+    const int2 lo = int2(gFog.viewport.xy) >> 1;
+    const int2 hi = max((int2(gFog.viewport.xy + gFog.viewport.zw) >> 1) - 1, lo);
+    const int2 i0 = (px - 1) >> 1;
+    const float2 f = float2((px - 1) & 1) * 0.5f + 0.25f;
+    float3 sum = float3(0.0f, 0.0f, 0.0f);
+    float wsum = 0.0f;
+    [unroll]
+    for (int k = 0; k < 4; k++) {
+        const int2 o2 = int2(k & 1, k >> 1);
+        const float4 h = gColor.Load(int3(clamp(i0 + o2, lo, hi), 0));
+        const float d = abs(h.a - dist) / max(dist, 1.0f);
+        const float bilinear = (o2.x ? f.x : 1.0f - f.x) * (o2.y ? f.y : 1.0f - f.y);
+        const float w = (bilinear + 0.01f) / (1.0e-4f + d * d);
+        sum += w * h.rgb;
+        wsum += w;
+    }
+
+    return float4((wsum > 0.0f) ? (sum / wsum) : float3(0.0f, 0.0f, 0.0f), 0.0f);
+}
+
+#else
+
 float4 PSMain(in float4 pos : SV_Position, in float2 uv : TEXCOORD0) : SV_TARGET {
     const bool debug = (gFog.debugMode != 0);
     // Sky pin and cleared depth: the game never fogs the sky, so it gets no in-scatter.
@@ -77,3 +142,5 @@ float4 PSMain(in float4 pos : SV_Position, in float2 uv : TEXCOORD0) : SV_TARGET
     // The game's fog already assumes lit air; the pass subtracts the share the sun doesn't reach, so shafts are shadowed fog, not extra glow.
     return float4(gFog.strength * gFog.fogColor.rgb * max(fEnd - lit, 0.0f), 0.0f);
 }
+
+#endif

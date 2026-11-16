@@ -23,6 +23,8 @@
 #   include "shaders/RS64ShadowsPS.hlsl.spirv.h"
 #   include "shaders/RS64LightsShadowedPS.hlsl.spirv.h"
 #   include "shaders/RS64FogShaftsPS.hlsl.spirv.h"
+#   include "shaders/RS64HazeShaftsPS.hlsl.spirv.h"
+#   include "shaders/RS64HazeUpsamplePS.hlsl.spirv.h"
 #   include "shaders/RS64ShadowsSoftPS.hlsl.spirv.h"
 #   include "shaders/RS64ShadowBlurPS.hlsl.spirv.h"
 #   include "shaders/RS64ShadowBlurVPS.hlsl.spirv.h"
@@ -92,6 +94,8 @@
 #   include "shaders/RS64ShadowsPS.hlsl.dxil.h"
 #   include "shaders/RS64LightsShadowedPS.hlsl.dxil.h"
 #   include "shaders/RS64FogShaftsPS.hlsl.dxil.h"
+#   include "shaders/RS64HazeShaftsPS.hlsl.dxil.h"
+#   include "shaders/RS64HazeUpsamplePS.hlsl.dxil.h"
 #   include "shaders/RS64ShadowsSoftPS.hlsl.dxil.h"
 #   include "shaders/RS64ShadowBlurPS.hlsl.dxil.h"
 #   include "shaders/RS64ShadowBlurVPS.hlsl.dxil.h"
@@ -1236,6 +1240,27 @@ namespace RT64 {
             pipelineDesc.renderTargetBlend[0] = sub;
             pipelineDesc.pipelineLayout = rs64FogShafts.pipelineLayout.get();
             rs64FogShafts.pipeline = device->createGraphicsPipeline(pipelineDesc);
+
+            // Level haze: sunlit air near the camera, traced at half resolution into a float target (march length in alpha), then added (dst + src).
+            rs64HazeShafts.pipelineLayout = tracedLayout();
+            std::unique_ptr<RenderShader> hazeShader = device->createShader(CREATE_SHADER_INPUTS(RS64HazeShaftsPSBlobDXIL, RS64HazeShaftsPSBlobSPIRV, RS64HazeShaftsPSBlobSPIRV, "PSMain", shaderFormat));
+            RenderGraphicsPipelineDesc hazeHalfDesc = pipelineDesc;
+            hazeHalfDesc.pixelShader = hazeShader.get();
+            hazeHalfDesc.renderTargetFormat[0] = RenderFormat::R16G16B16A16_FLOAT;
+            hazeHalfDesc.multisampling = RenderMultisampling();
+            hazeHalfDesc.depthTargetFormat = RenderFormat::UNKNOWN;
+            hazeHalfDesc.renderTargetBlend[0] = RenderBlendDesc::Copy();
+            hazeHalfDesc.pipelineLayout = rs64HazeShafts.pipelineLayout.get();
+            rs64HazeShafts.pipeline = device->createGraphicsPipeline(hazeHalfDesc);
+            rs64HazeUpsample.pipelineLayout = tracedLayout();
+            std::unique_ptr<RenderShader> hazeUpShader = device->createShader(CREATE_SHADER_INPUTS(RS64HazeUpsamplePSBlobDXIL, RS64HazeUpsamplePSBlobSPIRV, RS64HazeUpsamplePSBlobSPIRV, "PSMain", shaderFormat));
+            RenderBlendDesc hazeAdd = sub;
+            hazeAdd.blendOp = RenderBlendOperation::ADD;
+            pipelineDesc.pixelShader = hazeUpShader.get();
+            pipelineDesc.renderTargetBlend[0] = hazeAdd;
+            pipelineDesc.pipelineLayout = rs64HazeUpsample.pipelineLayout.get();
+            rs64HazeUpsample.pipeline = device->createGraphicsPipeline(pipelineDesc);
+            pipelineDesc.pixelShader = fogShader.get();
             pipelineDesc.renderTargetBlend[0] = RenderBlendDesc::Copy();
             pipelineDesc.pipelineLayout = rs64FogShaftsDebug.pipelineLayout.get();
             rs64FogShaftsDebug.pipeline = device->createGraphicsPipeline(pipelineDesc);

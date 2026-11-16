@@ -31,6 +31,7 @@ namespace RT64 {
         rs64MeshKeys.clear();
         rs64PresetScene = -1;
         rs64Sun = rs64lights::Sun{};
+        rs64Haze = rs64lights::Haze{};
         rs64Terrain.map.reset();
         rs64Terrain.samples.clear();
         rs64Terrain.transformIndex = UINT32_MAX;
@@ -38,6 +39,7 @@ namespace RT64 {
         rs64TerrainPass = rs64lights::TerrainPassFrame{};
         rs64NoCast.clear();
         rs64NoCastCutout.clear();
+        rs64EmissiveXlu.clear();
         rs64Craft.clear();
         rs64CastOnly.clear();
         rs64Rebase.clear();

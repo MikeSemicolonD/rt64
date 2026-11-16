@@ -13,6 +13,7 @@ namespace interop {
         float4 viewport;
         float4 sunDir;
         float4 fogColor;
+        float4 hazeColor;
         uint debugMode;
         uint steps;
         float strength;
@@ -25,6 +26,8 @@ namespace interop {
         float visBias;
         uint cutoutDrawCount;
         float fogTail;
+        float hazeDensity;
+        float hazeRange;
     };
 #ifdef HLSL_CPU
 };

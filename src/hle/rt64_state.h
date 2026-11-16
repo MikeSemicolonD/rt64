@@ -108,6 +108,8 @@ namespace RT64 {
         PresetLightsLibrary lightsLibrary;
         // RS64: mesh keys of the enabled emissive light presets for the current level, rebuilt each frame; the generation changes with the list.
         std::vector<std::string> rs64EmissiveMeshes;
+        // Per entry of rs64EmissiveMeshes: 1 when only its translucent draws are emissive (translucentOnly).
+        std::vector<uint8_t> rs64EmissiveTranslucent;
         uint32_t rs64EmissiveGeneration = 0;
         PresetMaterialLibrary materialLibrary;
         PresetSceneLibrary sceneLibrary;

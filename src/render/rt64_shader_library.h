@@ -59,6 +59,8 @@ namespace RT64 {
         ShaderRecord rs64LightsShadowedDebug;
         ShaderRecord rs64FogShafts;
         ShaderRecord rs64FogShaftsDebug;
+        ShaderRecord rs64HazeShafts;
+        ShaderRecord rs64HazeUpsample;
         ShaderRecord fbChangesDrawDepth;
         ShaderRecord fbReadAnyChanges;
         ShaderRecord fbReadAnyFull;
