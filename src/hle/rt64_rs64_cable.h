@@ -8,7 +8,7 @@ namespace rs64cable {
     constexpr uint32_t kInstanceOffset = 0x40;
     // The scene node traverseSceneGraphRecursive maps for a segment is 0x0C into its mesh instance.
     constexpr uint32_t kSceneNodeOffset = 0x0C;
-    // The head index is a u8; vanilla uses 60 slots, the long-tow-cable mod 160.
+    // The head index is a u8; vanilla uses 60 slots, the long-tow-cable mod 240.
     constexpr uint32_t kMaxSlots = 255;
 
     inline uint32_t sceneNodeOf(uint32_t instance) {
