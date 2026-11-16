@@ -42,6 +42,8 @@ extern "C" float rs64_fog_tail_end(void);
 extern "C" uint32_t rs64_level_fog_rgb(void);
 // F3DFACTOR5: 1 while the game shows a 2D screen (tasks under 64 3D faces, held for 10 tasks before it changes).
 extern "C" int rs64_f5_screen2d(void);
+// ultramodern: tell the game this graphics task is done before its GPU work finishes.
+extern "C" void rs64_gfx_complete_early(void);
 extern "C" { std::atomic<uint32_t> g_rs64_frame_tris{0}; }
 extern "C" { std::atomic<uint32_t> g_rs64_frame_draws{0}; }
 extern "C" { std::atomic<uint32_t> g_rs64_frame_texloads{0}; }
@@ -1851,6 +1853,12 @@ namespace RT64 {
                 static const bool logGpuWait = []() { const char *e = std::getenv("ROGUESQ_LOG_GPU_WAIT"); return (e != nullptr) && (e[0] == '1'); }();
                 const auto gpuWaitStart = std::chrono::steady_clock::now();
                 ext.framebufferGraphicsWorker->execute();
+
+                // The last batch with no write-back leaves nothing that touches the game's RDRAM, so the game can start its next frame during the wait.
+                if ((maxFramebufferPair == workload.fbPairCount) && !ext.emulatorConfig->framebuffer.writeBack) {
+                    rs64_gfx_complete_early();
+                }
+
                 ext.framebufferGraphicsWorker->wait();
                 if (logGpuWait) {
                     static auto windowStart = gpuWaitStart;
