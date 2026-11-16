@@ -35,11 +35,13 @@
 #include "shaders/FbReadAnyChangesCS.hlsl.spirv.h"
 #include "shaders/FbReadAnyFullCS.hlsl.spirv.h"
 #include "shaders/FbReinterpretCS.hlsl.spirv.h"
+#include "shaders/FbReinterpretCSHDR.hlsl.spirv.h"
 #include "shaders/FbWriteColorCS.hlsl.spirv.h"
 #include "shaders/FbWriteDepthCS.hlsl.spirv.h"
 #include "shaders/FbWriteDepthCSMS.hlsl.spirv.h"
 #include "shaders/GaussianFilterRGB3x3CS.hlsl.spirv.h"
 #include "shaders/BoxFilterCS.hlsl.spirv.h"
+#include "shaders/BoxFilterCSHDR.hlsl.spirv.h"
 #include "shaders/BicubicScalingCS.hlsl.spirv.h"
 #include "shaders/HistogramAverageCS.hlsl.spirv.h"
 #include "shaders/HistogramClearCS.hlsl.spirv.h"
@@ -101,11 +103,13 @@
 #   include "shaders/FbReadAnyChangesCS.hlsl.dxil.h"
 #   include "shaders/FbReadAnyFullCS.hlsl.dxil.h"
 #   include "shaders/FbReinterpretCS.hlsl.dxil.h"
+#   include "shaders/FbReinterpretCSHDR.hlsl.dxil.h"
 #   include "shaders/FbWriteColorCS.hlsl.dxil.h"
 #   include "shaders/FbWriteDepthCS.hlsl.dxil.h"
 #   include "shaders/FbWriteDepthCSMS.hlsl.dxil.h"
 #   include "shaders/GaussianFilterRGB3x3CS.hlsl.dxil.h"
 #   include "shaders/BoxFilterCS.hlsl.dxil.h"
+#   include "shaders/BoxFilterCSHDR.hlsl.dxil.h"
 #   include "shaders/BicubicScalingCS.hlsl.dxil.h"
 #   include "shaders/HistogramAverageCS.hlsl.dxil.h"
 #   include "shaders/HistogramClearCS.hlsl.dxil.h"
@@ -155,11 +159,13 @@
 #   include "shaders/FbReadAnyChangesCS.hlsl.metal.h"
 #   include "shaders/FbReadAnyFullCS.hlsl.metal.h"
 #   include "shaders/FbReinterpretCS.hlsl.metal.h"
+#   include "shaders/FbReinterpretCSHDR.hlsl.metal.h"
 #   include "shaders/FbWriteColorCS.hlsl.metal.h"
 #   include "shaders/FbWriteDepthCS.hlsl.metal.h"
 #   include "shaders/FbWriteDepthCSMS.hlsl.metal.h"
 #   include "shaders/GaussianFilterRGB3x3CS.hlsl.metal.h"
 #   include "shaders/BoxFilterCS.hlsl.metal.h"
+#   include "shaders/BoxFilterCSHDR.hlsl.metal.h"
 #   include "shaders/BicubicScalingCS.hlsl.metal.h"
 #   include "shaders/HistogramAverageCS.hlsl.metal.h"
 #   include "shaders/HistogramClearCS.hlsl.metal.h"
@@ -330,7 +336,9 @@ namespace RT64 {
             layoutBuilder.end();
             boxFilter.pipelineLayout = layoutBuilder.create(device);
 
-            std::unique_ptr<RenderShader> computeShader = device->createShader(CREATE_SHADER_INPUTS(BoxFilterCSBlobDXIL, BoxFilterCSBlobSPIRV, BoxFilterCSBlobMSL, "CSMain", shaderFormat));
+            std::unique_ptr<RenderShader> computeShader = usesHDR
+                ? device->createShader(CREATE_SHADER_INPUTS(BoxFilterCSHDRBlobDXIL, BoxFilterCSHDRBlobSPIRV, BoxFilterCSHDRBlobMSL, "CSMain", shaderFormat))
+                : device->createShader(CREATE_SHADER_INPUTS(BoxFilterCSBlobDXIL, BoxFilterCSBlobSPIRV, BoxFilterCSBlobMSL, "CSMain", shaderFormat));
             RenderComputePipelineDesc pipelineDesc(boxFilter.pipelineLayout.get(), computeShader.get(), 8, 8, 1);
             boxFilter.pipeline = device->createComputePipeline(pipelineDesc);
         }
@@ -451,7 +459,9 @@ namespace RT64 {
             layoutBuilder.end();
             fbReinterpret.pipelineLayout = layoutBuilder.create(device);
 
-            std::unique_ptr<RenderShader> computeShader = device->createShader(CREATE_SHADER_INPUTS(FbReinterpretCSBlobDXIL, FbReinterpretCSBlobSPIRV, FbReinterpretCSBlobMSL, "CSMain", shaderFormat));
+            std::unique_ptr<RenderShader> computeShader = usesHDR
+                ? device->createShader(CREATE_SHADER_INPUTS(FbReinterpretCSHDRBlobDXIL, FbReinterpretCSHDRBlobSPIRV, FbReinterpretCSHDRBlobMSL, "CSMain", shaderFormat))
+                : device->createShader(CREATE_SHADER_INPUTS(FbReinterpretCSBlobDXIL, FbReinterpretCSBlobSPIRV, FbReinterpretCSBlobMSL, "CSMain", shaderFormat));
             RenderComputePipelineDesc pipelineDesc(fbReinterpret.pipelineLayout.get(), computeShader.get(), 8, 8, 1);
             fbReinterpret.pipeline = device->createComputePipeline(pipelineDesc);
         }

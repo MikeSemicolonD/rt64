@@ -14,6 +14,12 @@
 Texture2D<float4> gInputColor : register(t1);
 Texture1D<uint> gInputTLUT : register(t2);
 // 25 is SPIR-V NonReadable: WebGPU allows these formats only as write-only storage textures.
+// The format is explicit for drivers without shaderStorageImageWriteWithoutFormat (V3D on the Pi).
+#ifdef HDR
+[[vk::image_format("rgba16")]]
+#else
+[[vk::image_format("rgba8")]]
+#endif
 [[vk::ext_decorate(25)]] RWTexture2D<float4> gOutput : register(u3);
 
 float4 RGBA16toCI8(float4 inputColor, uint2 inputCoord, uint2 outputCoord) {

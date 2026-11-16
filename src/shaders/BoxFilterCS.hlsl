@@ -13,6 +13,12 @@ struct BoxFilterCB {
 [[vk::push_constant]] ConstantBuffer<BoxFilterCB> gConstants : register(b0);
 Texture2D<float4> gInput : register(t1);
 // 25 is SPIR-V NonReadable: WebGPU allows these formats only as write-only storage textures.
+// The format is explicit for drivers without shaderStorageImageWriteWithoutFormat (V3D on the Pi).
+#ifdef HDR
+[[vk::image_format("rgba16")]]
+#else
+[[vk::image_format("rgba8")]]
+#endif
 [[vk::ext_decorate(25)]] RWTexture2D<float4> gOutput : register(u2);
 
 [numthreads(BLOCK_SIZE, BLOCK_SIZE, 1)]
