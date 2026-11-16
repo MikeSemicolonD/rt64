@@ -30,6 +30,8 @@ namespace RT64 {
         assert(device != nullptr);
 
         this->device = device;
+        const char *directEnv = std::getenv("ROGUESQ_UMA_UPLOADS");
+        directWrite = device->getCapabilities().uma && ((directEnv == nullptr) || (directEnv[0] != '0'));
         workAvailable = false;
         thread = new std::thread(&BufferUploader::threadLoop, this);
     }
@@ -76,9 +78,10 @@ namespace RT64 {
         const size_t srcOffset = upload.srcDataIndexRange.first * upload.srcDataStride;
         const size_t srcSize = (upload.srcDataIndexRange.second - upload.srcDataIndexRange.first) * upload.srcDataStride;
         const RenderRange writtenRange(srcOffset, srcOffset + srcSize);
-        uint8_t *dstData = static_cast<uint8_t *>(upload.dstPair->uploadBuffer->map());
+        RenderBuffer *hostBuffer = upload.dstPair->hostBuffer();
+        uint8_t *dstData = static_cast<uint8_t *>(hostBuffer->map());
         memcpy(dstData + srcOffset, static_cast<const uint8_t *>(upload.srcData) + srcOffset, srcSize);
-        upload.dstPair->uploadBuffer->unmap(0, &writtenRange);
+        hostBuffer->unmap(0, &writtenRange);
     }
 
     void BufferUploader::updateResources(RenderWorker *worker, std::vector<Upload> &blankUploads) {
@@ -96,8 +99,16 @@ namespace RT64 {
             const uint64_t BlockAlignment = 256;
             bufferPair.allocatedSize = std::max(uint64_t((requiredSize * 3) / 2), BlockAlignment);
             bufferPair.allocatedSize = roundUp(bufferPair.allocatedSize, BlockAlignment);
-            bufferPair.uploadBuffer = worker->device->createBuffer(RenderBufferDesc::UploadBuffer(bufferPair.allocatedSize));
-            bufferPair.defaultBuffer = worker->device->createBuffer(RenderBufferDesc::DefaultBuffer(bufferPair.allocatedSize, u.bufferFlags));
+            if (directWrite) {
+                RenderBufferDesc directDesc = RenderBufferDesc::DefaultBuffer(bufferPair.allocatedSize, u.bufferFlags);
+                directDesc.heapType = RenderHeapType::GPU_UPLOAD;
+                bufferPair.uploadBuffer.reset();
+                bufferPair.defaultBuffer = worker->device->createBuffer(directDesc);
+            }
+            else {
+                bufferPair.uploadBuffer = worker->device->createBuffer(RenderBufferDesc::UploadBuffer(bufferPair.allocatedSize));
+                bufferPair.defaultBuffer = worker->device->createBuffer(RenderBufferDesc::DefaultBuffer(bufferPair.allocatedSize, u.bufferFlags));
+            }
 
             bufferPair.defaultViews.reserve(u.formatViews.size());
             for (RenderFormat format : u.formatViews) {
@@ -121,6 +132,11 @@ namespace RT64 {
     }
 
     void BufferUploader::commandListBeforeBarriers(RenderWorker *worker) {
+        // Direct writes need no copy or barriers: every submission that reads these buffers is waited on before the next upload, and host writes are visible at submit.
+        if (directWrite) {
+            return;
+        }
+
         thread_local std::vector<RenderBufferBarrier> beforeBarriers;
         beforeBarriers.clear();
 
@@ -139,6 +155,10 @@ namespace RT64 {
     }
 
     void BufferUploader::commandListCopyResources(RenderWorker *worker) {
+        if (directWrite) {
+            return;
+        }
+
         for (const Upload &u : pendingUploads) {
             if (!u.valid()) {
                 continue;
@@ -151,6 +171,10 @@ namespace RT64 {
     }
 
     void BufferUploader::commandListAfterBarriers(RenderWorker *worker) {
+        if (directWrite) {
+            return;
+        }
+
         thread_local std::vector<RenderBufferBarrier> afterBarriers;
         afterBarriers.clear();
 

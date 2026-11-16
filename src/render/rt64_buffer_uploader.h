@@ -19,6 +19,11 @@ namespace RT64 {
         std::vector<std::unique_ptr<RenderBufferFormattedView>> defaultViews;
         uint64_t allocatedSize = 0;
 
+        // The buffer the CPU writes and reads: the staging buffer, or the GPU buffer itself when uploads write it directly.
+        RenderBuffer *hostBuffer() const {
+            return (uploadBuffer != nullptr) ? uploadBuffer.get() : defaultBuffer.get();
+        }
+
         const RenderBuffer *get() const {
             return defaultBuffer.get();
         }
@@ -54,6 +59,9 @@ namespace RT64 {
         std::condition_variable readyCondition;
         RenderDevice *device;
         std::vector<Upload> pendingUploads;
+
+        // On shared-memory GPUs uploads write the GPU buffers directly instead of staging and copying them.
+        bool directWrite = false;
 
         BufferUploader(RenderDevice *device);
         ~BufferUploader();

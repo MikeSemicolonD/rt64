@@ -82,7 +82,7 @@ namespace RT64 {
 
     template<typename T>
     static const T *uploadedData(const BufferPair &pair) {
-        return (pair.uploadBuffer != nullptr) ? static_cast<const T *>(pair.uploadBuffer->map()) : nullptr;
+        return (pair.hostBuffer() != nullptr) ? static_cast<const T *>(pair.hostBuffer()->map()) : nullptr;
     }
 
     // RSPProcessor
