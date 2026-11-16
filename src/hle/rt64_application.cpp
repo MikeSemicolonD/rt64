@@ -364,6 +364,7 @@ namespace RT64 {
         }
 
         swapChain = presentGraphicsWorker->commandQueue->createSwapChain(swapChainDesc);
+        swapChain->setVsyncEnabled(userConfig.vsync);
 
         // Before configuring multisampling, make sure the device actually supports it for the formats we'll use. If it doesn't, turn off antialiasing in the configuration.
         const RenderSampleCounts colorSampleCounts = device->getSampleCountsSupported(RenderTarget::colorBufferFormat(usesHDR));

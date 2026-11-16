@@ -108,6 +108,7 @@ namespace RT64 {
         Upscale2D upscale2D;
         bool threePointFiltering;
         bool fxaa;
+        bool vsync;
         RefreshRate refreshRate;
         int refreshRateTarget;
         InternalColorFormat internalColorFormat;

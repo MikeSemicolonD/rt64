@@ -24,6 +24,7 @@ namespace RT64 {
         j["upscale2D"] = cfg.upscale2D;
         j["threePointFiltering"] = cfg.threePointFiltering;
         j["fxaa"] = cfg.fxaa;
+        j["vsync"] = cfg.vsync;
         j["refreshRate"] = cfg.refreshRate;
         j["refreshRateTarget"] = cfg.refreshRateTarget;
         j["internalColorFormat"] = cfg.internalColorFormat;
@@ -48,6 +49,7 @@ namespace RT64 {
         cfg.upscale2D = j.value("upscale2D", defaultCfg.upscale2D);
         cfg.threePointFiltering = j.value("threePointFiltering", defaultCfg.threePointFiltering);
         cfg.fxaa = j.value("fxaa", defaultCfg.fxaa);
+        cfg.vsync = j.value("vsync", defaultCfg.vsync);
         cfg.refreshRate = j.value("refreshRate", defaultCfg.refreshRate);
         cfg.refreshRateTarget = j.value("refreshRateTarget", defaultCfg.refreshRateTarget);
         cfg.internalColorFormat = j.value("internalColorFormat", defaultCfg.internalColorFormat);
@@ -80,6 +82,7 @@ namespace RT64 {
         upscale2D = Upscale2D::ScaledOnly;
         threePointFiltering = true;
         fxaa = false;
+        vsync = true;
         refreshRate = RefreshRate::Original;
         refreshRateTarget = 60;
         internalColorFormat = InternalColorFormat::Automatic;
