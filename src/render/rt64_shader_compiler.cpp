@@ -38,6 +38,28 @@ namespace RT64 {
         }
     }
 
+    // dxcompiler 1.7.2308 now and then faults inside Link (and once at build time inside Compile) on input that compiles fine on a retry. These guards turn
+    // an access violation into a failed call, so the variant is dropped instead of the game; they hold no C++ objects, which an SEH unwind would skip.
+    static HRESULT guardedCompile(IDxcCompiler *compiler, IDxcBlob *text, LPCWSTR entry, LPCWSTR profile, LPCWSTR *arguments, UINT32 argumentCount, IDxcOperationResult **result) {
+        __try {
+            return compiler->Compile(text, L"", entry, profile, arguments, argumentCount, nullptr, 0, nullptr, result);
+        }
+        __except ((GetExceptionCode() == EXCEPTION_ACCESS_VIOLATION) ? EXCEPTION_EXECUTE_HANDLER : EXCEPTION_CONTINUE_SEARCH) {
+            *result = nullptr;
+            return E_FAIL;
+        }
+    }
+
+    static HRESULT guardedLink(IDxcLinker *linker, LPCWSTR entry, LPCWSTR profile, const LPCWSTR *libraryNames, UINT32 libraryCount, IDxcOperationResult **result) {
+        __try {
+            return linker->Link(entry, profile, libraryNames, libraryCount, nullptr, 0, result);
+        }
+        __except ((GetExceptionCode() == EXCEPTION_ACCESS_VIOLATION) ? EXCEPTION_EXECUTE_HANDLER : EXCEPTION_CONTINUE_SEARCH) {
+            *result = nullptr;
+            return E_FAIL;
+        }
+    }
+
     static void checkResultForError(IDxcOperationResult *result) {
         HRESULT resultCode;
         result->GetStatus(&resultCode);
@@ -95,7 +117,13 @@ namespace RT64 {
         }
 
         IDxcOperationResult *result = nullptr;
-        dxcCompiler->Compile(textBlob, L"", entryName.c_str(), profile.c_str(), arguments.data(), (UINT32)(arguments.size()), nullptr, 0, nullptr, &result);
+        guardedCompile(dxcCompiler, textBlob, entryName.c_str(), profile.c_str(), arguments.data(), (UINT32)(arguments.size()), &result);
+        if (result == nullptr) {
+            textBlob->Release();
+            fprintf(stderr, "[shader-error] dxcompiler faulted in Compile; the variant is dropped\n");
+            throw std::runtime_error("dxcompiler faulted in Compile");
+        }
+
         checkResultForError(result);
         result->GetResult(shaderBlob);
         textBlob->Release();
@@ -124,7 +152,13 @@ namespace RT64 {
         }
 
         IDxcOperationResult *result = nullptr;
-        dxcLinker->Link(entryName.c_str(), profile.c_str(), libraryBlobNames, libraryBlobCount, nullptr, 0, &result);
+        guardedLink(dxcLinker, entryName.c_str(), profile.c_str(), libraryBlobNames, libraryBlobCount, &result);
+        if (result == nullptr) {
+            dxcLinker->Release();
+            fprintf(stderr, "[shader-error] dxcompiler faulted in Link; the variant is dropped\n");
+            throw std::runtime_error("dxcompiler faulted in Link");
+        }
+
         checkResultForError(result);
         result->GetResult(shaderBlob);
         dxcLinker->Release();

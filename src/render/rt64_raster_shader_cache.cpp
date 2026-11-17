@@ -98,9 +98,16 @@ namespace RT64 {
                 assert((shaderCache->shaderUber != nullptr) && "Ubershader should've been created by the time a new shader is submitted to the cache.");
                 const RenderPipelineLayout *uberPipelineLayout = shaderCache->shaderUber->pipelineLayout.get();
                 const RenderMultisampling multisampling = shaderCache->multisampling;
-                std::unique_ptr<RasterShader> newShader = std::make_unique<RasterShader>(shaderCache->device, shaderDesc, uberPipelineLayout, shaderCache->shaderFormat, multisampling, shaderCompiler.get(), &shaderCache->optimizerCacheSPIRV);
+                // A variant the compiler fails on (an error, or a dxcompiler fault turned into one) is skipped; its draws stay on the ubershader.
+                std::unique_ptr<RasterShader> newShader;
+                try {
+                    newShader = std::make_unique<RasterShader>(shaderCache->device, shaderDesc, uberPipelineLayout, shaderCache->shaderFormat, multisampling, shaderCompiler.get(), &shaderCache->optimizerCacheSPIRV);
+                }
+                catch (const std::exception &e) {
+                    fprintf(stderr, "[shader-cache] variant %016llX skipped: %s\n", (unsigned long long)shaderDesc.hash(), e.what());
+                }
 
-                {
+                if (newShader != nullptr) {
                     const std::unique_lock<std::mutex> lock(shaderCache->GPUShadersMutex);
                     shaderCache->GPUShaders[shaderDesc.hash()] = std::move(newShader);
                 }

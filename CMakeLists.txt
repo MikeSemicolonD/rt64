@@ -41,23 +41,24 @@ if (CMAKE_CROSSCOMPILING AND CMAKE_HOST_WIN32)
 elseif (CMAKE_CROSSCOMPILING AND CMAKE_HOST_UNIX AND NOT CMAKE_HOST_APPLE)
     set (DXC "LD_LIBRARY_PATH=${PROJECT_SOURCE_DIR}/src/contrib/dxc/lib/x64" "${PROJECT_SOURCE_DIR}/src/contrib/dxc/bin/x64/dxc-linux")
 elseif (WIN32)
-    set (DXC "${PROJECT_SOURCE_DIR}/src/contrib/dxc/bin/x64/dxc.exe")
+    # The official release, not dxc-bin's 1.7.2308 dxcompiler.dll, which faulted now and then inside Compile and Link.
+    include(FetchContent)
+    FetchContent_Declare(dxc_win URL https://github.com/microsoft/DirectXShaderCompiler/releases/download/v1.9.2609/dxc_2026_09_29.zip
+        URL_HASH SHA256=ad31b1fc8443175d204f77a611fdb3ef2ec42759bdc2f1167368de24a4a7e7f1)
+    FetchContent_MakeAvailable(dxc_win)
+    set (RT64_DXC_INC "${dxc_win_SOURCE_DIR}/inc")
     add_compile_definitions(NOMINMAX)
 
-    # Shaders are always compiled by the x64 dxc.exe; a 32-bit game needs the x86 runtime DLL, which dxc-bin doesn't carry.
+    # Shaders are always compiled by the x64 dxc.exe; a 32-bit game links the x86 runtime.
+    set (DXC "${dxc_win_SOURCE_DIR}/bin/x64/dxc.exe")
     if (CMAKE_SIZEOF_VOID_P EQUAL 4)
-        include(FetchContent)
-        FetchContent_Declare(dxc_x86 URL https://github.com/microsoft/DirectXShaderCompiler/releases/download/v1.8.2403.2/dxc_2024_03_29.zip
-            URL_HASH SHA256=74874e9741f027d4321263af58d24ae0f6dde2351230680b151c87144cc0a02a)
-        FetchContent_MakeAvailable(dxc_x86)
-        set (RT64_DXC_BIN_DIR "${dxc_x86_SOURCE_DIR}/bin/x86" CACHE INTERNAL "")
-        set (RT64_DXC_LIB "${dxc_x86_SOURCE_DIR}/lib/x86/dxcompiler.lib")
         set (RT64_WIN_ARCH x86)
     else()
-        set (RT64_DXC_BIN_DIR "${PROJECT_SOURCE_DIR}/src/contrib/dxc/bin/x64" CACHE INTERNAL "")
-        set (RT64_DXC_LIB "${PROJECT_SOURCE_DIR}/src/contrib/dxc/lib/x64/dxcompiler.lib")
         set (RT64_WIN_ARCH x64)
     endif()
+
+    set (RT64_DXC_BIN_DIR "${dxc_win_SOURCE_DIR}/bin/${RT64_WIN_ARCH}" CACHE INTERNAL "")
+    set (RT64_DXC_LIB "${dxc_win_SOURCE_DIR}/lib/${RT64_WIN_ARCH}/dxcompiler.lib")
 
     # Dependencies that must be next to the DLL.
     configure_file("${RT64_DXC_BIN_DIR}/dxcompiler.dll" "dxcompiler.dll" COPYONLY)
@@ -535,7 +536,7 @@ include_directories(
 
 if (WIN32)
     # DXC only needs to be included during runtime for Windows.
-    include_directories("${PROJECT_SOURCE_DIR}/src/contrib/dxc/inc")
+    include_directories("${RT64_DXC_INC}")
 endif()
 
 if (${RT64_STATIC})
