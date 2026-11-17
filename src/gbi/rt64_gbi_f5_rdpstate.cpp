@@ -412,7 +412,17 @@ namespace RT64 {
             return !rs64hud::spansHeight(int32_t(dl->w1 & 0xFFFu), int32_t(dl->w0 & 0xFFFu), sc.uly, sc.lry);
         }
 
-        // VR: texrects drawn after a HUD marker in this task are the mission's 2D HUD, except full-height wipes, which stay on the screen like a fade.
+        // VR in missions: a full-height texrect is a wipe (the demo's closing one), placed as one quad so both eyes see the same edge.
+        static bool vr_wipe_texrect(State *state, const DisplayList *dl) {
+            if ((rs64_vr_active() == 0) || (rs64_vr_hud_quads() == 0) || (g_active_overlay != 0)) {
+                return false;
+            }
+
+            const FixedRect &sc = state->rdp->scissorRectStack[state->rdp->scissorStackSize - 1];
+            return rs64hud::spansHeight(int32_t(dl->w1 & 0xFFFu), int32_t(dl->w0 & 0xFFFu), sc.uly, sc.lry);
+        }
+
+        // VR: texrects drawn after a HUD marker in this task are the mission's 2D HUD; full-height wipes go to vr_wipe_texrect.
         // Menus also draw through the marked routine but keep their texrects: their wipes use a second masking tile a quad drops.
         static bool vr_hud_texrect(State *state, const DisplayList *dl) {
             if ((rs64_vr_active() == 0) || (rs64_vr_hud_quads() == 0) || (s_hud_task != state->displayListCounter)) {
@@ -654,7 +664,7 @@ namespace RT64 {
                     }
                 }
             }
-            if (f5_crosshair_quad(state, *dl) || f5_credits_glyph_quad(state, *dl) || (vr_hud_texrect(state, *dl) && f5_vr_hud_quad(state, *dl)) || (vr_scene_texrect(state, *dl) && f5_vr_scene_quad(state, *dl))) {
+            if (f5_crosshair_quad(state, *dl) || f5_credits_glyph_quad(state, *dl) || (vr_hud_texrect(state, *dl) && f5_vr_hud_quad(state, *dl)) || (vr_wipe_texrect(state, *dl) && f5_vr_wipe_quad(state, *dl)) || (vr_scene_texrect(state, *dl) && f5_vr_scene_quad(state, *dl))) {
                 (*dl)++;
                 return;
             }
@@ -673,117 +683,157 @@ namespace RT64 {
             (*dl)++;
         }
 
-        // loadTLUT / loadTile / loadBlock guards.
-        //
-        // Replays in RDP::loadTLUTOperation / loadTileOperation compute
-        // rowCount = ((lrt >> 2) - (ult >> 2)) + 1, wordsPerRow similarly. If
-        // lr < ul, the subtraction underflows uint32_t and the inner loop
-        // reads gigabytes past the texture base → AV.
-        //
-        // Original strategy: reject the load entirely. That kept us crash-free
-        // but also threw out real texture loads (Factor 5 emits valid lr/ul
-        // values that look superficially like the bogus ones), leaving tile 0
-        // with empty TMEM → texrects sample black → black screen.
-        //
-        // New strategy: CLAMP. Swap lr/ul if inverted; cap region size.
-        // Real loads land with intact bounds, opcode-reuse cases get a
-        // minimal degenerate load that stores tile metadata but reads ~no
-        // RDRAM. We do this by calling state->rdp->loadXxx directly with
-        // clamped values rather than delegating to GBI_RDP which would
-        // re-parse from the raw DL bytes.
+        // Texture loads clamp their bounds instead of rejecting: inverted or huge ranges underflow RDP's row count and read far past the texture, and
+        // rejecting dropped real loads (black texrects). Where texture fixes go: RS64 docs/engine/rendering-and-ray-tracing.md#textures-and-animated-textures.
+        static bool clamp_load_subscripts(const DisplayList *dl, uint16_t *uls_out, uint16_t *ult_out, uint16_t *lrs_out, uint16_t *lrt_out)
+        {
 
-        // Returns true if the load is so absurd we drop it; otherwise fills
-        // out *uls/*ult/*lrs/*lrt clamped to a safe region (≤256x256 texels).
-        static bool clamp_load_subscripts(const DisplayList *dl,
-                                          uint16_t *uls_out, uint16_t *ult_out,
-                                          uint16_t *lrs_out, uint16_t *lrt_out) {
             uint16_t uls = dl->p0(12, 12);
             uint16_t ult = dl->p0(0, 12);
             uint16_t lrs = dl->p1(12, 12);
             uint16_t lrt = dl->p1(0, 12);
-            // Swap inverted bounds rather than dropping: if Factor 5 emits a
-            // backwards range, treating it forward gives us *some* texels.
-            if (lrs < uls) std::swap(uls, lrs);
-            if (lrt < ult) std::swap(ult, lrt);
-            // Cap span to 1024 (256 texels in 10.2 fixed-point) to keep load
-            // size bounded.
+
+            if (lrs < uls) {
+                std::swap(uls, lrs);
+            }
+
+            if (lrt < ult) {
+                std::swap(ult, lrt);
+            }
+
+            // 1024 = 256 texels in 10.2 fixed point.
             const uint16_t MaxSpan = 1024;
-            if (lrs - uls > MaxSpan) lrs = uls + MaxSpan;
-            if (lrt - ult > MaxSpan) lrt = ult + MaxSpan;
+
+            if (lrs - uls > MaxSpan) {
+                lrs = uls + MaxSpan;
+            }
+
+            if (lrt - ult > MaxSpan) {
+                lrt = ult + MaxSpan;
+            }
+
             *uls_out = uls;
             *ult_out = ult;
             *lrs_out = lrs;
             *lrt_out = lrt;
+
             return false;
         }
 
-        void loadTLUT_guarded(State *state, DisplayList **dl) {
+        // Split the draw call on a TMEM reload: the skybox reloads ~40 tiles into the same tile and TMEM address in one call, which otherwise binds
+        // only the last one. ROGUESQ_F5_NO_TILE_SPLIT=1 disables.
+        static bool f5_tile_split()
+        {
+
+            static const bool s_split = [] {
+
+                const char* e = std::getenv("ROGUESQ_F5_NO_TILE_SPLIT");
+
+                return !(e && (e[0] == '1'));
+            }();
+
+            return s_split;
+        }
+
+        void loadTLUT_guarded(State *state, DisplayList **dl)
+        {
+
             const uint8_t tile = (*dl)->p1(24, 3);
-            uint16_t uls, ult, lrs, lrt;
+            uint16_t uls;
+            uint16_t ult;
+            uint16_t lrs;
+            uint16_t lrt;
+
             clamp_load_subscripts(*dl, &uls, &ult, &lrs, &lrt);
+
             // A TLUT load with <=16 colors ((lrs>>2)+1) marks CI4 intent.
-            if (((lrs >> 2) + 1) <= 16) { s_ci4_tlut_recent = 4; s_last_tlut_src = state->rdp->texture.address & 0x00FFFFFFu; }
+            if (((lrs >> 2) + 1) <= 16) {
+                s_ci4_tlut_recent = 4;
+                s_last_tlut_src = state->rdp->texture.address & 0x00FFFFFFu;
+            }
+
             static int s_count = 0;
+
             if (gbi_log_enabled() && (++s_count <= 8)) {
                 std::fprintf(stderr,
                     "[gbi-f5] loadTLUT #%d tile=%u uls=%u ult=%u lrs=%u lrt=%u (raw w0=0x%08X w1=0x%08X)\n",
                     s_count, tile, uls, ult, lrs, lrt, (*dl)->w0, (*dl)->w1);
                 std::fflush(stderr);
             }
+
             state->rdp->loadTLUT(tile, uls, ult, lrs, lrt);
-            if (ci4tm_on()) { s_ci4tm_tlut_tile = tile; s_ci4tm_tlut_tmem = state->rdp->tiles[tile].tmem; }
+
+            if (ci4tm_on()) {
+                s_ci4tm_tlut_tile = tile;
+                s_ci4tm_tlut_tmem = state->rdp->tiles[tile].tmem;
+            }
         }
 
-        void loadTile_guarded(State *state, DisplayList **dl) {
+        void loadTile_guarded(State *state, DisplayList **dl)
+        {
+
             const uint8_t tile = (*dl)->p1(24, 3);
-            uint16_t uls, ult, lrs, lrt;
+            uint16_t uls;
+            uint16_t ult;
+            uint16_t lrs;
+            uint16_t lrt;
+
             clamp_load_subscripts(*dl, &uls, &ult, &lrs, &lrt);
+
             static int s_count = 0;
+
             if (gbi_log_enabled() && (++s_count <= 8)) {
-                std::fprintf(stderr,
-                    "[gbi-f5] loadTile #%d tile=%u uls=%u ult=%u lrs=%u lrt=%u\n",
-                    s_count, tile, uls, ult, lrs, lrt);
+                std::fprintf(stderr, "[gbi-f5] loadTile #%d tile=%u uls=%u ult=%u lrs=%u lrt=%u\n", s_count, tile, uls, ult, lrs, lrt);
                 std::fflush(stderr);
             }
-            // Split the draw call on a TMEM reload. RS64's skybox reloads ~40 distinct RGBA32 tiles into
-            // the SAME tile/TMEM address within one draw call; because the render tile index never changes,
-            // RT64 never splits the call, so every tile hashes the FINAL emulated-TMEM state and the whole
-            // dome binds ONE texture (flat sky). Flushing pending geometry before the reload commits the
-            // prior tile's faces (with the loads so far) as their own draw call, and marking the texture
-            // dirty forces the next face to re-associate the new load and re-hash the tile. flush() no-ops
-            // when no triangles are pending, so a load-pair-before-a-draw (e.g. TLUT+block) never
-            // over-splits. Default on; ROGUESQ_F5_NO_TILE_SPLIT=1 disables. See plans/skybox-not-rendering-plan.md.
-            static int s_split = -1;
-            if (s_split < 0) { const char* e = std::getenv("ROGUESQ_F5_NO_TILE_SPLIT"); s_split = (e && e[0] == '1') ? 0 : 1; }
-            if (s_split) state->flush();
+
+            if (f5_tile_split()) {
+                state->flush();
+            }
+
             state->rdp->loadTile(tile, uls, ult, lrs, lrt);
-            if (s_split) state->updateDrawStatusAttribute(DrawAttribute::Texture);
+
+            if (f5_tile_split()) {
+                state->updateDrawStatusAttribute(DrawAttribute::Texture);
+            }
         }
 
-        void loadBlock_guarded(State *state, DisplayList **dl) {
-            // loadBlock has different fields: uls/ult are texture origin,
-            // lrs is endpoint, dxt is row stride.
+        void loadBlock_guarded(State *state, DisplayList **dl)
+        {
+
+            // uls/ult are the texture origin, lrs the end, dxt the row stride.
             const uint8_t tile = (*dl)->p1(24, 3);
             uint16_t uls = (*dl)->p0(12, 12);
             uint16_t ult = (*dl)->p0(0, 12);
             uint16_t lrs = (*dl)->p1(12, 12);
             uint16_t dxt = (*dl)->p1(0, 12);
-            if (lrs < uls) std::swap(uls, lrs);
-            // Cap the block size at 2048 texels (max valid in 12-bit field).
-            if (lrs - uls > 2048) lrs = uls + 2048;
+
+            if (lrs < uls) {
+                std::swap(uls, lrs);
+            }
+
+            // 2048 texels is the most the 12-bit field holds.
+            if (lrs - uls > 2048) {
+                lrs = uls + 2048;
+            }
+
             static int s_count = 0;
+
             if (gbi_log_enabled() && (++s_count <= 8)) {
-                std::fprintf(stderr,
-                    "[gbi-f5] loadBlock #%d tile=%u uls=%u ult=%u lrs=%u dxt=%u\n",
-                    s_count, tile, uls, ult, lrs, dxt);
+                std::fprintf(stderr, "[gbi-f5] loadBlock #%d tile=%u uls=%u ult=%u lrs=%u dxt=%u\n", s_count, tile, uls, ult, lrs, dxt);
                 std::fflush(stderr);
             }
-            // Split the draw call on TMEM reload (skybox one-texture bug; see loadTile_guarded).
-            static int s_split = -1;
-            if (s_split < 0) { const char* e = std::getenv("ROGUESQ_F5_NO_TILE_SPLIT"); s_split = (e && e[0] == '1') ? 0 : 1; }
-            if (s_split) state->flush();
+
+            if (f5_tile_split()) {
+                state->flush();
+            }
+
             state->rdp->loadBlock(tile, uls, ult, lrs, dxt);
-            if (s_split) state->updateDrawStatusAttribute(DrawAttribute::Texture);
+
+            if (f5_tile_split()) {
+                state->updateDrawStatusAttribute(DrawAttribute::Texture);
+            }
+
             // ROGUESQ_LOG_CI4_TMEM: full load->tile->TLUT->TMEM trace for the target CI4 model
             // texture (default 0x555490). Answers the standing open question: is the streak a
             // pre-swizzled source RT64 reads linearly, or a wrong palette bank? Prints the block

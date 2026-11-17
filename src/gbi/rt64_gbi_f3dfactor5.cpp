@@ -1359,14 +1359,17 @@ namespace RT64 {
         static uint64_t s_terrain_hash = 0;
         static uint64_t s_terrain_version = 0;
         static uint32_t s_terrain_tab = 0;
-        // Host's terrain renderer choice (rs64_static_terrain_mode): 1 = the whole HMP map draws in one GPU pass at the first terrain record (records
-        // dropped), 0 = the game's own terrain, 2 = each record draws its own cell from the map (the validation scaffold).
+
+        // Terrain renderer (rs64_static_terrain_mode): 1 = the whole HMP map in one GPU pass, 0 = the game's own terrain, 2 = per-record cells (validation).
+        // Where each one's code lives: RS64 docs/engine/rendering-and-ray-tracing.md#terrain-renderers.
         static int f5_static_terrain_mode() {
             return rs64_static_terrain_mode();
         }
+
         static bool f5_static_terrain_enabled() {
             return f5_static_terrain_mode() != 0;
         }
+
         static float rd_be_f32(const uint8_t* ram, uint32_t vaddr) {
             const uint32_t u = rd_be_u32(ram, vaddr);
             float f;
@@ -1788,28 +1791,42 @@ namespace RT64 {
             }
             return s_matches.emplace(key, std::move(matches)).first->second;
         }
-        static void f5_push_mesh_presets(State* state, const std::string& key) {
+        // Mesh-keyed light presets for the part being drawn. Where emissive flags, casters and the traced scene are built: RS64
+        // docs/engine/rendering-and-ray-tracing.md#putting-ray-tracing-on-geometry.
+        static void f5_push_mesh_presets(State* state, const std::string& key)
+        {
+
             PresetLightsLibraryInspector& inspector = state->lightsLibraryInspector;
             const uint32_t ti = state->rsp->curTransformIndex;
             static std::string s_lastKey;
             static uint32_t s_lastTransform = UINT32_MAX;
             static uint64_t s_lastTask = ~0ull;
-            if ((key == s_lastKey) && (ti == s_lastTransform) && (s_lastTask == state->displayListCounter)) {
+
+            if ((key == s_lastKey) && (ti == s_lastTransform) && (s_lastTask == state->displayListCounter))
+            {
                 return;
             }
+
             s_lastKey = key;
             s_lastTransform = ti;
             s_lastTask = state->displayListCounter;
             state->ext.workloadQueue->workloads[state->ext.workloadQueue->writeCursor].rs64MeshKeys[ti] = key;
+
             const bool projectile = rs64lights::laserBolt(key.c_str());
-            for (const F5MeshPresetMatch& match : f5_mesh_preset_matches(state, key)) {
+
+            for (const F5MeshPresetMatch& match : f5_mesh_preset_matches(state, key))
+            {
                 const PresetLights& preset = *match.preset;
                 Workload& wl = state->ext.workloadQueue->workloads[state->ext.workloadQueue->writeCursor];
-                if ((*match.name == inspector.selectedPresetName) && (wl.rs64MeshPickTransform == UINT32_MAX)) {
+
+                if ((*match.name == inspector.selectedPresetName) && (wl.rs64MeshPickTransform == UINT32_MAX))
+                {
                     wl.rs64MeshPickTransform = ti;
                     wl.rs64MeshPickView = state->rsp->curViewProjIndex;
                 }
-                for (const auto& [light, seed] : match.lights) {
+
+                for (const auto& [light, seed] : match.lights)
+                {
                     const interop::PointLight& d = light->description;
                     rs64lights::Candidate c;
                     c.transformIndex = ti;
@@ -1835,10 +1852,12 @@ namespace RT64 {
                     c.spotFalloffCos = d.spotFalloffCosine;
                     c.flicker = d.flickerIntensity;
                     c.seed = seed;
+
                     f5_push_light(state, c);
                 }
             }
         }
+
         // ROGUESQ_DUMP_MESH_VERTS=<mesh name prefix>: unique (part, model-space position, colour) of that mesh's vertices, written once to dumps/mesh-verts-<prefix>.txt after 300 tasks.
         static void f5_mesh_vertex_dump(State* state, const RSP::Vertex* v, uint32_t n) {
             static const std::string s_prefix = []() { const char* e = std::getenv("ROGUESQ_DUMP_MESH_VERTS"); return std::string((e != nullptr) ? e : ""); }();
@@ -2764,184 +2783,270 @@ namespace RT64 {
         // ROGUESQ_F5_STATIC_TERRAIN=1: terrain records are dropped. The first one of a workload emits a zero-area anchor triangle with its texture and
         // render state, its own game call, for which RT64 builds the pipeline, scissor, screen mapping and transforms; FramebufferRenderer draws the
         // whole map there. Later records only refine the origin. False leaves the record to the usual path (no map yet, or the anchor was dropped).
-        static bool f5_terrain_pass_record(State* state, DisplayList* rec, bool flat) {
+        // The pass itself (renderer + RS64Terrain shaders): RS64 docs/engine/rendering-and-ray-tracing.md#terrain-renderers.
+        static bool f5_terrain_pass_record(State* state, DisplayList* rec, bool flat)
+        {
+
             // VR: a task drawn over a 2D backdrop (the N64 logo) shows no land on the flat screen, so a turned head sees none either.
-            if (s_vr_backdrop_task == state->displayListCounter) {
+            if (s_vr_backdrop_task == state->displayListCounter)
+            {
                 return true;
             }
 
-            if ((f5_static_terrain_mode() != 1) || !f5_native_active()) {
+            if ((f5_static_terrain_mode() != 1) || !f5_native_active())
+            {
                 return false;
             }
+
             if (state->displayListCounter != s_static_task) {
                 s_static_task = state->displayListCounter;
                 s_static_map = f5_refresh_terrain_map(state);
             }
+
             const uint32_t camPtr = rd_be_u32(state->RDRAM, 0x80138D1Cu);
-            if (!s_static_map || !s_terrain_map || s_terrain_map->colors.empty() || !f5_host_vaddr_ok(camPtr, 0x13C)) {
+
+            if (!s_static_map || !s_terrain_map || s_terrain_map->colors.empty() || !f5_host_vaddr_ok(camPtr, 0x13C))
+            {
                 return false;
             }
+
             Workload& wl = state->ext.workloadQueue->workloads[state->ext.workloadQueue->writeCursor];
             rs64lights::TerrainPassFrame& pass = wl.rs64TerrainPass;
             pass.fogClip = rs64_terrain_fog_clip() != 0;
-            int32_t ox, oz;
+            int32_t ox;
+            int32_t oz;
+
             f5_terrain_origin(state, rec, flat, *s_terrain_map, camPtr, ox, oz);
+
             // The game lights its records with every level and runtime light (lava glow, explosions); hand those colours to the pass for this cell.
             size_t cell = 0;
             const F5RecordCell recCell = f5_terrain_record_cell(state->RDRAM, rec, flat, *s_terrain_map, ox, oz, cell);
-            if (recCell == F5RecordOk) {
+
+            if (recCell == F5RecordOk)
+            {
                 float C[25][4];
+
                 f5_static_record_colors(state, rec, &s_terrain_map->colors[cell * 75], flat, C);
+
                 rs64lights::TerrainCellColors& hc = pass.harvest.emplace_back();
                 hc.cell = uint32_t(cell);
+
                 for (int k = 0; k < 25; ++k) {
                     for (int ch = 0; ch < 3; ++ch) {
                         hc.rgb[k * 3 + ch] = uint8_t(C[k][ch] + 0.5f);
                     }
                 }
             }
-            if (pass.anchorCall == UINT32_MAX) {
+
+            if (pass.anchorCall == UINT32_MAX)
+            {
                 state->flush();
+
                 const uint32_t calls = wl.gameCallCount;
-                int32_t x = (int16_t)(rec[4].w0 >> 16) + s_mv_off_x, z = (int16_t)(rec[4].w1 >> 16) + s_mv_off_z;
+                int32_t x = (int16_t)(rec[4].w0 >> 16) + s_mv_off_x;
+                int32_t z = (int16_t)(rec[4].w1 >> 16) + s_mv_off_z;
                 int32_t y = std::clamp((int32_t)(int16_t)rec[4].w0 << 4, -32768, 32767);
+
                 f5_ensure_viewport(state);
+
                 // At the record's corner the anchor was often off screen and clipped (no call), and the record fell back to the game's own terrain draw,
                 // over the map. The screen centre at mid depth, in this record's model space, is always in view; the corner only if that leaves int16.
                 const hlslpp::float4x4 anchorProj = state->rsp->viewProjMatrixStack[state->rsp->projectionMatrixStackSize - 1];
                 const auto &anchorVp = state->rsp->viewportStack[state->rsp->viewportStackSize - 1];
                 const hlslpp::float4x4& anchorModel = state->rsp->modelMatrixStack[state->rsp->modelMatrixStackSize - 1];
-                if (std::fabs((float)anchorVp.scale.z) > 1e-6f) {
+
+                if (std::fabs((float)anchorVp.scale.z) > 1e-6f)
+                {
                     const float nz = (0.5f - (float)anchorVp.translate.z) / (float)anchorVp.scale.z;
                     const hlslpp::float4 c = hlslpp::mul(hlslpp::float4(0.0f, 0.0f, nz, 1.0f), hlslpp::inverse(anchorProj));
-                    if (std::fabs((float)c.w) > 1e-12f) {
+
+                    if (std::fabs((float)c.w) > 1e-12f)
+                    {
                         const hlslpp::float4 p = hlslpp::mul(hlslpp::float4((float)c.x / (float)c.w, (float)c.y / (float)c.w, (float)c.z / (float)c.w, 1.0f), hlslpp::inverse(anchorModel));
-                        const float px = std::round((float)p.x), py = std::round((float)p.y), pz = std::round((float)p.z);
-                        if (std::isfinite(px) && std::isfinite(py) && std::isfinite(pz) && (std::fabs(px) < 32767.0f) && (std::fabs(py) < 32767.0f) && (std::fabs(pz) < 32767.0f)) {
+                        const float px = std::round((float)p.x);
+                        const float py = std::round((float)p.y);
+                        const float pz = std::round((float)p.z);
+
+                        if (std::isfinite(px) && std::isfinite(py) && std::isfinite(pz) && (std::fabs(px) < 32767.0f) && (std::fabs(py) < 32767.0f) && (std::fabs(pz) < 32767.0f))
+                        {
                             x = (int32_t)px;
                             y = (int32_t)py;
                             z = (int32_t)pz;
                         }
                     }
                 }
+
                 RSP::Vertex* tmp = reinterpret_cast<RSP::Vertex*>(state->fromRDRAM(F5_VTX_SCRATCH + F5_FACE_SLOT * sizeof(RSP::Vertex)));
-                for (int k = 0; k < 3; ++k) {
+
+                for (int k = 0; k < 3; ++k)
+                {
                     tmp[k] = {};
                     tmp[k].x = (int16_t)x;
                     tmp[k].y = (int16_t)y;
                     tmp[k].z = (int16_t)z;
                     tmp[k].color.r = tmp[k].color.g = tmp[k].color.b = tmp[k].color.a = 0xFF;
                 }
-                static int32_t s_lastShiftX = INT32_MIN, s_lastShiftZ = INT32_MIN;
-                const int32_t shiftX = ox * rs64lights::TerrainTileSpan - s_mv_off_x, shiftZ = oz * rs64lights::TerrainTileSpan - s_mv_off_z;
-                if (((shiftX != s_lastShiftX) || (shiftZ != s_lastShiftZ)) && (s_rebase_task != state->displayListCounter)) {
+
+                static int32_t s_lastShiftX = INT32_MIN;
+                static int32_t s_lastShiftZ = INT32_MIN;
+                const int32_t shiftX = ox * rs64lights::TerrainTileSpan - s_mv_off_x;
+                const int32_t shiftZ = oz * rs64lights::TerrainTileSpan - s_mv_off_z;
+
+                if (((shiftX != s_lastShiftX) || (shiftZ != s_lastShiftZ)) && (s_rebase_task != state->displayListCounter))
+                {
                     s_anchor_gen = (s_anchor_gen + 1) & 0xFu;
                 }
 
                 s_lastShiftX = shiftX;
                 s_lastShiftZ = shiftZ;
+
                 // The map's own interpolation id: under the terrain root's id it went unpaired whenever that id changed generation.
                 state->rsp->matrixId(f5_terrain_anchor_id(), /*push*/true, /*proj*/false, /*decompose*/true,
                     G_EX_COMPONENT_INTERPOLATE, G_EX_COMPONENT_INTERPOLATE, G_EX_COMPONENT_INTERPOLATE, G_EX_COMPONENT_INTERPOLATE, G_EX_COMPONENT_INTERPOLATE,
                     G_EX_COMPONENT_SKIP, G_EX_COMPONENT_SKIP, G_EX_COMPONENT_AUTO, G_EX_COMPONENT_AUTO,
                     G_EX_ORDER_LINEAR, G_EX_ASPECT_AUTO, G_EX_EDIT_NONE, /*idIsAddress*/false, /*editGroup*/false);
+
                 state->rsp->modelViewProjChanged = true;
                 state->rsp->setVertex(0x80000000u | (F5_VTX_SCRATCH + F5_FACE_SLOT * sizeof(RSP::Vertex)), 3, F5_FACE_SLOT);
                 state->rsp->drawIndexedTri(F5_FACE_SLOT, F5_FACE_SLOT + 1, F5_FACE_SLOT + 2);
                 state->flush();
                 state->rsp->popMatrixId(1, false);
                 state->rsp->modelViewProjChanged = true;
-                if (wl.gameCallCount != calls + 1) {
+
+                if (wl.gameCallCount != calls + 1)
+                {
                     // ROGUESQ_F5_STATIC_TERRAIN_CHECK: the anchor merged into another call, so this record falls back to the game's own terrain draw.
                     static const bool s_checkMiss = env_on("ROGUESQ_F5_STATIC_TERRAIN_CHECK", false);
+
                     if (s_checkMiss) {
                         std::fprintf(stderr, "[static-terrain] anchor not its own call (calls %u -> %u) task %llu\n", calls, wl.gameCallCount, (unsigned long long)state->displayListCounter);
                     }
+
                     return false;
                 }
+
                 pass.anchorCall = wl.gameCallCount - 1;
                 pass.map = s_terrain_map;
+
                 // The anchor's transform carries this load's regrid offset; other models' loads between later records reset s_mv_off.
                 pass.offsetX = s_mv_off_x;
                 pass.offsetZ = s_mv_off_z;
+
                 // The map covers what the records did: present and write back the whole scissor.
                 FramebufferPair& fbPair = wl.fbPairs[wl.currentFramebufferPairIndex()];
                 const FixedRect& sc = state->rdp->scissorRectStack[state->rdp->scissorStackSize - 1];
+
                 if (!sc.isNull()) {
                     fbPair.scissorRect.merge(sc);
                     fbPair.drawColorRect.merge(sc);
                     fbPair.drawDepthRect.merge(sc);
                 }
             }
+
             // The water level [0x801375C0]: water (flag 0x08) and shore (0x10) cells are drawn flat at it, without the game's wave tiles.
             pass.waterLevel = (int32_t)rd_be_u32(state->RDRAM, 0x801375C0u);
+
             // Missions and cutscenes advance the game clock [0x80130BA4] by each frame's time, which keeps the animations at their speed at any frame
             // rate; menus (the briefing hologram) and the pause screen don't, and step at 30 Hz of wall time (one tick per task ran faster above 30 fps).
-            {
-                static uint64_t s_lastTask = 0;
-                static uint32_t s_lastClock = 0;
-                static double s_ticks = 0.0;
-                static auto s_lastWall = std::chrono::steady_clock::now();
-                const auto wall = std::chrono::steady_clock::now();
-                const uint32_t clockBits = rd_be_u32(state->RDRAM, 0x80130BA4u);
-                float clock;
-                float lastClock;
-                std::memcpy(&clock, &clockBits, sizeof(clock));
-                std::memcpy(&lastClock, &s_lastClock, sizeof(lastClock));
-                const uint64_t task = state->displayListCounter;
-                if ((clock > lastClock) && (clock - lastClock < 1.0f)) {
-                    s_ticks += double(clock - lastClock) * 30.0;
-                }
-                else if (task > s_lastTask) {
-                    s_ticks += std::min(std::chrono::duration<double>(wall - s_lastWall).count() * 30.0, 30.0);
-                }
-                s_lastWall = wall;
-                s_lastTask = task;
-                s_lastClock = clockBits;
-                pass.task = uint64_t(s_ticks);
+            static uint64_t s_lastTask = 0;
+            static uint32_t s_lastClock = 0;
+            static double s_ticks = 0.0;
+            static auto s_lastWall = std::chrono::steady_clock::now();
+            const auto wall = std::chrono::steady_clock::now();
+            const uint32_t clockBits = rd_be_u32(state->RDRAM, 0x80130BA4u);
+            float clock;
+            float lastClock;
+
+            std::memcpy(&clock, &clockBits, sizeof(clock));
+            std::memcpy(&lastClock, &s_lastClock, sizeof(lastClock));
+
+            const uint64_t task = state->displayListCounter;
+
+            if ((clock > lastClock) && (clock - lastClock < 1.0f)) {
+                s_ticks += double(clock - lastClock) * 30.0;
             }
+            else if (task > s_lastTask)
+            {
+                s_ticks += std::min(std::chrono::duration<double>(wall - s_lastWall).count() * 30.0, 30.0);
+            }
+
+            s_lastWall = wall;
+            s_lastTask = task;
+            s_lastClock = clockBits;
+            pass.task = uint64_t(s_ticks);
             pass.originX = ox;
             pass.originZ = oz;
             wl.rs64Terrain.exact = true;
             wl.rs64Terrain.exactX = ox * rs64lights::TerrainTileSpan - pass.offsetX;
             wl.rs64Terrain.exactZ = oz * rs64lights::TerrainTileSpan - pass.offsetZ;
+
             // ROGUESQ_F5_STATIC_TERRAIN_CHECK: across a grid re-center, origin * 512 - offset stays put when the regrid compensation keeps the map still.
             static const bool s_check = env_on("ROGUESQ_F5_STATIC_TERRAIN_CHECK", false);
             static uint64_t s_offTask = ~0ull;
-            if (s_check && ((s_mv_off_x != pass.offsetX) || (s_mv_off_z != pass.offsetZ)) && (s_offTask != state->displayListCounter)) {
+
+            if (s_check && ((s_mv_off_x != pass.offsetX) || (s_mv_off_z != pass.offsetZ)) && (s_offTask != state->displayListCounter))
+            {
                 s_offTask = state->displayListCounter;
                 std::fprintf(stderr, "[static-terrain] record offset %d,%d differs from the anchor's %d,%d task %llu\n", s_mv_off_x, s_mv_off_z, pass.offsetX, pass.offsetZ,
                     (unsigned long long)state->displayListCounter);
             }
-            static int32_t s_lastOx = INT32_MIN, s_lastOz = INT32_MIN;
-            if (s_check && ((ox != s_lastOx) || (oz != s_lastOz))) {
+
+            static int32_t s_lastOx = INT32_MIN;
+            static int32_t s_lastOz = INT32_MIN;
+
+            if (s_check && ((ox != s_lastOx) || (oz != s_lastOz)))
+            {
                 std::fprintf(stderr, "[static-terrain] origin %d,%d offset %d,%d map shift %d,%d root %.1f,%.1f task %llu\n", ox, oz, pass.offsetX, pass.offsetZ,
                     ox * rs64lights::TerrainTileSpan - pass.offsetX, oz * rs64lights::TerrainTileSpan - pass.offsetZ, s_root_x, s_root_z, (unsigned long long)state->displayListCounter);
                 s_lastOx = ox;
                 s_lastOz = oz;
             }
+
             return true;
         }
 
-        void op_05_record(State* state, DisplayList** dl) {
+        // A 40-byte terrain record goes to the whole-map pass, the per-cell validation path, or the game's own terrain (f5_tile_quad / f5_tile_grid).
+        // Which renderer runs and where each lives: RS64 docs/engine/rendering-and-ray-tracing.md#terrain-renderers.
+        void op_05_record(State* state, DisplayList** dl)
+        {
+
             const uint32_t w0 = (*dl)->w0;
-            // ROGUESQ_LOG_GFX_TASK: report op-05 headers whose byte1 (samples per row) is not 5, the only
-            // record shape the parser below handles; anything else is walked as an 8-byte command.
-            { static bool s_lg = env_on("ROGUESQ_LOG_GFX_TASK", false); static int s_n = 0;
-              if (s_lg && ((w0 >> 16) & 0xFFu) != 0x05u && ++s_n <= 40) {
-                  std::fprintf(stderr, "[f5-op05] unusual header %08X %08X next %08X %08X\n", w0, (*dl)->w1, (*dl)[1].w0, (*dl)[1].w1); std::fflush(stderr); } }
-            if (((w0 >> 16) & 0xFFu) != 0x05u) return;      // plain 8-byte command
-            ++s_task_tiles;
-            
-            const bool flatTile = ((w0 >> 8) & 0x2u) != 0;
-            if (!f5_terrain_pass_record(state, *dl, flatTile) && !f5_static_terrain_tile(state, *dl, flatTile)) {
-                if (flatTile) f5_tile_quad(state, *dl);   // 05 05 02 = flat tile
-                else          f5_tile_grid(state, *dl);   // 05 05 00 = heightfield grid
+
+            // ROGUESQ_LOG_GFX_TASK: an op-05 header whose byte 1 (samples per row) is not 5 is walked as a plain 8-byte command.
+            static const bool s_lg = env_on("ROGUESQ_LOG_GFX_TASK", false);
+            static int s_n = 0;
+
+            if (s_lg && ((w0 >> 16) & 0xFFu) != 0x05u && ++s_n <= 40) {
+                std::fprintf(stderr, "[f5-op05] unusual header %08X %08X next %08X %08X\n", w0, (*dl)->w1, (*dl)[1].w0, (*dl)[1].w1);
+                std::fflush(stderr);
             }
-            if (rs64lights::sceneCaptureEnabled(rs64lights::config()) && rs64lights::config().shadowTerrain) {
+
+            if (((w0 >> 16) & 0xFFu) != 0x05u)
+            {
+                return;
+            }
+
+            ++s_task_tiles;
+
+            // 05 05 02 = flat tile, 05 05 00 = heightfield grid.
+            const bool flatTile = ((w0 >> 8) & 0x2u) != 0;
+
+            if (!f5_terrain_pass_record(state, *dl, flatTile) && !f5_static_terrain_tile(state, *dl, flatTile))
+            {
+                if (flatTile) {
+                    f5_tile_quad(state, *dl);
+                }
+                else {
+                    f5_tile_grid(state, *dl);
+                }
+            }
+
+            if (rs64lights::sceneCaptureEnabled(rs64lights::config()) && rs64lights::config().shadowTerrain)
+            {
                 f5_note_terrain_tile(state, *dl, flatTile);
             }
-            (*dl) += 4;                                       // 40-byte record
+
+            (*dl) += 4;
         }
 
         // 0x03: 24 bytes: byte 1 selects a DMEM slot, the next 16 bytes are stored there inline.
@@ -2949,6 +3054,7 @@ namespace RT64 {
         // 0x82 = texcoord scale at DMEM 0x140: 4 hi halfwords (s,t,s,t) then 4 lo halfwords, 16.16.
         // The tri path multiplies each raw per-face UV by it (vmudn lo / vmadh hi) to get S10.5;
         // the game sends (W-1)/128 per material, so raw UVs are 4.12 normalized, not 8.8 texels.
+        // Texture and UV fixes, and when the fault is the game's instead: RS64 docs/engine/rendering-and-ray-tracing.md#textures-and-animated-textures.
         static thread_local int32_t s_tc_scale[2] = { 0, 0 };
         // Fog = two signed 16.16 words: M at DMEM 0x160 (moveword 8 or 03 88) and O at DMEM 0x164
         // (moveword 0x0A or 03 88). The ucode stores alpha = 255 * clamp(depth*M + O, 0, 1). RT64 takes
@@ -3583,6 +3689,12 @@ namespace RT64 {
 
         static bool f5_texrect_quad(State* state, const DisplayList* dl, uint32_t id, const char* probe, float dx, float dy, bool stIsZero = false, float pushDepth = 0.0f, bool screenFrustum = false);
 
+        // VR crawl: the camera-space depth the starfield was pushed to; the planet backdrop sits there too. 0 until a crawl draws its stars.
+        static float s_crawl_star_depth = 0.0f;
+
+        // Pixels the next f5_texrect_quad grows its rect by (left, top, right, bottom); clamped tiles keep the texture's edge in place.
+        static float s_texrect_grow[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
+
         // VR: a HUD element's texrect becomes a camera-space quad at the radar's depth, so it stays with the ship and lines up with the 3D radar disc
         // (the HUD pass places the radar node 0.9 world units ahead; camera space is world units x 256). The id is the rect's corner, which a still HUD element keeps.
         bool f5_vr_hud_quad(State* state, const DisplayList* dl) {
@@ -3599,6 +3711,27 @@ namespace RT64 {
             const bool overDashboard = (rs64_vr_cockpit_view() != 0) && (float(dl[0].w1 & 0xFFFu) >= top);
             const float depth = overDashboard ? kVrDashboardMeters * rs64_vr_units_per_meter() : kHudDepth;
             return f5_texrect_quad(state, dl, id, "vr-hud", 0.0f, 0.0f, false, depth);
+        }
+
+        // VR in missions: a full-height texrect (the demo's closing wipe) drawn flat lands on the same pixels in each eye, so its edge sat at a different
+        // spot per eye. It becomes one quad at the HUD depth instead, each side on a screen edge grown two screens further so a turned head stays covered.
+        bool f5_vr_wipe_quad(State* state, const DisplayList* dl) {
+            constexpr float kHudDepth = 0.9f * 256.0f;
+            const FixedRect &sc = state->rdp->scissorRectStack[state->rdp->scissorStackSize - 1];
+            const int32_t ulx = int32_t((dl[0].w1 >> 12) & 0xFFFu);
+            const int32_t lrx = int32_t((dl[0].w0 >> 12) & 0xFFFu);
+            const float width = float(sc.lrx - sc.ulx) / 4.0f;
+            const float height = float(sc.lry - sc.uly) / 4.0f;
+
+            s_texrect_grow[0] = (ulx <= sc.ulx + 4) ? 2.0f * width : 0.0f;
+            s_texrect_grow[1] = 2.0f * height;
+            s_texrect_grow[2] = (lrx + 4 >= sc.lrx) ? 2.0f * width : 0.0f;
+            s_texrect_grow[3] = 2.0f * height;
+
+            const bool drawn = f5_texrect_quad(state, dl, 0x84000000u, "vr-wipe", 0.0f, 0.0f, false, kHudDepth);
+
+            std::fill(std::begin(s_texrect_grow), std::end(s_texrect_grow), 0.0f);
+            return drawn;
         }
 
         // VR outside missions: a texrect drawn before any 3D face of its task is a backdrop (the crawl's planet), placed at half the far plane; menu text,
@@ -3645,6 +3778,12 @@ namespace RT64 {
 
                 s_screenTask = state->displayListCounter;
                 s_screenDepth = depth;
+                s_vr_backdrop_task = state->displayListCounter;
+            }
+
+            // The crawl's planet is drawn as texrects after the starfield; it sits at the starfield's depth, not a picture's.
+            if ((rs64_crawl_playing() != 0) && (s_crawl_star_depth > 0.0f)) {
+                depth = s_crawl_star_depth;
             }
 
             if (!std::isfinite(depth) || !(depth > 0.0f)) {
@@ -3702,9 +3841,6 @@ namespace RT64 {
             }
             // The drawTextGlyphRect hook stores how far it moved a ring in S and T (10.2 pixels); a whole ring otherwise has both 0.
             const int16_t moveX = (int16_t)(dl[1].w0 >> 16), moveY = (int16_t)(dl[1].w0 & 0xFFFFu);
-        // VR crawl: the camera-space depth the starfield was pushed to; the planet backdrop sits there too. 0 until a crawl draws its stars.
-        static float s_crawl_star_depth = 0.0f;
-
             const bool moved = (moveX != 0) || (moveY != 0);
             const int ring = moved ? rs64xhair::ringOfTile(els, tex) : rs64xhair::ringOf(els, r, tex, dsdx, dtdy, clip);
             if (ring < 0) {
@@ -3762,12 +3898,6 @@ namespace RT64 {
             }
             s_glyph_cur.push_back({ key, y, shown, id });
             return id;
-                s_vr_backdrop_task = state->displayListCounter;
-            }
-
-            // The crawl's planet is drawn as texrects after the starfield; it sits at the starfield's depth, not a picture's.
-            if ((rs64_crawl_playing() != 0) && (s_crawl_star_depth > 0.0f)) {
-                depth = s_crawl_star_depth;
         }
 
         // The credits scroll their glyphs as texrects, which RT64 never interpolates, so they moved at 30 fps. Drawn as quads on stable ids they
@@ -3829,7 +3959,8 @@ namespace RT64 {
                 out[2] = p[2] / p[3];
                 return std::isfinite(out[0]) && std::isfinite(out[1]) && std::isfinite(out[2]);
             };
-            const float sx[4] = { r.ulx, r.lrx, r.ulx, r.lrx }, sy[4] = { r.uly, r.uly, r.lry, r.lry };
+            const float* g = s_texrect_grow;
+            const float sx[4] = { r.ulx - g[0], r.lrx + g[2], r.ulx - g[0], r.lrx + g[2] }, sy[4] = { r.uly - g[1], r.uly - g[1], r.lry + g[3], r.lry + g[3] };
             float corner[4][3], centre[3] = { 0.0f, 0.0f, 0.0f };
             for (int k = 0; k < 4; k++) {
                 if (!unproject(sx[k], sy[k], corner[k])) {
@@ -4006,7 +4137,72 @@ namespace RT64 {
                         }
                     }
                 }
+                // VR: a camera-facing quad (glints, fire) faces the game camera, so a turned head saw it edge-on. Centre it on its own transform, which
+                // the head-rotation pass turns toward the eye like a sprite.
+                auto& modelTop = state->rsp->modelMatrixStack[state->rsp->modelMatrixStackSize - 1];
+                const hlslpp::float4x4 savedModel = modelTop;
+                const bool billboard = (flipId != 0) && (n >= 3) && (rs64_vr_active() != 0);
+                if (billboard) {
+                    float cx = 0.0f;
+                    float cy = 0.0f;
+                    float cz = 0.0f;
+                    for (int k = 0; k < n; ++k) {
+                        cx += tmp[k].x;
+                        cy += tmp[k].y;
+                        cz += tmp[k].z;
+                    }
+
+                    cx = std::round(cx / n);
+                    cy = std::round(cy / n);
+                    cz = std::round(cz / n);
+
+                    for (int k = 0; k < n; ++k) {
+                        tmp[k].x = (int16_t)(tmp[k].x - cx);
+                        tmp[k].y = (int16_t)(tmp[k].y - cy);
+                        tmp[k].z = (int16_t)(tmp[k].z - cz);
+                    }
+
+                    const hlslpp::float4x4 toCentre(1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, cx, cy, cz, 1);
+                    modelTop = hlslpp::mul(toCentre, savedModel);
+                    state->rsp->modelViewProjChanged = true;
+                    state->rsp->rs64Billboard = true;
+                }
+
+                // VR crawl: the starfield (texture x shade on an intensity texture) sits only ~4x the logo's depth, a wall right behind the text in stereo.
+                // Scaling it about the eye keeps every star on its view ray and moves the sheet back; the planet backdrop follows it (s_crawl_star_depth).
+                const bool crawlStars = !billboard && (rs64_vr_active() != 0) && (rs64_crawl_playing() != 0) && (state->rdp->texture.fmt == G_IM_FMT_I) &&
+                    ((cc.L & 0x00FFFFFFu) == 0x00127FFFu) && (cc.H == 0xFFFFFC3Fu);
+                if (crawlStars) {
+                    constexpr float kStarPush = 2.0f;
+                    const hlslpp::float4x4 proj = state->rsp->viewProjMatrixStack[state->rsp->projectionMatrixStackSize - 1];
+                    const float w = float(proj[2][3]);
+                    const float depth = std::fabs(float(savedModel[3][2]));
+                    float push = kStarPush;
+                    if ((std::fabs(w) >= 1e-6f) && (depth > 0.0f)) {
+                        const float a = float(proj[2][2]) / w;
+                        const float b = float(proj[3][2]) / w;
+                        const float farPlane = std::max(std::fabs(b / (1.0f - a)), std::fabs(b / (-1.0f - a)));
+                        if (std::isfinite(farPlane)) {
+                            push = std::clamp(0.5f * farPlane / depth, 1.0f, kStarPush);
+                        }
+                    }
+
+                    const hlslpp::float4x4 scale(push, 0, 0, 0, 0, push, 0, 0, 0, 0, push, 0, 0, 0, 0, 1);
+                    modelTop = hlslpp::mul(savedModel, scale);
+                    s_crawl_star_depth = depth * push;
+                    state->rsp->modelViewProjChanged = true;
+                }
+
+                // The crawl blends the stars toward black by their fog amount, and VR measures fog by distance, past the flat depth (pushed or not), so the
+                // stars draw with no fog; the text keeps its fog. Fog stays on: without it the blend reads the vertex alpha and the stars go fully black.
+                const interop::RSPFog savedFog = state->rsp->fog;
+                if (crawlStars) {
+                    state->rsp->fog.mul = 0.0f;
+                    state->rsp->fog.offset = 0.0f;
+                    state->rsp->fogChanged = true;
+                }
                 state->rsp->setVertex(0x80000000u | (F5_VTX_SCRATCH + F5_FACE_SLOT * sizeof(RSP::Vertex)), n, F5_FACE_SLOT);
+                state->rsp->rs64Billboard = false;
                 // Full-screen overlay quads (the pause dim) are world quads sized to the 4:3 frustum; widescreen would leave the sides uncovered, so grow them in their own plane.
                 static const bool s_widen_overlay = env_on("ROGUESQ_F5_OVERLAY_WIDEN", true);
                 if (s_widen_overlay && !billboard && (n == 4) && (st == nullptr)) {
@@ -4117,72 +4313,7 @@ namespace RT64 {
                 if (f5_ring_buffer(s_mv_last_w1 & 0x00FFFFFFu) > 1 || f5_ring_buffer(s_mv_last_w1 & 0x00FFFFFFu) < 0) {
                     f5_hud_probe_slot(state, (f5_ring_buffer(s_mv_last_w1 & 0x00FFFFFFu) < 0) ? "face-fixedmtx" : "face-ring2", F5_FACE_SLOT, n);
                 }
-                // VR: a camera-facing quad (glints, fire) faces the game camera, so a turned head saw it edge-on. Centre it on its own transform, which
-                // the head-rotation pass turns toward the eye like a sprite.
-                auto& modelTop = state->rsp->modelMatrixStack[state->rsp->modelMatrixStackSize - 1];
-                const hlslpp::float4x4 savedModel = modelTop;
-                const bool billboard = (flipId != 0) && (n >= 3) && (rs64_vr_active() != 0);
-                if (billboard) {
-                    float cx = 0.0f;
-                    float cy = 0.0f;
-                    float cz = 0.0f;
-                    for (int k = 0; k < n; ++k) {
-                        cx += tmp[k].x;
-                        cy += tmp[k].y;
-                        cz += tmp[k].z;
-                    }
-
-                    cx = std::round(cx / n);
-                    cy = std::round(cy / n);
-                    cz = std::round(cz / n);
-
-                    for (int k = 0; k < n; ++k) {
-                        tmp[k].x = (int16_t)(tmp[k].x - cx);
-                        tmp[k].y = (int16_t)(tmp[k].y - cy);
-                        tmp[k].z = (int16_t)(tmp[k].z - cz);
-                    }
-
-                    const hlslpp::float4x4 toCentre(1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, cx, cy, cz, 1);
-                    modelTop = hlslpp::mul(toCentre, savedModel);
-                    state->rsp->modelViewProjChanged = true;
-                    state->rsp->rs64Billboard = true;
-                }
-
-                // VR crawl: the starfield (texture x shade on an intensity texture) sits only ~4x the logo's depth, a wall right behind the text in stereo.
-                // Scaling it about the eye keeps every star on its view ray and moves the sheet back; the planet backdrop follows it (s_crawl_star_depth).
-                const bool crawlStars = !billboard && (rs64_vr_active() != 0) && (rs64_crawl_playing() != 0) && (state->rdp->texture.fmt == G_IM_FMT_I) &&
-                    ((cc.L & 0x00FFFFFFu) == 0x00127FFFu) && (cc.H == 0xFFFFFC3Fu);
-                if (crawlStars) {
-                    constexpr float kStarPush = 2.0f;
-                    const hlslpp::float4x4 proj = state->rsp->viewProjMatrixStack[state->rsp->projectionMatrixStackSize - 1];
-                    const float w = float(proj[2][3]);
-                    const float depth = std::fabs(float(savedModel[3][2]));
-                    float push = kStarPush;
-                    if ((std::fabs(w) >= 1e-6f) && (depth > 0.0f)) {
-                        const float a = float(proj[2][2]) / w;
-                        const float b = float(proj[3][2]) / w;
-                        const float farPlane = std::max(std::fabs(b / (1.0f - a)), std::fabs(b / (-1.0f - a)));
-                        if (std::isfinite(farPlane)) {
-                            push = std::clamp(0.5f * farPlane / depth, 1.0f, kStarPush);
-                        }
-                    }
-
-                    const hlslpp::float4x4 scale(push, 0, 0, 0, 0, push, 0, 0, 0, 0, push, 0, 0, 0, 0, 1);
-                    modelTop = hlslpp::mul(savedModel, scale);
-                    s_crawl_star_depth = depth * push;
-                    state->rsp->modelViewProjChanged = true;
-                }
-
-                // The crawl blends the stars toward black by their fog amount, and VR measures fog by distance, past the flat depth (pushed or not), so the
-                // stars draw with no fog; the text keeps its fog. Fog stays on: without it the blend reads the vertex alpha and the stars go fully black.
-                const interop::RSPFog savedFog = state->rsp->fog;
-                if (crawlStars) {
-                    state->rsp->fog.mul = 0.0f;
-                    state->rsp->fog.offset = 0.0f;
-                    state->rsp->fogChanged = true;
-                }
                 // Menu backdrop JPEG tiles (64x32 RGBA16 at k*0x1000+0xA10) are drawn as triangles only by the screen-change wipe strip; the game leaves them unclamped and unmasked, so filtering past the last texel reads the next TMEM row. Clamp them.
-                state->rsp->rs64Billboard = false;
                 const uint8_t rtile = state->rsp->textureState.tile & 7;
                 const LoadTile savedTile = state->rdp->tiles[rtile];
                 const uint32_t texAddr = f5_unmoved_address(state->rdp->texture.address & 0x00FFFFFFu);
@@ -4208,6 +4339,15 @@ namespace RT64 {
                 if (bakedGroup) {
                     state->rsp->popMatrixId(1, false);
                     state->rsp->modelViewProjChanged = true;
+                }
+                if (billboard || crawlStars) {
+                    modelTop = savedModel;
+                    state->rsp->modelViewProjChanged = true;
+                }
+
+                if (crawlStars) {
+                    state->rsp->fog = savedFog;
+                    state->rsp->fogChanged = true;
                 }
             }
             ++s_task_faces;
@@ -4320,15 +4460,6 @@ namespace RT64 {
             gbi->map[0x0A] = +[](State* s, DisplayList** dl) { ++g_f5_heur[0]; op_consume16(s, dl); };   // BD
             // Moveword 8 / 0x0A write the fog M / O words (see f5_apply_fog). F3D reads 0x0A as a light
             // color, so both are intercepted.
-                if (billboard || crawlStars) {
-                    modelTop = savedModel;
-                    state->rsp->modelViewProjChanged = true;
-                }
-
-                if (crawlStars) {
-                    state->rsp->fog = savedFog;
-                    state->rsp->fogChanged = true;
-                }
             { static GBIFunction s_mw = gbi->map[0xBC];
               s_mw_orig = s_mw;
               gbi->map[0xBC] = +[](State* state, DisplayList** dl) {

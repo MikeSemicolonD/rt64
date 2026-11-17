@@ -105,6 +105,8 @@ namespace RT64 {
         bool f5_credits_glyph_quad(State *state, const DisplayList *dl);
         // VR: draws a HUD element's texrect as a quad at the radar's depth in front of the game camera; false leaves it to the texrect path.
         bool f5_vr_hud_quad(State *state, const DisplayList *dl);
+        // VR in missions: a full-height wipe texrect as one quad at the HUD depth, grown past the screen edges it touches; false leaves it a texrect.
+        bool f5_vr_wipe_quad(State *state, const DisplayList *dl);
         // VR outside missions: a backdrop or menu texrect as a quad where the game camera faces; false leaves it to the texrect path.
         bool f5_vr_scene_quad(State *state, const DisplayList *dl);
         // The task whose scene clear fill was stretched to the whole target (VR).
