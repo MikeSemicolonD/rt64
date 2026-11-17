@@ -1213,7 +1213,8 @@ namespace RT64 {
             hlslpp::float3 vrN(0.0f, 0.0f, 1.0f);
             float vrD = 0.0f;
 
-            if (s_clip && !degenerate && vr && s_farClip) {
+            // The crawl's starfield sits at the far distance (and further once VR pushes it back), so the crawl keeps it all.
+            if (s_clip && !degenerate && vr && s_farClip && (rs64_crawl_playing() == 0)) {
                 static hlslpp::float4x4 s_proj;
                 static hlslpp::float4x4 s_inv;
                 static bool s_haveInv = false;

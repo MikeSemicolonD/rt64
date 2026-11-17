@@ -111,6 +111,8 @@ namespace RT64 {
         // The anchor's generation: bumped when the map's placement in the anchor's frame (origin * 512 - offset) changes with no rebase to carry
         // the previous transform over (a cut, a new root node, a snap before k is learned), so the map never blends across the jump.
         static uint32_t s_anchor_gen = 0;
+        // The task whose VR backdrop quads were placed; its terrain records are dropped.
+        static uint64_t s_vr_backdrop_task = ~0ull;
         static uint64_t s_rebase_task = ~0ull;
         static uint32_t f5_terrain_anchor_id() {
             return F5_TERRAIN_ANCHOR_ID | ((s_anchor_gen & 0xFu) << 20);
@@ -2763,6 +2765,11 @@ namespace RT64 {
         // render state, its own game call, for which RT64 builds the pipeline, scissor, screen mapping and transforms; FramebufferRenderer draws the
         // whole map there. Later records only refine the origin. False leaves the record to the usual path (no map yet, or the anchor was dropped).
         static bool f5_terrain_pass_record(State* state, DisplayList* rec, bool flat) {
+            // VR: a task drawn over a 2D backdrop (the N64 logo) shows no land on the flat screen, so a turned head sees none either.
+            if (s_vr_backdrop_task == state->displayListCounter) {
+                return true;
+            }
+
             if ((f5_static_terrain_mode() != 1) || !f5_native_active()) {
                 return false;
             }
@@ -3583,7 +3590,15 @@ namespace RT64 {
             const uint32_t ulx = (dl[0].w1 >> 14) & 0x3FFu;
             const uint32_t uly = (dl[0].w1 >> 2) & 0x3FFu;
             const uint32_t id = 0x82000000u | (ulx << 10) | uly;
-            return f5_texrect_quad(state, dl, id, "vr-hud", 0.0f, 0.0f, false, kHudDepth);
+
+            // In the cockpit the dashboard is nearer than the HUD depth, so what is drawn over it (subtitles, the monitors' contents) comes in front of it.
+            constexpr float kDashboardTop = 0.62f;
+            constexpr float kVrDashboardMeters = 0.45f;
+            const FixedRect &sc = state->rdp->scissorRectStack[state->rdp->scissorStackSize - 1];
+            const float top = float(sc.uly) + kDashboardTop * float(sc.lry - sc.uly);
+            const bool overDashboard = (rs64_vr_cockpit_view() != 0) && (float(dl[0].w1 & 0xFFFu) >= top);
+            const float depth = overDashboard ? kVrDashboardMeters * rs64_vr_units_per_meter() : kHudDepth;
+            return f5_texrect_quad(state, dl, id, "vr-hud", 0.0f, 0.0f, false, depth);
         }
 
         // VR outside missions: a texrect drawn before any 3D face of its task is a backdrop (the crawl's planet), placed at half the far plane; menu text,
@@ -3687,15 +3702,21 @@ namespace RT64 {
             }
             // The drawTextGlyphRect hook stores how far it moved a ring in S and T (10.2 pixels); a whole ring otherwise has both 0.
             const int16_t moveX = (int16_t)(dl[1].w0 >> 16), moveY = (int16_t)(dl[1].w0 & 0xFFFFu);
+        // VR crawl: the camera-space depth the starfield was pushed to; the planet backdrop sits there too. 0 until a crawl draws its stars.
+        static float s_crawl_star_depth = 0.0f;
+
             const bool moved = (moveX != 0) || (moveY != 0);
             const int ring = moved ? rs64xhair::ringOfTile(els, tex) : rs64xhair::ringOf(els, r, tex, dsdx, dtdy, clip);
             if (ring < 0) {
                 return false;
             }
 
-            // VR: the rings sit out where shots go, so they don't double while the eyes are on a distant target.
-            constexpr float kVrReticleMeters = 50.0f;
-            const float vrPush = (rs64_vr_active() != 0) ? kVrReticleMeters * rs64_vr_units_per_meter() : 0.0f;
+            // VR: the rings sit out where shots go, closer in the cockpit, so they don't double while the eyes are on a target ahead.
+            constexpr float kVrReticleMeters = 15.0f;
+            constexpr float kVrCockpitReticleMeters = 5.0f;
+            const bool vr = rs64_vr_active() != 0;
+            const float meters = (rs64_vr_cockpit_view() != 0) ? kVrCockpitReticleMeters : kVrReticleMeters;
+            const float vrPush = vr ? meters * rs64_vr_units_per_meter() : 0.0f;
             return f5_texrect_quad(state, dl, 0x80000000u | (uint32_t)ring, (ring == 2) ? "xhair-quad-bomb" : ring ? "xhair-quad-in" : "xhair-quad-out", moveX / 4.0f, moveY / 4.0f, moved, vrPush);
         }
 
@@ -3741,6 +3762,12 @@ namespace RT64 {
             }
             s_glyph_cur.push_back({ key, y, shown, id });
             return id;
+                s_vr_backdrop_task = state->displayListCounter;
+            }
+
+            // The crawl's planet is drawn as texrects after the starfield; it sits at the starfield's depth, not a picture's.
+            if ((rs64_crawl_playing() != 0) && (s_crawl_star_depth > 0.0f)) {
+                depth = s_crawl_star_depth;
         }
 
         // The credits scroll their glyphs as texrects, which RT64 never interpolates, so they moved at 30 fps. Drawn as quads on stable ids they
@@ -3982,7 +4009,7 @@ namespace RT64 {
                 state->rsp->setVertex(0x80000000u | (F5_VTX_SCRATCH + F5_FACE_SLOT * sizeof(RSP::Vertex)), n, F5_FACE_SLOT);
                 // Full-screen overlay quads (the pause dim) are world quads sized to the 4:3 frustum; widescreen would leave the sides uncovered, so grow them in their own plane.
                 static const bool s_widen_overlay = env_on("ROGUESQ_F5_OVERLAY_WIDEN", true);
-                if (s_widen_overlay && (n == 4) && (st == nullptr)) {
+                if (s_widen_overlay && !billboard && (n == 4) && (st == nullptr)) {
                     const int wc = state->ext.workloadQueue->writeCursor;
                     const auto &pt = state->ext.workloadQueue->workloads[wc].drawData.posTransformed;
                     float x0 = 9, x1 = -9, y0 = 9, y1 = -9;
@@ -4047,7 +4074,7 @@ namespace RT64 {
                 const uint32_t savedL = state->rdp->otherMode.L;
                 bool flattened = false;
                 bool flatGroup = false;
-                if (s_flatten && (flatDepth >= 0.0f) && (n <= 8) && f5_flatten_to_depth(state, tmp, n, flatDepth)) {
+                if (s_flatten && !billboard && !crawlStars && (flatDepth >= 0.0f) && (n <= 8) && f5_flatten_to_depth(state, tmp, n, flatDepth)) {
                     // Flattened verts depend on this frame's camera, so between real frames they must blend too: each face gets its own id (node + PRIM face order) with vertex interpolation.
                     static const bool s_flat_vtx = env_on("ROGUESQ_F5_PRIM_FLATTEN_VTX", true);
                     { static const bool s_lg = env_on("ROGUESQ_LOG_INTERP_PAIR", false); static int s_nn = 0;
@@ -4080,7 +4107,7 @@ namespace RT64 {
                           for (int k = 0; k < n; ++k) err = std::max(err, std::fabs((float)ps[state->rsp->indices[F5_FACE_SLOT + k]][2] - flatDepth));
                           std::fprintf(stderr, "[flatten] n=%d depth=%.5f maxErr=%.6f game=%d count=%d\n", n, flatDepth, err, (int)s_prim_depth_from_game, s_nf); } }
                 }
-                else if (s_flatten && (flatDepth >= 0.0f) && (n <= 8)) {
+                else if (s_flatten && !billboard && !crawlStars && (flatDepth >= 0.0f) && (n <= 8)) {
                     // Flatten refused (vertex behind the camera, extreme scale): load the verts again anyway so the face's vertex count matches frames where it succeeded, or vertex interpolation drops for that frame and the face snaps.
                     state->rsp->setVertex(0x80000000u | (F5_VTX_SCRATCH + F5_FACE_SLOT * sizeof(RSP::Vertex)), n, F5_FACE_SLOT);
                     { static const bool s_lg = env_on("ROGUESQ_LOG_INTERP_PAIR", false); static int s_nr = 0;
@@ -4090,7 +4117,72 @@ namespace RT64 {
                 if (f5_ring_buffer(s_mv_last_w1 & 0x00FFFFFFu) > 1 || f5_ring_buffer(s_mv_last_w1 & 0x00FFFFFFu) < 0) {
                     f5_hud_probe_slot(state, (f5_ring_buffer(s_mv_last_w1 & 0x00FFFFFFu) < 0) ? "face-fixedmtx" : "face-ring2", F5_FACE_SLOT, n);
                 }
+                // VR: a camera-facing quad (glints, fire) faces the game camera, so a turned head saw it edge-on. Centre it on its own transform, which
+                // the head-rotation pass turns toward the eye like a sprite.
+                auto& modelTop = state->rsp->modelMatrixStack[state->rsp->modelMatrixStackSize - 1];
+                const hlslpp::float4x4 savedModel = modelTop;
+                const bool billboard = (flipId != 0) && (n >= 3) && (rs64_vr_active() != 0);
+                if (billboard) {
+                    float cx = 0.0f;
+                    float cy = 0.0f;
+                    float cz = 0.0f;
+                    for (int k = 0; k < n; ++k) {
+                        cx += tmp[k].x;
+                        cy += tmp[k].y;
+                        cz += tmp[k].z;
+                    }
+
+                    cx = std::round(cx / n);
+                    cy = std::round(cy / n);
+                    cz = std::round(cz / n);
+
+                    for (int k = 0; k < n; ++k) {
+                        tmp[k].x = (int16_t)(tmp[k].x - cx);
+                        tmp[k].y = (int16_t)(tmp[k].y - cy);
+                        tmp[k].z = (int16_t)(tmp[k].z - cz);
+                    }
+
+                    const hlslpp::float4x4 toCentre(1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, cx, cy, cz, 1);
+                    modelTop = hlslpp::mul(toCentre, savedModel);
+                    state->rsp->modelViewProjChanged = true;
+                    state->rsp->rs64Billboard = true;
+                }
+
+                // VR crawl: the starfield (texture x shade on an intensity texture) sits only ~4x the logo's depth, a wall right behind the text in stereo.
+                // Scaling it about the eye keeps every star on its view ray and moves the sheet back; the planet backdrop follows it (s_crawl_star_depth).
+                const bool crawlStars = !billboard && (rs64_vr_active() != 0) && (rs64_crawl_playing() != 0) && (state->rdp->texture.fmt == G_IM_FMT_I) &&
+                    ((cc.L & 0x00FFFFFFu) == 0x00127FFFu) && (cc.H == 0xFFFFFC3Fu);
+                if (crawlStars) {
+                    constexpr float kStarPush = 2.0f;
+                    const hlslpp::float4x4 proj = state->rsp->viewProjMatrixStack[state->rsp->projectionMatrixStackSize - 1];
+                    const float w = float(proj[2][3]);
+                    const float depth = std::fabs(float(savedModel[3][2]));
+                    float push = kStarPush;
+                    if ((std::fabs(w) >= 1e-6f) && (depth > 0.0f)) {
+                        const float a = float(proj[2][2]) / w;
+                        const float b = float(proj[3][2]) / w;
+                        const float farPlane = std::max(std::fabs(b / (1.0f - a)), std::fabs(b / (-1.0f - a)));
+                        if (std::isfinite(farPlane)) {
+                            push = std::clamp(0.5f * farPlane / depth, 1.0f, kStarPush);
+                        }
+                    }
+
+                    const hlslpp::float4x4 scale(push, 0, 0, 0, 0, push, 0, 0, 0, 0, push, 0, 0, 0, 0, 1);
+                    modelTop = hlslpp::mul(savedModel, scale);
+                    s_crawl_star_depth = depth * push;
+                    state->rsp->modelViewProjChanged = true;
+                }
+
+                // The crawl blends the stars toward black by their fog amount, and VR measures fog by distance, past the flat depth (pushed or not), so the
+                // stars draw with no fog; the text keeps its fog. Fog stays on: without it the blend reads the vertex alpha and the stars go fully black.
+                const interop::RSPFog savedFog = state->rsp->fog;
+                if (crawlStars) {
+                    state->rsp->fog.mul = 0.0f;
+                    state->rsp->fog.offset = 0.0f;
+                    state->rsp->fogChanged = true;
+                }
                 // Menu backdrop JPEG tiles (64x32 RGBA16 at k*0x1000+0xA10) are drawn as triangles only by the screen-change wipe strip; the game leaves them unclamped and unmasked, so filtering past the last texel reads the next TMEM row. Clamp them.
+                state->rsp->rs64Billboard = false;
                 const uint8_t rtile = state->rsp->textureState.tile & 7;
                 const LoadTile savedTile = state->rdp->tiles[rtile];
                 const uint32_t texAddr = f5_unmoved_address(state->rdp->texture.address & 0x00FFFFFFu);
@@ -4228,6 +4320,15 @@ namespace RT64 {
             gbi->map[0x0A] = +[](State* s, DisplayList** dl) { ++g_f5_heur[0]; op_consume16(s, dl); };   // BD
             // Moveword 8 / 0x0A write the fog M / O words (see f5_apply_fog). F3D reads 0x0A as a light
             // color, so both are intercepted.
+                if (billboard || crawlStars) {
+                    modelTop = savedModel;
+                    state->rsp->modelViewProjChanged = true;
+                }
+
+                if (crawlStars) {
+                    state->rsp->fog = savedFog;
+                    state->rsp->fogChanged = true;
+                }
             { static GBIFunction s_mw = gbi->map[0xBC];
               s_mw_orig = s_mw;
               gbi->map[0xBC] = +[](State* state, DisplayList** dl) {

@@ -123,6 +123,12 @@ extern "C" {
     // 1 while culls and the HUD must work in every direction: a session or the fake head turn (ROGUESQ_VR_FAKE_YAW).
     int rs64_vr_active(void);
 
+    // 1 while the opening crawl plays (the host's mod_level_hooks), through its planet pan-down.
+    int rs64_crawl_playing(void);
+
+    // 1 while the cockpit view is drawing (VR only).
+    int rs64_vr_cockpit_view(void);
+
     // The fake head's pose (OpenXR axes, meters) while ROGUESQ_VR_FAKE_YAW is set; 0 = it is off.
     int rs64_vr_fake_head(rs64vr::Pose *pose);
 
