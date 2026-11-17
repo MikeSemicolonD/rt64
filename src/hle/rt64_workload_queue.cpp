@@ -26,6 +26,80 @@ namespace RT64 {
     static int64_t rs64VrRightUs = 0;
     static uint32_t rs64VrPairs = 0;
 
+    // VR: the depth slot the eye being rendered copies its scene depth into, set around the frame's two eye renders.
+    static RS64VrDepthSlot *rs64VrDepthSlot = nullptr;
+
+    // VR: sample 0 of the scene pair's depth into the eye's R32F copy, with the z and w columns and depth range of the pair's main perspective projection.
+    static void rs64VrCopyEyeDepth(RenderWorker *worker, const ShaderLibrary *shaderLibrary, RenderTarget *depthTarget, const Workload &workload, const FramebufferPair &fbPair, RS64VrDepthEye &out) {
+        out.valid = false;
+        if ((depthTarget == nullptr) || (depthTarget->texture == nullptr)) {
+            return;
+        }
+
+        int best = -1;
+        for (uint32_t p = 0; p < fbPair.projectionCount; p++) {
+            const Projection &proj = fbPair.projections[p];
+            if ((proj.type == Projection::Type::Perspective) && ((best < 0) || (proj.gameCallCount > fbPair.projections[best].gameCallCount))) {
+                best = int(p);
+            }
+        }
+
+        if (best < 0) {
+            return;
+        }
+
+        const uint32_t index = fbPair.projections[best].transformsIndex;
+        const interop::float4x4 &proj = workload.drawData.projTransforms[index];
+        const interop::RSPViewport &viewport = workload.drawData.rspViewports[index];
+        for (int r = 0; r < 4; r++) {
+            out.zColumn[r] = float(proj[r][2]);
+            out.wColumn[r] = float(proj[r][3]);
+        }
+
+        out.depthScale = float(viewport.scale.z);
+        out.depthOffset = float(viewport.translate.z);
+
+        const uint32_t width = depthTarget->width;
+        const uint32_t height = depthTarget->height;
+        if ((out.texture == nullptr) || (out.width != width) || (out.height != height)) {
+            out.framebuffer.reset();
+            out.texture = worker->device->createTexture(RenderTextureDesc::ColorTarget(width, height, RenderFormat::R32_FLOAT));
+            out.texture->setName("VR Eye Scene Depth");
+            const RenderTexture *targets[] = { out.texture.get() };
+            out.framebuffer = worker->device->createFramebuffer(RenderFramebufferDesc(targets, 1));
+            out.input = std::make_unique<RenderTargetCopyDescriptorSet>(worker->device);
+            out.width = width;
+            out.height = height;
+        }
+
+        const ShaderRecord &copy = (depthTarget->multisampling.sampleCount > 1) ? shaderLibrary->rs64DepthResolve : shaderLibrary->rs64DepthCopy;
+        out.input->setTexture(out.input->gInput, depthTarget->texture.get(), RenderTextureLayout::DEPTH_READ, depthTarget->textureView.get());
+
+        RenderCommandList *commandList = worker->commandList.get();
+        const RenderTextureBarrier before[] = {
+            RenderTextureBarrier(depthTarget->texture.get(), RenderTextureLayout::DEPTH_READ),
+            RenderTextureBarrier(out.texture.get(), RenderTextureLayout::COLOR_WRITE)
+        };
+
+        commandList->barriers(RenderBarrierStage::GRAPHICS, before, uint32_t(std::size(before)));
+        commandList->setFramebuffer(out.framebuffer.get());
+        commandList->setViewports(RenderViewport(0.0f, 0.0f, float(width), float(height)));
+        commandList->setScissors(RenderRect(0, 0, int32_t(width), int32_t(height)));
+        commandList->setPipeline(copy.pipeline.get());
+        commandList->setGraphicsPipelineLayout(copy.pipelineLayout.get());
+        commandList->setGraphicsDescriptorSet(out.input->get(), 0);
+        commandList->setVertexBuffers(0, nullptr, 0, nullptr);
+        commandList->drawInstanced(3, 1, 0, 0);
+
+        const RenderTextureBarrier after[] = {
+            RenderTextureBarrier(depthTarget->texture.get(), RenderTextureLayout::SHADER_READ),
+            RenderTextureBarrier(out.texture.get(), RenderTextureLayout::SHADER_READ)
+        };
+
+        commandList->barriers(RenderBarrierStage::GRAPHICS, after, uint32_t(std::size(after)));
+        out.valid = true;
+    }
+
     // WorkloadQueue
 
     WorkloadQueue::WorkloadQueue() {
@@ -935,6 +1009,10 @@ namespace RT64 {
                         ext.workloadGraphicsWorker->commandList->barriers(RenderBarrierStage::GRAPHICS, RenderTextureBarrier(chosenTarget->texture.get(), RenderTextureLayout::SHADER_READ));
                     }
 
+                    if ((eyeViews != nullptr) && (rs64VrDepthSlot != nullptr) && (uint32_t(overrideTargetFbPairIndex) == f)) {
+                        rs64VrCopyEyeDepth(ext.workloadGraphicsWorker, ext.shaderLibrary, depthTarget, workload, fbPair, rs64VrDepthSlot->eyes[eye]);
+                    }
+
                     // Do the resolve if using MSAA while target override is active and we're on the correct framebuffer pair index.
                     if (usingMSAA && (overrideTarget != nullptr) && ((uint32_t)overrideTargetFbPairIndex == f)) {
                         overrideTarget->resize(ext.workloadGraphicsWorker, colorTarget->width, colorTarget->height);
@@ -1348,6 +1426,20 @@ namespace RT64 {
 
                         rs64_vr_locate(framesRendered + 1, &views[framesRendered]);
                         vrViews = &views[framesRendered];
+
+                        SharedQueueResources &shared = *ext.sharedResources;
+                        int slot = 0;
+                        std::unique_lock<std::mutex> depthLock(shared.vrDepthMutex);
+                        while ((slot == shared.vrDepthPublished) || (slot == shared.vrDepthReading)) {
+                            slot++;
+                        }
+
+                        depthLock.unlock();
+                        rs64VrDepthSlot = &shared.vrDepth[slot];
+                        rs64VrDepthSlot->views = *vrViews;
+                        rs64VrDepthSlot->unitsPerMeter = rs64_vr_units_per_meter();
+                        rs64VrDepthSlot->eyes[0].valid = false;
+                        rs64VrDepthSlot->eyes[1].valid = false;
                     }
 
                     int64_t renderTimeMicro = workloadTimer.elapsedMicroseconds();
@@ -1369,6 +1461,12 @@ namespace RT64 {
                             interpolationTargetKey, interpolationTargetFbPairIndex, rightTargets[framesRendered].get(), 0x100 + framesRendered, false, false, tileInterpolationUsed, lookAtInterpolationUsed,
                             vrViews, 1);
 
+                        if (rs64VrDepthSlot != nullptr) {
+                            std::scoped_lock<std::mutex> depthLock(ext.sharedResources->vrDepthMutex);
+                            ext.sharedResources->vrDepthPublished = int(rs64VrDepthSlot - ext.sharedResources->vrDepth);
+                        }
+
+                        rs64VrDepthSlot = nullptr;
                         rs64VrLeftUs += leftEndMicro - renderTimeMicro;
                         rs64VrRightUs += workloadTimer.elapsedMicroseconds() - leftEndMicro;
                         rs64VrPairs++;

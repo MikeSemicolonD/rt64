@@ -7,10 +7,11 @@
 
 #ifdef RS64_HAND_MESH
 
-void VSMain(float3 position : POSITION, float3 normal : NORMAL, out float4 oPosition : SV_POSITION, out float3 oNormal : NORMAL, out float3 oColor : COLOR0) {
+void VSMain(float3 position : POSITION, float3 normal : NORMAL, out float4 oPosition : SV_POSITION, out float3 oNormal : NORMAL, out float3 oColor : COLOR0, out float3 oStage : TEXCOORD0) {
     const float4 g = float4(position, 1.0f);
     oPosition = float4(dot(gHand.clip[0], g), dot(gHand.clip[1], g), dot(gHand.clip[2], g), dot(gHand.clip[3], g));
     oNormal = float3(dot(gHand.rotation[0].xyz, normal), dot(gHand.rotation[1].xyz, normal), dot(gHand.rotation[2].xyz, normal));
+    oStage = float3(dot(gHand.rotation[0], g), dot(gHand.rotation[1], g), dot(gHand.rotation[2], g));
     oColor = gHand.color.rgb;
 }
 
@@ -30,7 +31,7 @@ float3 tiltX(float3 v, float a) {
     return float3(v.x, c * v.y - s * v.z, s * v.y + c * v.z);
 }
 
-void VSMain(uint vertexId : SV_VertexID, out float4 oPosition : SV_POSITION, out float3 oNormal : NORMAL, out float3 oColor : COLOR0) {
+void VSMain(uint vertexId : SV_VertexID, out float4 oPosition : SV_POSITION, out float3 oNormal : NORMAL, out float3 oColor : COLOR0, out float3 oStage : TEXCOORD0) {
     const uint part = vertexId / kPartVertices;
     const uint inPart = vertexId % kPartVertices;
     const uint quad = inPart / 6;
@@ -73,6 +74,7 @@ void VSMain(uint vertexId : SV_VertexID, out float4 oPosition : SV_POSITION, out
     const float4 g = float4(p, 1.0f);
     oPosition = float4(dot(gHand.clip[0], g), dot(gHand.clip[1], g), dot(gHand.clip[2], g), dot(gHand.clip[3], g));
     oNormal = float3(dot(gHand.rotation[0].xyz, n), dot(gHand.rotation[1].xyz, n), dot(gHand.rotation[2].xyz, n));
+    oStage = float3(dot(gHand.rotation[0], g), dot(gHand.rotation[1], g), dot(gHand.rotation[2], g));
     oColor = gHand.color.rgb * shade;
 }
 

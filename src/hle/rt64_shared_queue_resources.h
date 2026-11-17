@@ -10,6 +10,7 @@
 #include "common/rt64_common.h"
 #include "common/rt64_emulator_configuration.h"
 #include "common/rt64_enhancement_configuration.h"
+#include "render/rt64_descriptor_sets.h"
 #include "render/rt64_render_target_manager.h"
 
 #include "rt64_framebuffer_manager.h"
@@ -20,6 +21,26 @@
 #endif
 
 namespace RT64 {
+    // VR: one eye's scene depth (R32F, sample 0) from a rendered frame, with the game projection terms the controller pass rebuilds that depth with.
+    struct RS64VrDepthEye {
+        std::unique_ptr<RenderTexture> texture;
+        std::unique_ptr<RenderFramebuffer> framebuffer;
+        std::unique_ptr<RenderTargetCopyDescriptorSet> input;
+        uint32_t width = 0;
+        uint32_t height = 0;
+        bool valid = false;
+        float zColumn[4] = {};
+        float wColumn[4] = {};
+        float depthScale = 0.0f;
+        float depthOffset = 0.0f;
+    };
+
+    struct RS64VrDepthSlot {
+        RS64VrDepthEye eyes[2];
+        rs64vr::EyeViews views;
+        float unitsPerMeter = 0.0f;
+    };
+
     struct InterpolatedFrameCounters {
         uint32_t presented = 0;
         uint32_t available = 0;
@@ -68,6 +89,12 @@ namespace RT64 {
         // VR: the right eye of each rendered frame and the eye poses both eyes used, indexed like interpolatedColorTargets so its present wait guards them too.
         std::vector<std::unique_ptr<RenderTarget>> vrRightTargets;
         std::vector<rs64vr::EyeViews> vrTargetViews;
+
+        // VR: three depth slots, so the workload always fills one that is neither the last published nor the one the controller pass is reading.
+        RS64VrDepthSlot vrDepth[3];
+        std::mutex vrDepthMutex;
+        int vrDepthPublished = -1;
+        int vrDepthReading = -1;
         InterpolatedFrameCounters interpolatedFrames[2];
         uint32_t interpolatedFramesIndex = 0;
         std::mutex interpolatedMutex;

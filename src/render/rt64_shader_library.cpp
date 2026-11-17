@@ -13,6 +13,7 @@
 #include "shaders/RS64LightsPS.hlsl.spirv.h"
 #include "shaders/RS64LightsUpsamplePS.hlsl.spirv.h"
 #include "shaders/RS64DepthResolvePS.hlsl.spirv.h"
+#include "shaders/RS64DepthCopyPS.hlsl.spirv.h"
 #include "shaders/RS64TerrainVS.hlsl.spirv.h"
 #include "shaders/RS64TerrainPS.hlsl.spirv.h"
 #include "shaders/RS64VrHandsVS.hlsl.spirv.h"
@@ -85,6 +86,7 @@
 #   include "shaders/RS64LightsPS.hlsl.dxil.h"
 #   include "shaders/RS64LightsUpsamplePS.hlsl.dxil.h"
 #   include "shaders/RS64DepthResolvePS.hlsl.dxil.h"
+#   include "shaders/RS64DepthCopyPS.hlsl.dxil.h"
 #   include "shaders/RS64TerrainVS.hlsl.dxil.h"
 #   include "shaders/RS64TerrainPS.hlsl.dxil.h"
 #   include "shaders/RS64VrHandsVS.hlsl.dxil.h"
@@ -154,6 +156,7 @@
 #   include "shaders/RS64LightsPS.hlsl.metal.h"
 #   include "shaders/RS64LightsUpsamplePS.hlsl.metal.h"
 #   include "shaders/RS64DepthResolvePS.hlsl.metal.h"
+#   include "shaders/RS64DepthCopyPS.hlsl.metal.h"
 #   include "shaders/RS64TerrainVS.hlsl.metal.h"
 #   include "shaders/RS64TerrainPS.hlsl.metal.h"
 #   include "shaders/RS64VrHandsVS.hlsl.metal.h"
@@ -701,10 +704,12 @@ namespace RT64 {
             fxaa.pipeline = device->createGraphicsPipeline(pipelineDesc);
         }
 
-        // VR controllers: drawn from the vertex index into the controller layer's RGBA8 images, depth tested against each other.
+        // VR controllers: drawn from the vertex index into the controller layer's RGBA8 images, depth tested against each other and hidden behind the scene.
         {
+            RS64VrHandsDescriptorSet handsSet;
             layoutBuilder.begin();
             layoutBuilder.addPushConstant(0, 0, sizeof(interop::RS64VrHandsCB), RenderShaderStageFlag::VERTEX);
+            layoutBuilder.addDescriptorSet(handsSet);
             layoutBuilder.end();
             rs64VrHands.pipelineLayout = layoutBuilder.create(device);
 
@@ -739,6 +744,7 @@ namespace RT64 {
             pipelineDesc.inputElementsCount = 2;
             layoutBuilder.begin(false, true);
             layoutBuilder.addPushConstant(0, 0, sizeof(interop::RS64VrHandsCB), RenderShaderStageFlag::VERTEX);
+            layoutBuilder.addDescriptorSet(handsSet);
             layoutBuilder.end();
             rs64VrHandsMesh.pipelineLayout = layoutBuilder.create(device);
             pipelineDesc.pipelineLayout = rs64VrHandsMesh.pipelineLayout.get();
@@ -1042,6 +1048,13 @@ namespace RT64 {
             resolveDesc.pixelShader = resolveShader.get();
             resolveDesc.pipelineLayout = rs64DepthResolve.pipelineLayout.get();
             rs64DepthResolve.pipeline = device->createGraphicsPipeline(resolveDesc);
+
+            // VR: the single-sampled form, for copying each eye's scene depth when MSAA is off.
+            std::unique_ptr<RenderShader> copyShader = device->createShader(CREATE_SHADER_INPUTS(RS64DepthCopyPSBlobDXIL, RS64DepthCopyPSBlobSPIRV, RS64DepthCopyPSBlobMSL, "PSMain", shaderFormat));
+            resolveDesc.pixelShader = copyShader.get();
+            rs64DepthCopy.pipelineLayout = layoutBuilder.create(device);
+            resolveDesc.pipelineLayout = rs64DepthCopy.pipelineLayout.get();
+            rs64DepthCopy.pipeline = device->createGraphicsPipeline(resolveDesc);
         }
 
         // RS64 sun shadows: inline RayQuery against the per-frame scene, only on devices with ray queries.

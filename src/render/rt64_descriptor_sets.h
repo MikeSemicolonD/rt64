@@ -528,6 +528,22 @@ namespace RT64 {
     };
 
     // Adds the half-resolution point light pass to the frame: its constant buffer (view and viewport), the depth and the half-resolution lights.
+    struct RS64VrHandsDescriptorSet : RenderDescriptorSetBase {
+        uint32_t gDepth;
+        uint32_t gSceneDepth;
+
+        RS64VrHandsDescriptorSet(RenderDevice *device = nullptr) {
+            builder.begin();
+            gDepth = builder.addConstantBuffer(1);
+            gSceneDepth = builder.addTexture(2);
+            builder.end();
+
+            if (device != nullptr) {
+                create(device);
+            }
+        }
+    };
+
     struct RS64LightsUpsampleDescriptorSet : RenderDescriptorSetBase {
         uint32_t gLights;
         uint32_t gDepth;

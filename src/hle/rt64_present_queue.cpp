@@ -285,7 +285,7 @@ namespace RT64 {
     }
 
     // VR: both controllers into the controller layer's images at this headset frame's eye poses; the frame then ends with that layer on top.
-    static void rs64VrDrawHands(RenderDevice *device, RenderWorker *worker, const ShaderLibrary *shaderLibrary) {
+    static void rs64VrDrawHands(RenderDevice *device, RenderWorker *worker, const ShaderLibrary *shaderLibrary, SharedQueueResources *shared) {
         constexpr uint32_t kHandVertices = 3 * 24 * 13 * 6;
         rs64vr::EyeViews views;
         rs64vr::Pose hands[2] = {};
@@ -331,8 +331,53 @@ namespace RT64 {
             depthHeight = height;
         }
 
+        // Each eye's scene depth from the last frame the workload published hides the controllers behind what the game drew; the flat screen has none.
+        static std::unique_ptr<RS64VrHandsDescriptorSet> depthSets[2];
+        static std::unique_ptr<RenderBuffer> depthBuffers[2];
+        static std::unique_ptr<RenderTexture> noDepth;
+        if (noDepth == nullptr) {
+            noDepth = device->createTexture(RenderTextureDesc::ColorTarget(1, 1, RenderFormat::R32_FLOAT));
+            for (int e = 0; e < 2; e++) {
+                depthSets[e] = std::make_unique<RS64VrHandsDescriptorSet>(device);
+                depthBuffers[e] = device->createBuffer(RenderBufferDesc::UploadBuffer(sizeof(interop::RS64VrHandsDepthCB), RenderBufferFlag::CONSTANT));
+                depthSets[e]->setBuffer(depthSets[e]->gDepth, depthBuffers[e].get(), sizeof(interop::RS64VrHandsDepthCB));
+            }
+        }
+
+        std::unique_lock<std::mutex> depthLock(shared->vrDepthMutex);
+        const int slotIndex = rs64VrLastScreen ? -1 : shared->vrDepthPublished;
+        shared->vrDepthReading = slotIndex;
+        depthLock.unlock();
+
+        const RS64VrDepthSlot *depthSlot = ((slotIndex >= 0) && shared->vrDepth[slotIndex].views.valid) ? &shared->vrDepth[slotIndex] : nullptr;
+        for (int e = 0; e < 2; e++) {
+            interop::RS64VrHandsDepthCB dcb = {};
+            const RS64VrDepthEye *eyeDepth = ((depthSlot != nullptr) && depthSlot->eyes[e].valid) ? &depthSlot->eyes[e] : nullptr;
+            if (eyeDepth != nullptr) {
+                const RS64VrMat view = rs64VrPoseMatrix(depthSlot->views.eye[e], true);
+                const rs64vr::Fov &fov = depthSlot->views.fov[e];
+                for (int r = 0; r < 3; r++) {
+                    dcb.eyeFromStage[r] = { view.m[r][0], view.m[r][1], view.m[r][2], view.m[r][3] };
+                }
+
+                dcb.tanFov = { std::tan(fov.left), std::tan(fov.right), std::tan(fov.up), std::tan(fov.down) };
+                dcb.zColumn = { eyeDepth->zColumn[0], eyeDepth->zColumn[1], eyeDepth->zColumn[2], eyeDepth->zColumn[3] };
+                dcb.wColumn = { eyeDepth->wColumn[0], eyeDepth->wColumn[1], eyeDepth->wColumn[2], eyeDepth->wColumn[3] };
+                dcb.params = { depthSlot->unitsPerMeter, eyeDepth->depthScale, eyeDepth->depthOffset, 1.0f };
+                dcb.size = { float(eyeDepth->width), float(eyeDepth->height), 0.0f, 0.0f };
+                depthSets[e]->setTexture(depthSets[e]->gSceneDepth, eyeDepth->texture.get(), RenderTextureLayout::SHADER_READ);
+            }
+            else {
+                depthSets[e]->setTexture(depthSets[e]->gSceneDepth, noDepth.get(), RenderTextureLayout::SHADER_READ);
+            }
+
+            std::memcpy(depthBuffers[e]->map(), &dcb, sizeof(dcb));
+            depthBuffers[e]->unmap();
+        }
+
         RenderCommandList *commandList = worker->commandList.get();
         commandList->begin();
+        commandList->barriers(RenderBarrierStage::GRAPHICS, RenderTextureBarrier(noDepth.get(), RenderTextureLayout::SHADER_READ));
         for (int e = 0; e < 2; e++) {
             std::unique_ptr<RenderFramebuffer> &framebuffer = framebuffers[images[e]];
             if (framebuffer == nullptr) {
@@ -362,7 +407,7 @@ namespace RT64 {
                 }
 
                 for (int r = 0; r < 3; r++) {
-                    cb.rotation[r] = { grip.m[r][0], grip.m[r][1], grip.m[r][2], 0.0f };
+                    cb.rotation[r] = { grip.m[r][0], grip.m[r][1], grip.m[r][2], grip.m[r][3] };
                 }
 
                 cb.color = { 0.16f, 0.16f, 0.18f, 1.0f };
@@ -371,6 +416,7 @@ namespace RT64 {
                     const RenderInputSlot slot(0, sizeof(float) * 6);
                     commandList->setPipeline(shaderLibrary->rs64VrHandsMesh.pipeline.get());
                     commandList->setGraphicsPipelineLayout(shaderLibrary->rs64VrHandsMesh.pipelineLayout.get());
+                    commandList->setGraphicsDescriptorSet(depthSets[e]->get(), 0);
                     commandList->setGraphicsPushConstants(0, &cb);
                     commandList->setVertexBuffers(0, &view, 1, &slot);
                     commandList->drawInstanced(modelVertices[h], 1, 0, 0);
@@ -378,6 +424,7 @@ namespace RT64 {
                 else {
                     commandList->setPipeline(shaderLibrary->rs64VrHands.pipeline.get());
                     commandList->setGraphicsPipelineLayout(shaderLibrary->rs64VrHands.pipelineLayout.get());
+                    commandList->setGraphicsDescriptorSet(depthSets[e]->get(), 0);
                     commandList->setGraphicsPushConstants(0, &cb);
                     commandList->drawInstanced(kHandVertices, 1, 0, 0);
                 }
@@ -387,6 +434,9 @@ namespace RT64 {
         commandList->end();
         worker->execute();
         worker->wait();
+
+        depthLock.lock();
+        shared->vrDepthReading = -1;
     }
 
     // VR: a headset frame begun (xrWaitFrame + xrBeginFrame) and not yet ended, so the next fresh frame can go into it. kVrNone = none begun.
@@ -430,7 +480,7 @@ namespace RT64 {
 
     // VR: ends the pending headset frame with the last eyes or screen again, when no fresh frame came in time (loads, holds, a late render);
     // without frames the runtime shows its loading screen.
-    static void rs64VrRepeatPending(RenderDevice *device, RenderWorker *worker, const ShaderLibrary *shaderLibrary) {
+    static void rs64VrRepeatPending(RenderDevice *device, RenderWorker *worker, const ShaderLibrary *shaderLibrary, SharedQueueResources *shared) {
         const int render = rs64VrPending;
         rs64VrPending = kVrNone;
         if (render == kVrNone) {
@@ -439,7 +489,7 @@ namespace RT64 {
 
         rs64VrFade(false, false);
         if (render == 1) {
-            rs64VrDrawHands(device, worker, shaderLibrary);
+            rs64VrDrawHands(device, worker, shaderLibrary, shared);
         }
 
         const Timestamp handsEnd = Timer::current();
@@ -1102,7 +1152,7 @@ namespace RT64 {
                     }
 
                     interpolatedLock.unlock();
-                    rs64VrRepeatPending(ext.device, ext.presentGraphicsWorker, ext.shaderLibrary);
+                    rs64VrRepeatPending(ext.device, ext.presentGraphicsWorker, ext.shaderLibrary, ext.sharedResources);
                     interpolatedLock.lock();
                 }
 
@@ -1146,7 +1196,7 @@ namespace RT64 {
                 const Timestamp waitEnd = rs64VrPendingWaitEnd;
                 rs64VrPending = kVrNone;
                 if (vrRender == 1) {
-                    rs64VrDrawHands(ext.device, ext.presentGraphicsWorker, ext.shaderLibrary);
+                    rs64VrDrawHands(ext.device, ext.presentGraphicsWorker, ext.shaderLibrary, ext.sharedResources);
                 }
 
                 const Timestamp handsEnd = Timer::current();
@@ -1449,7 +1499,7 @@ namespace RT64 {
                     if ((rs64_vr_session() == 0) || !(rs64VrLastViews.valid || rs64VrLastScreen)) {
                         if (rs64VrPending != kVrNone) {
                             cursorLock.unlock();
-                            rs64VrRepeatPending(ext.device, ext.presentGraphicsWorker, ext.shaderLibrary);
+                            rs64VrRepeatPending(ext.device, ext.presentGraphicsWorker, ext.shaderLibrary, ext.sharedResources);
                             cursorLock.lock();
                             continue;
                         }
@@ -1463,7 +1513,7 @@ namespace RT64 {
                     cursorLock.lock();
                     if (!cursorCondition.wait_for(cursorLock, rs64VrHalfPeriod(), presentReady)) {
                         cursorLock.unlock();
-                        rs64VrRepeatPending(ext.device, ext.presentGraphicsWorker, ext.shaderLibrary);
+                        rs64VrRepeatPending(ext.device, ext.presentGraphicsWorker, ext.shaderLibrary, ext.sharedResources);
                         cursorLock.lock();
                     }
                 }
