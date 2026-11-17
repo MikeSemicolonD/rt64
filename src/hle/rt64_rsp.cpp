@@ -1240,8 +1240,14 @@ namespace RT64 {
                     const float len = float(hlslpp::length(centre));
 
                     if (len > 1e-6f) {
+                        // The flat far plane reaches zFar / cos from straight ahead, so a sphere at zFar cut the view's outer part in a circle (explosions in
+                        // the boot logos); inside the flat view the reach is the plane's, outside it the reach at the view's corners.
+                        const float tanX = (std::fabs(float(P[0][0])) > 1e-6f) ? 1.0f / std::fabs(float(P[0][0])) : 1.0f;
+                        const float tanY = (std::fabs(float(P[1][1])) > 1e-6f) ? 1.0f / std::fabs(float(P[1][1])) : 1.0f;
+                        const float cosCorner = 1.0f / std::sqrt(1.0f + tanX * tanX + tanY * tanY);
+
                         vrN = centre / len;
-                        vrD = std::fabs(zFar);
+                        vrD = std::fabs(zFar) / std::max(std::fabs(float(vrN.z)), cosCorner);
                         vrInv = s_inv;
 
                         int beyond = 0;

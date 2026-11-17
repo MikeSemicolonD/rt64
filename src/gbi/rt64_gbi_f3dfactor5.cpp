@@ -3828,7 +3828,8 @@ namespace RT64 {
                     }
                 }
             }
-            // Vertices are int16, so build the quad at a fixed size and carry the real size in the transform scale.
+            // Vertices are int16, so build the quad at a fixed size and carry the real size in the transform scale. Each quad rounds its corners on its own
+            // grid, so a coarse one left sub-pixel cracks between tiled rects in VR (the N64 logo's tiles shimmered); 16384 keeps the rounding far below a pixel.
             float extent = 0.0f;
             for (int k = 0; k < 4; k++) {
                 for (int a = 0; a < 3; a++) {
@@ -3838,7 +3839,7 @@ namespace RT64 {
             if (!(extent > 0.0f)) {
                 return false;
             }
-            constexpr float QuadRefSize = 1024.0f;
+            constexpr float QuadRefSize = 16384.0f;
             const float scale = extent / QuadRefSize;
 
             RSP::Vertex* tmp = reinterpret_cast<RSP::Vertex*>(state->fromRDRAM(F5_VTX_SCRATCH + F5_FACE_SLOT * sizeof(RSP::Vertex)));
