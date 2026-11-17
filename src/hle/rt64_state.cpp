@@ -1385,7 +1385,8 @@ namespace RT64 {
                             flags.culling = (cullBits != 0) && (cullBits != callDesc.cullBothMask);
                         }
                         flags.smoothShade = (callDesc.geometryMode & callDesc.shadingSmoothMask) != 0;
-                        flags.NoN = callDesc.NoN;
+                        // VR: a head moved into geometry clamps it to the near depth instead of cutting it away; fog reads the projection, so the near plane itself stays.
+                        flags.NoN = callDesc.NoN || (rs64_vr_session() != 0);
                     }
                     else {
                         flags.culling = false;
@@ -2662,11 +2663,10 @@ namespace RT64 {
             const hlslpp::float2 resolutionScale = ext.sharedQueueResources->resolutionScale;
             bool removeBlackBorders = ext.sharedQueueResources->enhancementConfig.presentation.removeBlackBorders;
             const uint32_t downsampleMultiplier = ext.userConfig->downsampleMultiplier;
-            const bool letterbox43 = (ext.sharedQueueResources->userConfig.aspectRatio == UserConfiguration::AspectRatio::Original);
             ext.sharedQueueResources->configurationMutex.unlock();
             RenderViewport viewport;
             RenderRect scissor;
-            VIRenderer::getViewportAndScissor(ext.swapChain, lastScreenVI, resolutionScale, downsampleMultiplier, removeBlackBorders, letterbox43, viewport, scissor);
+            VIRenderer::getViewportAndScissor(ext.swapChain, lastScreenVI, resolutionScale, downsampleMultiplier, removeBlackBorders, viewport, scissor);
 
             // Convert the mouse coordinates to native coordinates.
             hlslpp::float2 screenCursorPos;

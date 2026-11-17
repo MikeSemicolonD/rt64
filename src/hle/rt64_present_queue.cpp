@@ -147,7 +147,12 @@ namespace RT64 {
     struct RS64VrStats {
         uint32_t fresh = 0, screen = 0, fadeHeld = 0, noColor = 0, noEyes = 0, noRight = 0, noViews = 0, submitFail = 0, keepAlive = 0, noRender = 0, failed = 0;
         Timestamp stamp;
+        // Microseconds per headset frame in each step, the longest gap between frames, and gaps over 1.5 headset periods (frames the runtime filled itself).
+        int64_t waitUs = 0, handsUs = 0, submitUs = 0, windowUs = 0, maxGapUs = 0;
+        uint32_t timed = 0, missed = 0;
     };
+
+    static Timestamp rs64VrLastBegin;
 
     static RS64VrStats rs64VrStats;
     // The poses of the eyes last copied to the headset; a repeated frame shows those images at these poses.
@@ -211,6 +216,9 @@ namespace RT64 {
             if (!(s.stamp == Timestamp())) {
                 fprintf(stderr, "[vr] 2s: fresh %u, screen %u, held for fade %u, repeat (no color %u, no eyes %u, no right %u, no views %u, submit failed %u), kept alive %u, no render %u, failed %u, rate %u Hz\n",
                     s.fresh, s.screen, s.fadeHeld, s.noColor, s.noEyes, s.noRight, s.noViews, s.submitFail, s.keepAlive, s.noRender, s.failed, rs64_vr_target_rate());
+                const double n = double(std::max(s.timed, 1u)) * 1000.0;
+                fprintf(stderr, "[vr] 2s times: wait %.2f ms, controllers %.2f ms, eyes %.2f ms, window %.2f ms, longest gap %.1f ms, missed %u\n",
+                    s.waitUs / n, s.handsUs / n, s.submitUs / n, s.windowUs / n, s.maxGapUs / 1000.0, s.missed);
             }
 
             const Timestamp now = Timer::current();
@@ -381,12 +389,61 @@ namespace RT64 {
         worker->wait();
     }
 
-    // VR: one headset frame showing the last eyes again, while the game presents nothing (loads, holds); without it the runtime shows its loading screen.
-    static void rs64VrKeepAlive(RenderDevice *device, RenderWorker *worker, const ShaderLibrary *shaderLibrary) {
-        const int render = rs64_vr_begin_frame();
+    // VR: a headset frame begun (xrWaitFrame + xrBeginFrame) and not yet ended, so the next fresh frame can go into it. kVrNone = none begun.
+    static constexpr int kVrNone = -2;
+    static int rs64VrPending = kVrNone;
+    static Timestamp rs64VrPendingWaitStart;
+    static Timestamp rs64VrPendingWaitEnd;
+
+    static void rs64VrBeginPending() {
+        if (rs64VrPending != kVrNone) {
+            return;
+        }
+
+        rs64VrPendingWaitStart = Timer::current();
+        rs64VrPending = rs64_vr_begin_frame();
+        rs64VrPendingWaitEnd = Timer::current();
+    }
+
+    // Half a headset frame: how long a begun frame waits for a fresh one before it shows the last again.
+    static std::chrono::microseconds rs64VrHalfPeriod() {
+        const uint32_t rate = rs64_vr_target_rate();
+        return std::chrono::microseconds((rate > 0) ? (500000 / rate) : 5000);
+    }
+
+    static void rs64VrTime(int render, Timestamp waitStart, Timestamp waitEnd, Timestamp handsEnd) {
+        RS64VrStats &vs = rs64VrStats;
+        if (render < 0) {
+            return;
+        }
+
+        const int64_t periodUs = int64_t(rs64_vr_target_rate() > 0 ? (1000000 / rs64_vr_target_rate()) : 0);
+        const int64_t gapUs = (rs64VrLastBegin == Timestamp()) ? 0 : Timer::deltaMicroseconds(rs64VrLastBegin, waitEnd);
+        vs.waitUs += Timer::deltaMicroseconds(waitStart, waitEnd);
+        vs.handsUs += Timer::deltaMicroseconds(waitEnd, handsEnd);
+        vs.submitUs += Timer::deltaMicroseconds(handsEnd, Timer::current());
+        vs.maxGapUs = std::max(vs.maxGapUs, gapUs);
+        vs.missed += ((periodUs > 0) && (gapUs * 2 > periodUs * 3)) ? 1 : 0;
+        vs.timed++;
+        rs64VrLastBegin = waitEnd;
+    }
+
+    // VR: ends the pending headset frame with the last eyes or screen again, when no fresh frame came in time (loads, holds, a late render);
+    // without frames the runtime shows its loading screen.
+    static void rs64VrRepeatPending(RenderDevice *device, RenderWorker *worker, const ShaderLibrary *shaderLibrary) {
+        const int render = rs64VrPending;
+        rs64VrPending = kVrNone;
+        if (render == kVrNone) {
+            return;
+        }
+
         rs64VrFade(false, false);
         if (render == 1) {
             rs64VrDrawHands(device, worker, shaderLibrary);
+        }
+
+        const Timestamp handsEnd = Timer::current();
+        if (render == 1) {
             rs64VrRepeat();
             rs64VrStats.keepAlive++;
         }
@@ -398,6 +455,7 @@ namespace RT64 {
             rs64VrStats.failed++;
         }
 
+        rs64VrTime(render, rs64VrPendingWaitStart, rs64VrPendingWaitEnd, handsEnd);
         rs64VrLogStats();
     }
 
@@ -603,7 +661,7 @@ namespace RT64 {
         presentThread = new std::thread(&PresentQueue::threadLoop, this);
     }
 
-    bool PresentQueue::rs64SubmitScreen(RenderTarget *colorTarget, const VI &vi, UserConfiguration::Filtering filtering, bool removeBlackBorders, bool letterbox43) {
+    bool PresentQueue::rs64SubmitScreen(RenderTarget *colorTarget, const VI &vi, UserConfiguration::Filtering filtering, bool removeBlackBorders) {
         uint32_t width = 0;
         uint32_t height = 0;
         RenderTexture *image = rs64_vr_acquire_screen(&width, &height);
@@ -636,7 +694,6 @@ namespace RT64 {
         params.filtering = filtering;
         params.vi = &vi;
         params.removeBlackBorders = removeBlackBorders;
-        params.letterbox43 = letterbox43;
         params.targetWidth = width;
         params.targetHeight = height;
         if (colorTarget->downsampleMultiplier > 1) {
@@ -678,7 +735,6 @@ namespace RT64 {
         hlslpp::float2 resolutionScale;
         EnhancementConfiguration::Presentation::Mode presentationMode;
         bool removeBlackBorders;
-        bool letterbox43;
         UserConfiguration::RefreshRate refreshRate;
         UserConfiguration::Filtering filtering;
         bool fxaa;
@@ -689,7 +745,6 @@ namespace RT64 {
             resolutionScale = ext.sharedResources->resolutionScale;
             presentationMode = ext.sharedResources->enhancementConfig.presentation.mode;
             removeBlackBorders = ext.sharedResources->enhancementConfig.presentation.removeBlackBorders;
-            letterbox43 = (ext.sharedResources->userConfig.aspectRatio == UserConfiguration::AspectRatio::Original);
             refreshRate = ext.sharedResources->userConfig.refreshRate;
             filtering = ext.sharedResources->userConfig.filtering;
             fxaa = ext.sharedResources->userConfig.fxaa;
@@ -702,7 +757,6 @@ namespace RT64 {
         bool lockedWorkloadMutex = false;
         InterpolatedFrameCounters &frameCounters = ext.sharedResources->interpolatedFrames[ext.sharedResources->interpolatedFramesIndex];
         const bool usingMSAA = frameCounters.msaa;
-        const uint32_t vrSet = ext.sharedResources->interpolatedFramesIndex;
 
         // TODO: There's a possible race condition interactions that can happen while the workload
         // queue is rendering extra frames and the present event is processed while it's generating
@@ -1026,15 +1080,39 @@ namespace RT64 {
             }
         }
         
+        bool presentNotified = false;
         for (int32_t i = 0; i < framesToPresent; i++) {
             uint32_t frameCountersNextPresented = 0;
             if (((framesToPresent > 1) || frameCounters.vr) && (usingMSAA || (i > 0))) {
                 // Stall until the interpolated color target is available.
-                const uint32_t targetIndex = usingMSAA ? i : (i - 1);
+                uint32_t targetIndex = usingMSAA ? i : (i - 1);
                 std::unique_lock<std::mutex> interpolatedLock(ext.sharedResources->interpolatedMutex);
-                ext.sharedResources->interpolatedCondition.wait(interpolatedLock, [&]() {
+                const auto targetReady = [&]() {
                     return (frameCounters.available > targetIndex) || ((frameCounters.available == targetIndex) && frameCounters.skipped);
-                });
+                };
+
+                // VR: the headset sets the pace. A begun headset frame waits half a frame for this one, then shows the last again and begins the next.
+                const bool vrDriven = frameCounters.vr && usingMSAA && (rs64_vr_session() != 0);
+                while (vrDriven && !targetReady()) {
+                    interpolatedLock.unlock();
+                    rs64VrBeginPending();
+                    interpolatedLock.lock();
+                    if ((rs64VrPending == kVrNone) || (rs64VrPending < 0) || ext.sharedResources->interpolatedCondition.wait_for(interpolatedLock, rs64VrHalfPeriod(), targetReady)) {
+                        break;
+                    }
+
+                    interpolatedLock.unlock();
+                    rs64VrRepeatPending(ext.device, ext.presentGraphicsWorker, ext.shaderLibrary);
+                    interpolatedLock.lock();
+                }
+
+                ext.sharedResources->interpolatedCondition.wait(interpolatedLock, targetReady);
+
+                // VR: behind the game, the newest finished frame goes out and the ones before it are dropped.
+                if (vrDriven && (int32_t(frameCounters.available) > (i + 1))) {
+                    i = std::min(int32_t(frameCounters.available), framesToPresent) - 1;
+                    targetIndex = uint32_t(i);
+                }
 
                 // Do not present any more frames after this one after reaching the last available frame if the workload was skipped.
                 if ((frameCounters.available == targetIndex) && frameCounters.skipped) {
@@ -1042,7 +1120,7 @@ namespace RT64 {
                     frameCountersNextPresented = frameCounters.count;
                 }
                 else {
-                    frameCountersNextPresented = frameCounters.presented + 1;
+                    frameCountersNextPresented = vrDriven ? uint32_t(i + 1) : (frameCounters.presented + 1);
                 }
 
                 if (i < framesToPresent) {
@@ -1062,13 +1140,19 @@ namespace RT64 {
             const bool vrSession = (rs64_vr_session() != 0);
             if (vrSession && (i < framesToPresent)) {
                 RS64VrStats &vs = rs64VrStats;
-                const int vrRender = rs64_vr_begin_frame();
+                rs64VrBeginPending();
+                const int vrRender = rs64VrPending;
+                const Timestamp waitStart = rs64VrPendingWaitStart;
+                const Timestamp waitEnd = rs64VrPendingWaitEnd;
+                rs64VrPending = kVrNone;
                 if (vrRender == 1) {
                     rs64VrDrawHands(ext.device, ext.presentGraphicsWorker, ext.shaderLibrary);
                 }
 
-                std::vector<std::unique_ptr<RenderTarget>> &vrRight = ext.sharedResources->vrRightTargets[vrSet];
-                std::vector<rs64vr::EyeViews> &vrViews = ext.sharedResources->vrTargetViews[vrSet];
+                const Timestamp handsEnd = Timer::current();
+
+                std::vector<std::unique_ptr<RenderTarget>> &vrRight = ext.sharedResources->vrRightTargets;
+                std::vector<rs64vr::EyeViews> &vrViews = ext.sharedResources->vrTargetViews;
                 // Only a workload that rendered both eyes into its own targets has a pair; the vectors keep older frames' eyes otherwise.
                 const bool haveEyes = frameCounters.vr && (colorTarget != nullptr) && (uint32_t(i) < vrRight.size()) && (uint32_t(i) < vrViews.size()) && vrViews[i].valid;
                 const bool vrFresh = (vrRender == 1) && (colorTarget != nullptr) && (frameCounters.vrScreen || haveEyes);
@@ -1077,7 +1161,7 @@ namespace RT64 {
                     rs64VrRepeat();
                     vs.fadeHeld++;
                 }
-                else if ((vrRender == 1) && frameCounters.vrScreen && (colorTarget != nullptr) && rs64SubmitScreen(colorTarget, present.screenVI, filtering, removeBlackBorders, letterbox43)) {
+                else if ((vrRender == 1) && frameCounters.vrScreen && (colorTarget != nullptr) && rs64SubmitScreen(colorTarget, present.screenVI, filtering, removeBlackBorders)) {
                     rs64VrLastScreen = true;
                     vs.screen++;
                 }
@@ -1102,6 +1186,7 @@ namespace RT64 {
                     vs.failed++;
                 }
 
+                rs64VrTime(vrRender, waitStart, waitEnd, handsEnd);
                 rs64VrLogStats();
             }
 
@@ -1111,6 +1196,7 @@ namespace RT64 {
 
             uint32_t swapChainIndex = 0;
             const bool presentFrame = (i < framesToPresent) && swapChainValid && vrWindowDue;
+            const Timestamp windowStart = Timer::current();
             if (presentFrame) {
                 swapChainValid = ext.swapChain->acquireTexture(acquiredSemaphore.get(), &swapChainIndex);
                 vrWindowTimestamp = Timer::current();
@@ -1136,7 +1222,7 @@ namespace RT64 {
                     renderParams.filtering = filtering;
                     renderParams.vi = &present.screenVI;
                     renderParams.removeBlackBorders = removeBlackBorders;
-                    renderParams.letterbox43 = letterbox43;
+                    renderParams.cover = vrSession && frameCounters.vr && !frameCounters.vrScreen;
 
                     const bool useDownsampling = (colorTarget->downsampleMultiplier > 1);
                     if (useDownsampling) {
@@ -1247,9 +1333,10 @@ namespace RT64 {
                 ext.sharedResources->interpolatedCondition.notify_all();
             }
 
-            // As soon as we're done with the first render target, we notify the workload queue it can proceed.
-            if (i == 0) {
+            // As soon as we're done with the first render target, we notify the workload queue it can proceed. VR can skip ahead past frame 0.
+            if (!presentNotified) {
                 notifyPresentId(present);
+                presentNotified = true;
             }
 
             if (presentFrame && swapChainValid) {
@@ -1258,7 +1345,8 @@ namespace RT64 {
                     Timer::preciseSleepUntil(presentTimestamp + std::chrono::nanoseconds(1'000'000'000 / targetRate));
                 }
 
-                if (presentWaitEnabled) {
+                // In VR this thread also feeds the headset, which can't wait out the monitor's vsync.
+                if (presentWaitEnabled && !vrSession) {
                     ext.swapChain->wait();
                 }
 
@@ -1266,6 +1354,10 @@ namespace RT64 {
                 presentTimestamp = Timer::current();
                 swapChainValid = ext.swapChain->present(swapChainIndex, &waitSemaphore, 1);
                 presentProfiler.logAndRestart();
+            }
+
+            if (vrSession && presentFrame) {
+                rs64VrStats.windowUs += Timer::deltaMicroseconds(windowStart, Timer::current());
             }
         }
     }
@@ -1352,17 +1444,27 @@ namespace RT64 {
                     return (writeCursor != threadCursor) || !presentThreadRunning;
                 };
 
-                // VR: past 50 ms without a present the headset gets the last eyes again each frame (xrWaitFrame paces the loop) until the game presents.
-                auto keepAliveWait = std::chrono::milliseconds(50);
+                // VR: between presents the next headset frame is begun at once; one that gets no present within half a frame shows the last eyes again.
                 while (!presentReady()) {
                     if ((rs64_vr_session() == 0) || !(rs64VrLastViews.valid || rs64VrLastScreen)) {
+                        if (rs64VrPending != kVrNone) {
+                            cursorLock.unlock();
+                            rs64VrRepeatPending(ext.device, ext.presentGraphicsWorker, ext.shaderLibrary);
+                            cursorLock.lock();
+                            continue;
+                        }
+
                         cursorCondition.wait(cursorLock, presentReady);
+                        continue;
                     }
-                    else if (!cursorCondition.wait_for(cursorLock, keepAliveWait, presentReady)) {
+
+                    cursorLock.unlock();
+                    rs64VrBeginPending();
+                    cursorLock.lock();
+                    if (!cursorCondition.wait_for(cursorLock, rs64VrHalfPeriod(), presentReady)) {
                         cursorLock.unlock();
-                        rs64VrKeepAlive(ext.device, ext.presentGraphicsWorker, ext.shaderLibrary);
+                        rs64VrRepeatPending(ext.device, ext.presentGraphicsWorker, ext.shaderLibrary);
                         cursorLock.lock();
-                        keepAliveWait = std::chrono::milliseconds(0);
                     }
                 }
 
@@ -1452,6 +1554,13 @@ namespace RT64 {
                 processCursor = -1;
             }
         }
+
+        // A begun headset frame counts as in use, and the VR shutdown waits for it to end.
+        if (rs64VrPending >= 0) {
+            rs64_vr_end_frame(nullptr);
+        }
+
+        rs64VrPending = kVrNone;
 
         // Transition the active swap chain render target out of the present state to avoid live references to the resource.
         uint32_t swapChainIndex = 0;

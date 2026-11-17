@@ -88,7 +88,7 @@ namespace RT64 {
         void setup(const External &ext);
         void threadPresent(const Present &present, bool &swapChainValid);
         // VR, inside a headset frame: draws the frame with the VI pass into the virtual screen's image and ends the frame with it. False = no image.
-        bool rs64SubmitScreen(RenderTarget *colorTarget, const VI &vi, UserConfiguration::Filtering filtering, bool removeBlackBorders, bool letterbox43);
+        bool rs64SubmitScreen(RenderTarget *colorTarget, const VI &vi, UserConfiguration::Filtering filtering, bool removeBlackBorders);
         void skipInterpolation();
         void notifyPresentId(const Present &present);
         void threadAdvanceBarrier();

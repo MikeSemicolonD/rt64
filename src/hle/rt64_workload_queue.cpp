@@ -21,6 +21,11 @@ std::atomic<float> g_rs64_hud_placement{ 0.0f };
 extern "C" int rs64_vr_active(void);
 
 namespace RT64 {
+    // VR: microseconds rendering the left and right eyes (CPU record plus GPU wait) and eye pairs rendered since the last workloads log.
+    static int64_t rs64VrLeftUs = 0;
+    static int64_t rs64VrRightUs = 0;
+    static uint32_t rs64VrPairs = 0;
+
     // WorkloadQueue
 
     WorkloadQueue::WorkloadQueue() {
@@ -246,7 +251,9 @@ namespace RT64 {
             workloadConfig.downsampleMultiplier = 1;
 
             // A 2D screen renders at a whole-number scale as on desktop: a fractional one left the results wipe's unfilled last column showing.
+            // The virtual screen is 4:3, so the window's widescreen target would only narrow 2D screens (the attribution).
             if (vrScreen) {
+                workloadConfig.aspectRatioTarget = workloadConfig.aspectRatioSource;
                 const float multiplier = float(std::max<uint32_t>((vrEyeHeight + referenceHeight - 1) / referenceHeight, 1));
                 workloadConfig.resolutionScale = { multiplier, multiplier };
             }
@@ -1169,7 +1176,12 @@ namespace RT64 {
                         if ((s_stamp == Timestamp()) || (Timer::current() - s_stamp >= std::chrono::seconds(2))) {
                             if (!(s_stamp == Timestamp())) {
                                 fprintf(stderr, "[vr] workloads 2s: screen %u, eyes %u, paused %u, no vi rate %u, no candidate %u, no fb %u (pairs %u)\n", s_screen, s_eyes, s_paused, s_noRate, s_noCandidate, s_noTarget, workload.fbPairCount);
+                                const double n = double(std::max(rs64VrPairs, 1u)) * 1000.0;
+                                fprintf(stderr, "[vr] eye renders 2s: %u pairs, left %.2f ms, right %.2f ms\n", rs64VrPairs, rs64VrLeftUs / n, rs64VrRightUs / n);
                             }
+
+                            rs64VrLeftUs = rs64VrRightUs = 0;
+                            rs64VrPairs = 0;
 
                             s_stamp = Timer::current();
                             s_screen = s_eyes = s_paused = s_noRate = s_noTarget = s_noCandidate = 0;
@@ -1326,11 +1338,10 @@ namespace RT64 {
                     // ROGUESQ_RT_INTERP_REUSE=0 traces every displayed frame again.
                     static const bool s_reuseTrace = []() { const char *e = std::getenv("ROGUESQ_RT_INTERP_REUSE"); return !(e && (e[0] == '0')); }();
                     rs64lights::g_reuseTrace = s_reuseTrace && generateInterpolatedFrames && (frame > 0);
-                    // VR: both eyes of this rendered frame use poses located now, stored per counter set and rendered frame so the present thread submits the same ones.
-                    const uint32_t vrSet = ext.sharedResources->interpolatedFramesIndex;
+                    // VR: both eyes of this rendered frame use poses located now, stored per rendered frame so the present thread submits the same ones.
                     const rs64vr::EyeViews *vrViews = nullptr;
                     if (rs64_vr_session() && !workload.vrScreen && !interpolationTargetKey.isEmpty()) {
-                        std::vector<rs64vr::EyeViews> &views = ext.sharedResources->vrTargetViews[vrSet];
+                        std::vector<rs64vr::EyeViews> &views = ext.sharedResources->vrTargetViews;
                         if (views.size() <= framesRendered) {
                             views.resize(framesRendered + 1);
                         }
@@ -1344,9 +1355,11 @@ namespace RT64 {
                         interpolationTargetKey, interpolationTargetFbPairIndex, overrideTarget, overrideModifier, velocityUploaderUsed, uploadExtras, tileInterpolationUsed, lookAtInterpolationUsed,
                         vrViews, 0);
 
+                    const int64_t leftEndMicro = workloadTimer.elapsedMicroseconds();
+
                     // The right eye goes into its own target before the present thread can take this frame; ray-traced results are per view, so nothing is reused.
                     if (vrViews != nullptr) {
-                        std::vector<std::unique_ptr<RenderTarget>> &rightTargets = ext.sharedResources->vrRightTargets[vrSet];
+                        std::vector<std::unique_ptr<RenderTarget>> &rightTargets = ext.sharedResources->vrRightTargets;
                         while (rightTargets.size() <= framesRendered) {
                             rightTargets.push_back(std::make_unique<RenderTarget>(interpolationTargetKey.address, Framebuffer::Type::Color, RenderMultisampling(), usesHDR));
                         }
@@ -1355,6 +1368,10 @@ namespace RT64 {
                         threadRenderFrame(curFrame, prevFrame, workloadConfig, workload.debuggerRenderer, workload.debuggerCamera, curFrameWeight, prevFrameWeight, deltaTimeMs,
                             interpolationTargetKey, interpolationTargetFbPairIndex, rightTargets[framesRendered].get(), 0x100 + framesRendered, false, false, tileInterpolationUsed, lookAtInterpolationUsed,
                             vrViews, 1);
+
+                        rs64VrLeftUs += leftEndMicro - renderTimeMicro;
+                        rs64VrRightUs += workloadTimer.elapsedMicroseconds() - leftEndMicro;
+                        rs64VrPairs++;
                     }
 
                     rs64lights::g_reuseTrace = false;

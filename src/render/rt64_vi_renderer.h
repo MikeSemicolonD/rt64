@@ -16,9 +16,6 @@ namespace RT64 {
     // Fraction of the window height the presented picture is moved up by (the host sets it while an on-screen keyboard covers the bottom).
     extern std::atomic<float> presentShiftY;
 
-    // Whether letterbox43 applies to the current frame; the host clears it on menus so their letterboxed scenes fit the window.
-    extern std::atomic<bool> letterboxInBox;
-
     struct VIRenderer {
         std::unique_ptr<VideoInterfaceDescriptorSet> descriptorSet;
         const RenderSampler *descriptorSetSampler = nullptr;
@@ -37,17 +34,17 @@ namespace RT64 {
             UserConfiguration::Filtering filtering = UserConfiguration::Filtering::Linear;
             const VI *vi = nullptr;
             bool removeBlackBorders = false;
-            bool letterbox43 = false;
             // Draw into a target of this size instead of the swap chain's (VR's virtual screen); 0 = the swap chain.
             uint32_t targetWidth = 0;
             uint32_t targetHeight = 0;
+            // Fill the target and crop the overflow instead of fitting inside it (the window's view of a VR eye).
+            bool cover = false;
         };
 
         VIRenderer();
         ~VIRenderer();
         void render(const RenderParams &p);
-        // letterbox43: a letterboxed frame (a cutscene's short VI region) is shown inside a 4:3 screen, as on a TV, instead of filling the window.
-        static void getViewportAndScissor(const RenderSwapChain *swapChain, const VI &vi, hlslpp::float2 resolutionScale, uint32_t downsamplingScale, bool removeBlackBorders, bool letterbox43, RenderViewport &viewport, RenderRect &scissor);
-        static void getViewportAndScissor(hlslpp::float2 fullWindow, const VI &vi, hlslpp::float2 resolutionScale, uint32_t downsamplingScale, bool removeBlackBorders, bool letterbox43, RenderViewport &viewport, RenderRect &scissor);
+        static void getViewportAndScissor(const RenderSwapChain *swapChain, const VI &vi, hlslpp::float2 resolutionScale, uint32_t downsamplingScale, bool removeBlackBorders, RenderViewport &viewport, RenderRect &scissor);
+        static void getViewportAndScissor(hlslpp::float2 fullWindow, const VI &vi, hlslpp::float2 resolutionScale, uint32_t downsamplingScale, bool removeBlackBorders, RenderViewport &viewport, RenderRect &scissor);
     };
 };

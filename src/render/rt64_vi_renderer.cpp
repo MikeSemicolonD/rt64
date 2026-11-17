@@ -13,7 +13,6 @@
 
 namespace RT64 {
     std::atomic<float> presentShiftY{ 0.0f };
-    std::atomic<bool> letterboxInBox{ true };
 
     // VIRenderer
 
@@ -77,11 +76,23 @@ namespace RT64 {
         RenderViewport viewport;
         RenderRect scissor;
         if ((p.targetWidth > 0) && (p.targetHeight > 0)) {
-            getViewportAndScissor(hlslpp::float2(float(p.targetWidth), float(p.targetHeight)), *p.vi, p.resolutionScale, p.downsamplingScale, p.removeBlackBorders, p.letterbox43, viewport, scissor);
+            getViewportAndScissor(hlslpp::float2(float(p.targetWidth), float(p.targetHeight)), *p.vi, p.resolutionScale, p.downsamplingScale, p.removeBlackBorders, viewport, scissor);
         }
         else {
-            getViewportAndScissor(p.swapChain, *p.vi, p.resolutionScale, p.downsamplingScale, p.removeBlackBorders, p.letterbox43, viewport, scissor);
+            getViewportAndScissor(p.swapChain, *p.vi, p.resolutionScale, p.downsamplingScale, p.removeBlackBorders, viewport, scissor);
         }
+
+        if (p.cover && (viewport.width > 0.0f) && (viewport.height > 0.0f)) {
+            const float w = (p.targetWidth > 0) ? float(p.targetWidth) : float(p.swapChain->getWidth());
+            const float h = (p.targetHeight > 0) ? float(p.targetHeight) : float(p.swapChain->getHeight());
+            const float f = std::max(w / viewport.width, h / viewport.height);
+            viewport.x = w * 0.5f + (viewport.x - w * 0.5f) * f;
+            viewport.y = h * 0.5f + (viewport.y - h * 0.5f) * f;
+            viewport.width *= f;
+            viewport.height *= f;
+            scissor = RenderRect(0, 0, int32_t(w), int32_t(h));
+        }
+
         p.commandList->setViewports(viewport);
         p.commandList->setScissors(scissor);
 
@@ -134,11 +145,11 @@ namespace RT64 {
         p.commandList->drawInstanced(3, 1, 0, 0);
     }
 
-    void VIRenderer::getViewportAndScissor(const RenderSwapChain *swapChain, const VI &vi, hlslpp::float2 resolutionScale, uint32_t downsamplingScale, bool removeBlackBorders, bool letterbox43, RenderViewport &viewport, RenderRect &scissor) {
-        getViewportAndScissor(hlslpp::float2(float(swapChain->getWidth()), float(swapChain->getHeight())), vi, resolutionScale, downsamplingScale, removeBlackBorders, letterbox43, viewport, scissor);
+    void VIRenderer::getViewportAndScissor(const RenderSwapChain *swapChain, const VI &vi, hlslpp::float2 resolutionScale, uint32_t downsamplingScale, bool removeBlackBorders, RenderViewport &viewport, RenderRect &scissor) {
+        getViewportAndScissor(hlslpp::float2(float(swapChain->getWidth()), float(swapChain->getHeight())), vi, resolutionScale, downsamplingScale, removeBlackBorders, viewport, scissor);
     }
 
-    void VIRenderer::getViewportAndScissor(hlslpp::float2 fullWindow, const VI &vi, hlslpp::float2 resolutionScale, uint32_t downsamplingScale, bool removeBlackBorders, bool letterbox43, RenderViewport &viewport, RenderRect &scissor) {
+    void VIRenderer::getViewportAndScissor(hlslpp::float2 fullWindow, const VI &vi, hlslpp::float2 resolutionScale, uint32_t downsamplingScale, bool removeBlackBorders, RenderViewport &viewport, RenderRect &scissor) {
         // We define three different coordinate spaces to work with to translate the VI parameters into the Window.
         //
         // VideoSD: This corresponds to the SD TV Scanline space, which is what the VI natively works on.
@@ -158,16 +169,7 @@ namespace RT64 {
             hdSize.x *= vi.pixelAspect();
         }
 
-        hlslpp::float2 windowSize = fullWindow;
-        hlslpp::float2 windowOrigin = { 0.0f, 0.0f };
-
-        // A frame wider than 16:10 is a letterbox inside the 4:3 TV picture; fit it to a centred 4:3 box so the bars show.
-        constexpr float LetterboxAspect = 1.6f;
-        if (letterbox43 && letterboxInBox.load(std::memory_order_relaxed) && removeBlackBorders &&(float(hdSize.x / hdSize.y) > LetterboxAspect)) {
-            const float boxWidth = std::min(float(fullWindow.x), float(fullWindow.y) * 4.0f / 3.0f);
-            windowSize = { boxWidth, boxWidth * 3.0f / 4.0f };
-            windowOrigin = (fullWindow - windowSize) / 2.0f;
-        }
+        const hlslpp::float2 windowSize = fullWindow;
 
         // Query the VI for the current rendering area.
         hlslpp::float4 viViewRect = vi.viewRectangle() * sdSize.xyxy;
@@ -176,13 +178,13 @@ namespace RT64 {
         // Scale all the rectangles to the space of the Window.
         hlslpp::float2 topLeftViewport = fromSDtoHD({ float(viViewRect.x), float(viViewRect.y) }, sdSize, hdSize);
         hlslpp::float2 bottomRightViewport = fromSDtoHD({ float(viViewRect.x + viViewRect.z), float(viViewRect.y + viViewRect.w) }, sdSize, hdSize);
-        topLeftViewport = windowOrigin + fromHDtoWindow(topLeftViewport, hdSize, windowSize);
-        bottomRightViewport = windowOrigin + fromHDtoWindow(bottomRightViewport, hdSize, windowSize);
+        topLeftViewport = fromHDtoWindow(topLeftViewport, hdSize, windowSize);
+        bottomRightViewport = fromHDtoWindow(bottomRightViewport, hdSize, windowSize);
 
         hlslpp::float2 topLeftScissor = fromSDtoHD({ float(viCropRect.x), float(viCropRect.y) }, sdSize, hdSize);
         hlslpp::float2 bottomRightScissor = fromSDtoHD({ float(viCropRect.x + viCropRect.z), float(viCropRect.y + viCropRect.w) }, sdSize, hdSize);
-        topLeftScissor = windowOrigin + fromHDtoWindow(topLeftScissor, hdSize, windowSize);
-        bottomRightScissor = windowOrigin + fromHDtoWindow(bottomRightScissor, hdSize, windowSize);
+        topLeftScissor = fromHDtoWindow(topLeftScissor, hdSize, windowSize);
+        bottomRightScissor = fromHDtoWindow(bottomRightScissor, hdSize, windowSize);
 
         const float shift = presentShiftY.load(std::memory_order_relaxed) * fullWindow.y;
         // Whole-pixel edges: float drift in a widescreen hdSize left the viewport ~0.07 px short of the window edge, so the last column never rasterized.

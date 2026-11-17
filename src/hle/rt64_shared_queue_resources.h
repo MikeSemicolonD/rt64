@@ -65,9 +65,9 @@ namespace RT64 {
         std::atomic<uint64_t> colorImageWorkloadId{ 0 };
         std::vector<std::unique_ptr<RenderTarget>> interpolatedColorTargets;
 
-        // VR: the right eye of each rendered frame and the eye poses both eyes used, per counter set (interpolatedFramesIndex), indexed by rendered frame.
-        std::vector<std::unique_ptr<RenderTarget>> vrRightTargets[2];
-        std::vector<rs64vr::EyeViews> vrTargetViews[2];
+        // VR: the right eye of each rendered frame and the eye poses both eyes used, indexed like interpolatedColorTargets so its present wait guards them too.
+        std::vector<std::unique_ptr<RenderTarget>> vrRightTargets;
+        std::vector<rs64vr::EyeViews> vrTargetViews;
         InterpolatedFrameCounters interpolatedFrames[2];
         uint32_t interpolatedFramesIndex = 0;
         std::mutex interpolatedMutex;
