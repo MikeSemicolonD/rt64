@@ -4258,7 +4258,21 @@ namespace RT64 {
             gbi->map[0xBE] = &op_consume16;
 
             // RDP-state / raster wrappers (rt64_gbi_f5_rdpstate.cpp).
-            gbi->map[0xFC] = &setCombine_logged;
+            // The Jade Moon shield dome (vertex colour at a prim alpha over a fog-shaded translucent mode) fades its base to black vertex colours that read as
+            // see-through in the game, but the blend darkens what is behind them; adding the colour instead leaves black invisible.
+            gbi->map[0xFC] = [](State *state, DisplayList **dl) {
+                const uint32_t w0 = (*dl)->w0;
+                const uint32_t w1 = (*dl)->w1;
+                setCombine_logged(state, dl);
+
+                constexpr uint32_t kShadeColorPrimAlphaW0 = 0xFCFFFFFFu;
+                constexpr uint32_t kShadeColorPrimAlphaW1 = 0xFFFE7638u;
+                constexpr uint32_t kFogXluL = 0xC8104A50u;
+                constexpr uint32_t kBlendOneM = 0x00020000u;
+                if ((w0 == kShadeColorPrimAlphaW0) && (w1 == kShadeColorPrimAlphaW1) && (state->rdp->otherMode.L == kFogXluL)) {
+                    state->rdp->setOtherMode(state->rdp->otherMode.H, kFogXluL | kBlendOneM);
+                }
+            };
             gbi->map[0xF5] = &setTile_logged;
             gbi->map[0xF6] = &fillRect_op02_aware;
             gbi->map[0xF7] = &GBI_RDP::setFillColor;

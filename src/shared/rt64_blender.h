@@ -421,6 +421,12 @@ namespace interop {
                 else if (M == PM_FRAMEBUFFER_COLOR) {
                     blenderColor = fromInputPM(P, inputs, inputColor);
                     finalAlpha = fromInputA(A, inputs, combinerColor.a);
+
+                    // The framebuffer's weight is the same output as the source's here, so an added framebuffer (B = 1) is approximated by weighting the
+                    // source by its brightness: black leaves the framebuffer as it is, as an addition would.
+                    if (B == B_ONE) {
+                        finalAlpha *= max(blenderColor.r, max(blenderColor.g, blenderColor.b));
+                    }
                 }
                 else {
                     // Should be unreachable.
