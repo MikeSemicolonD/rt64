@@ -170,8 +170,26 @@ namespace RT64 {
                 prevProjTransform = projMatrix;
             }
 
+            // A mod's camera view turns the scene only: the perspective projections up to the pass's main view (the one with the most draws). The radar's map
+            // comes after it under the same matrices and viewport.
             rs64vr::Pose fakeHead;
-            if ((proj.type == Projection::Type::Perspective) && rs64_vr_fake_head(&fakeHead)) {
+            const bool modViewOnly = (rs64_mod_camera_view_on() != 0) && (rs64_vr_active() == 0);
+            bool sceneView = !modViewOnly;
+            if (modViewOnly && (proj.type == Projection::Type::Perspective)) {
+                uint32_t mainProjection = sceneProj.projectionIndex;
+                uint32_t mainCalls = 0;
+                for (uint32_t k = 0; k < fbPair.projectionCount; k++) {
+                    const Projection &other = fbPair.projections[k];
+                    if ((other.type == Projection::Type::Perspective) && (other.gameCallCount > mainCalls)) {
+                        mainCalls = other.gameCallCount;
+                        mainProjection = k;
+                    }
+                }
+
+                sceneView = sceneProj.projectionIndex <= mainProjection;
+            }
+
+            if ((proj.type == Projection::Type::Perspective) && sceneView && rs64_vr_fake_head(&fakeHead)) {
                 const rs64vr::Mat4 head = rs64vr::eyeView(fakeHead, rs64_vr_units_per_meter());
                 applyVrView(viewMatrix, head);
                 applyVrView(prevViewTransform, head);

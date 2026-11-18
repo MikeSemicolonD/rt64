@@ -129,8 +129,10 @@ extern "C" {
     // 1 while the cockpit view is drawing (VR only).
     int rs64_vr_cockpit_view(void);
 
-    // The fake head's pose (OpenXR axes, meters) while ROGUESQ_VR_FAKE_YAW is set; 0 = it is off.
+    // The fake head's pose (OpenXR axes, meters) while ROGUESQ_VR_FAKE_YAW is set, else a mod's camera view (host API camera_view); 0 = neither.
     int rs64_vr_fake_head(rs64vr::Pose *pose);
+    // 1 while a mod's camera view is set, so the projections are processed even when nothing else needs them.
+    int rs64_mod_camera_view_on(void);
 
     // 1 in a mission: only the mission HUD becomes quads; menus keep their texrect effects.
     int rs64_vr_hud_quads(void);

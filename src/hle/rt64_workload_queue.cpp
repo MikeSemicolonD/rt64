@@ -432,7 +432,7 @@ namespace RT64 {
         rendererCPUProfiler.start();
 
         const bool aspectRatioAdjustment = (abs(workloadConfig.aspectRatioScale - 1.0f) > 1e-6f);
-        const bool processProjections = aspectRatioAdjustment || prevFrame.matched || curFrame.isDebuggerCameraEnabled(*this) || (rs64_vr_active() != 0);
+        const bool processProjections = aspectRatioAdjustment || prevFrame.matched || curFrame.isDebuggerCameraEnabled(*this) || (rs64_vr_active() != 0) || (rs64_mod_camera_view_on() != 0);
         bool uploadProjections = false;
         if (processProjections) {
             ProjectionProcessor::ProcessParams projParams;
