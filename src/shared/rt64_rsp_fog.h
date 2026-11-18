@@ -20,8 +20,8 @@ namespace interop {
 };
 #else
 // Fog depth (clip z over w) of camera-space point v. In VR viewProj = P * E with E the rigid eye view and P's rows 2 and 3 (0, 0, m22, m32) and
-// (0, 0, m23, 0), so row 3 is m23 * E's row 2 and row 2 is m22 * E's row 2 plus m32 in w; the game's curve A + B / z is evaluated at the distance |v|,
-// so the fog doesn't sweep round the player and far edges (Taloraan's cloud sheets) fade the same in every direction.
+// (0, 0, m23, 0), so row 3 is m23 * E's row 2 and row 2 is m22 * E's row 2 plus m32 in w; the game's curve A + B / z is evaluated at the ellipsoid
+// distance |(0.6 v.xy, v.z)|: near the flat depth ahead (the intro's LucasArts logo), growing off to the sides so the fog doesn't sweep round the player, with no crease (Taloraan's cloud sheets).
 float rs64FogDepth(float4x4 viewProj, float3 v, RSPFog fog) {
     const float4 clip = mul(viewProj, float4(v, 1.0f));
     const float3 r3 = viewProj[3].xyz;
@@ -35,7 +35,8 @@ float rs64FogDepth(float4x4 viewProj, float3 v, RSPFog fog) {
     const uint j = (a3.x >= a3.y) ? ((a3.x >= a3.z) ? 0 : 2) : ((a3.y >= a3.z) ? 1 : 2);
     const float a = viewProj[2][j] / viewProj[3][j];
     const float m32 = viewProj[2][3] - a * viewProj[3][3];
-    const float d = max(length(v), 1e-6f);
+    const float kSide = 0.6f;
+    const float d = max(length(float3(v.xy * kSide, v.z)), 1e-6f);
     return max(a + m32 / (m23 * d), 0.0f);
 }
 
