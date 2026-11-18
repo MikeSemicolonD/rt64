@@ -1623,6 +1623,47 @@ namespace rs64lights {
         return std::exchange(presetTextQueue(), {});
     }
 
+    // Presets a mod sets while the game runs (host API light_set), by name, each one preset's JSON; applied after the light files on every change and reload.
+    inline std::mutex& runtimePresetMutex() {
+        static std::mutex m;
+        return m;
+    }
+
+    inline std::map<std::string, std::string>& runtimePresets() {
+        static std::map<std::string, std::string> m;
+        return m;
+    }
+
+    inline uint64_t& runtimePresetVersion() {
+        static uint64_t v = 0;
+        return v;
+    }
+
+    // An empty json removes the preset.
+    inline void setRuntimePreset(const std::string &name, std::string json) {
+        std::lock_guard<std::mutex> lock(runtimePresetMutex());
+        if (json.empty()) {
+            runtimePresets().erase(name);
+        }
+        else {
+            runtimePresets()[name] = std::move(json);
+        }
+
+        runtimePresetVersion()++;
+    }
+
+    // The presets when they changed since seen (or force), else false.
+    inline bool takeRuntimePresets(uint64_t &seen, bool force, std::map<std::string, std::string> &out) {
+        std::lock_guard<std::mutex> lock(runtimePresetMutex());
+        if (!force && (seen == runtimePresetVersion())) {
+            return false;
+        }
+
+        seen = runtimePresetVersion();
+        out = runtimePresets();
+        return true;
+    }
+
     // The host's reader for the files above (set by the host when it first reads them), for the F1 Lights tab's Reload light files.
     inline std::function<void()>& presetReloader() {
         static std::function<void()> f;

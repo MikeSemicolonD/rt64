@@ -2142,6 +2142,32 @@ namespace RT64 {
             }
         }
 
+        // Mods' runtime presets on top of the files; a name a mod dropped is removed (a file preset it had replaced returns at the next reload).
+        static uint64_t runtimeSeen = 0;
+        static std::vector<std::string> runtimeNames;
+        std::map<std::string, std::string> runtimePresets;
+        if (rs64lights::takeRuntimePresets(runtimeSeen, presetsReplace || !presetTexts.empty(), runtimePresets)) {
+            for (const std::string &name : runtimeNames) {
+                if (runtimePresets.find(name) == runtimePresets.end()) {
+                    lightsLibrary.presetMap.erase(name);
+                }
+            }
+
+            runtimeNames.clear();
+            for (const auto &it : runtimePresets) {
+                try {
+                    PresetLights preset;
+                    if (preset.readJson(json::parse(it.second))) {
+                        lightsLibrary.presetMap[it.first] = preset;
+                        runtimeNames.push_back(it.first);
+                    }
+                }
+                catch (const std::exception &e) {
+                    fprintf(stderr, "[RT64] runtime light preset %s not loaded: %s\n", it.first.c_str(), e.what());
+                }
+            }
+        }
+
         thread_local std::vector<std::string> emissiveMeshes;
         thread_local std::vector<uint8_t> emissiveTranslucent;
         emissiveMeshes.clear();
