@@ -16,6 +16,9 @@ namespace RT64 {
     // Fraction of the window height the presented picture is moved up by (the host sets it while an on-screen keyboard covers the bottom).
     extern std::atomic<float> presentShiftY;
 
+    // A picture wider than the window fills its height and loses its sides instead of showing bars (the host sets it for letterboxed menus).
+    extern std::atomic<bool> letterboxCrop;
+
     struct VIRenderer {
         std::unique_ptr<VideoInterfaceDescriptorSet> descriptorSet;
         const RenderSampler *descriptorSetSampler = nullptr;

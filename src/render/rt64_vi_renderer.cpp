@@ -13,6 +13,7 @@
 
 namespace RT64 {
     std::atomic<float> presentShiftY{ 0.0f };
+    std::atomic<bool> letterboxCrop{ false };
 
     // VIRenderer
 
@@ -169,7 +170,14 @@ namespace RT64 {
             hdSize.x *= vi.pixelAspect();
         }
 
-        const hlslpp::float2 windowSize = fullWindow;
+        hlslpp::float2 windowSize = fullWindow;
+        hlslpp::float2 windowOrigin = { 0.0f, 0.0f };
+        const float hdAspect = float(hdSize.x / hdSize.y);
+
+        if (letterboxCrop.load(std::memory_order_relaxed) && (hdAspect > float(fullWindow.x / fullWindow.y))) {
+            windowSize = { float(fullWindow.y) * hdAspect, float(fullWindow.y) };
+            windowOrigin = (fullWindow - windowSize) / 2.0f;
+        }
 
         // Query the VI for the current rendering area.
         hlslpp::float4 viViewRect = vi.viewRectangle() * sdSize.xyxy;
@@ -178,19 +186,19 @@ namespace RT64 {
         // Scale all the rectangles to the space of the Window.
         hlslpp::float2 topLeftViewport = fromSDtoHD({ float(viViewRect.x), float(viViewRect.y) }, sdSize, hdSize);
         hlslpp::float2 bottomRightViewport = fromSDtoHD({ float(viViewRect.x + viViewRect.z), float(viViewRect.y + viViewRect.w) }, sdSize, hdSize);
-        topLeftViewport = fromHDtoWindow(topLeftViewport, hdSize, windowSize);
-        bottomRightViewport = fromHDtoWindow(bottomRightViewport, hdSize, windowSize);
+        topLeftViewport = windowOrigin + fromHDtoWindow(topLeftViewport, hdSize, windowSize);
+        bottomRightViewport = windowOrigin + fromHDtoWindow(bottomRightViewport, hdSize, windowSize);
 
         hlslpp::float2 topLeftScissor = fromSDtoHD({ float(viCropRect.x), float(viCropRect.y) }, sdSize, hdSize);
         hlslpp::float2 bottomRightScissor = fromSDtoHD({ float(viCropRect.x + viCropRect.z), float(viCropRect.y + viCropRect.w) }, sdSize, hdSize);
-        topLeftScissor = fromHDtoWindow(topLeftScissor, hdSize, windowSize);
-        bottomRightScissor = fromHDtoWindow(bottomRightScissor, hdSize, windowSize);
+        topLeftScissor = windowOrigin + fromHDtoWindow(topLeftScissor, hdSize, windowSize);
+        bottomRightScissor = windowOrigin + fromHDtoWindow(bottomRightScissor, hdSize, windowSize);
 
         const float shift = presentShiftY.load(std::memory_order_relaxed) * fullWindow.y;
         // Whole-pixel edges: float drift in a widescreen hdSize left the viewport ~0.07 px short of the window edge, so the last column never rasterized.
         const hlslpp::float2 vpTopLeft = { std::round(topLeftViewport.x), std::round(topLeftViewport.y - shift) };
         const hlslpp::float2 vpBottomRight = { std::round(bottomRightViewport.x), std::round(bottomRightViewport.y - shift) };
         viewport = RenderViewport(vpTopLeft.x, vpTopLeft.y, vpBottomRight.x - vpTopLeft.x, vpBottomRight.y - vpTopLeft.y);
-        scissor = RenderRect(lround(topLeftScissor.x), std::max(0L, lround(topLeftScissor.y - shift)), lround(bottomRightScissor.x), lround(bottomRightScissor.y - shift));
+        scissor = RenderRect(std::max(0L, lround(topLeftScissor.x)), std::max(0L, lround(topLeftScissor.y - shift)), std::min(lround(fullWindow.x), lround(bottomRightScissor.x)), lround(bottomRightScissor.y - shift));
     }
 };
