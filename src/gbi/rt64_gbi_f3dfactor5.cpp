@@ -3195,7 +3195,7 @@ namespace RT64 {
         void op_01_matrix(State* state, DisplayList** dl) {
             const uint32_t w0 = (*dl)->w0, w1 = (*dl)->w1;
             const uint32_t addr = state->rsp->fromSegmentedMasked(w1);
-            if (addr + 64 > RDRAMSize) return;
+            if (addr + 64 > F5_CHUNK_RAM_END) return;
             // Ucode (IMEM 0x1484): byte1 bit0 selects projection (DMEM 0x590) vs modelview (0x5D0).
             const uint8_t* ram = state->RDRAM;
             const bool proj = ((w0 >> 16) & 1u) != 0;
@@ -3361,12 +3361,12 @@ namespace RT64 {
             const uint32_t w0 = (*dl)->w0, w1 = (*dl)->w1;
             const uint32_t n = (w0 >> 10) & 0x3F;
             const uint32_t src = state->rsp->fromSegmentedMasked(w1);
-            if (n == 0 || src + n * 8 > RDRAMSize) return;
+            if (n == 0 || src + n * 8 > F5_CHUNK_RAM_END) return;
             if (!f5_native_active()) return;
             f5_ensure_viewport(state);
             const uint8_t* ram = state->RDRAM;
             const uint32_t cbuf = s_last_op02_colorbuf;
-            const bool haveColors = cbuf >= 0x80000000u && ((cbuf & 0x00FFFFFFu) + n * 4) <= RDRAMSize;
+            const bool haveColors = cbuf >= 0x80000000u && ((cbuf & 0x00FFFFFFu) + n * 4) <= F5_CHUNK_RAM_END;
             RSP::Vertex* out = reinterpret_cast<RSP::Vertex*>(state->fromRDRAM(F5_VTX_SCRATCH));
             for (uint32_t i = 0; i < n; ++i) {
                 const uint32_t va = w1 + i * 8;
@@ -4060,7 +4060,7 @@ namespace RT64 {
 
             RSP::Vertex* tmp = reinterpret_cast<RSP::Vertex*>(state->fromRDRAM(F5_VTX_SCRATCH + F5_FACE_SLOT * sizeof(RSP::Vertex)));
             const uint32_t cbuf = s_last_op02_colorbuf;
-            const bool haveColors = cbuf >= 0x80000000u && ((cbuf & 0x00FFFFFFu) + 0x100u) <= RDRAMSize;
+            const bool haveColors = cbuf >= 0x80000000u && ((cbuf & 0x00FFFFFFu) + 0x100u) <= F5_CHUNK_RAM_END;
             // word 2 = per-vertex byte offsets into the op_02 color buffer (v0..v3 in bytes 1,2,3,0)
             const uint32_t cofs[4] = { (colorWord >> 16) & 0xFF, (colorWord >> 8) & 0xFF, colorWord & 0xFF, colorWord >> 24 };
             for (int k = 0; k < n; ++k) {
