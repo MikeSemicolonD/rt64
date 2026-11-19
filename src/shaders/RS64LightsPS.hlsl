@@ -3,7 +3,7 @@
 #include "shared/rt64_rs64_lights_cb.h"
 
 #ifdef RS64_LIGHT_SHADOWS
-#include "RS64CutoutAlpha.hlsli"
+#include "RS64Trace.hlsli"
 #include "RS64TerrainNormal.hlsli"
 ConstantBuffer<RS64LightsCB> gLights : register(b1, space3);
 Texture2D<float> gDepth : register(t2, space3);

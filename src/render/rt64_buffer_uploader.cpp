@@ -7,6 +7,7 @@
 #include <cstdio>
 #include <cstdlib>
 
+#include "common/rt64_rs64_env.h"
 #include "common/rt64_thread.h"
 
 #include "rt64_buffer_uploader.h"
@@ -30,8 +31,7 @@ namespace RT64 {
         assert(device != nullptr);
 
         this->device = device;
-        const char *directEnv = std::getenv("ROGUESQ_UMA_UPLOADS");
-        directWrite = device->getCapabilities().uma && ((directEnv == nullptr) || (directEnv[0] != '0'));
+        directWrite = device->getCapabilities().uma && rs64env::on("ROGUESQ_UMA_UPLOADS", true);
         workAvailable = false;
         thread = new std::thread(&BufferUploader::threadLoop, this);
     }

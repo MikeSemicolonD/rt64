@@ -3,6 +3,7 @@
 //
 
 #include "rt64_rsp_processor.h"
+#include "common/rt64_rs64_env.h"
 
 #include "rt64_buffer_uploader.h"
 
@@ -91,10 +92,9 @@ namespace RT64 {
         processSet = std::make_unique<RSPProcessDescriptorSet>(device);
         modifySet = std::make_unique<RSPModifyDescriptorSet>(device);
         // ROGUESQ_CPU_RSP=1 transforms vertices on the CPU even with compute, for GPUs slower than the CPU (Raspberry Pi).
-        const char *cpuSetting = std::getenv("ROGUESQ_CPU_RSP");
         // RSPProcessCS binds 21 storage buffers; WebGPU devices often allow fewer per stage.
         const RenderDeviceCapabilities &capabilities = device->getCapabilities();
-        cpuProcessing = !capabilities.computeShaders || (capabilities.maxStorageBuffersPerStage < 21) || ((cpuSetting != nullptr) && (cpuSetting[0] == '1'));
+        cpuProcessing = !capabilities.computeShaders || (capabilities.maxStorageBuffersPerStage < 21) || rs64env::on("ROGUESQ_CPU_RSP");
     }
 
     RSPProcessor::~RSPProcessor() { }

@@ -3,6 +3,7 @@
 //
 
 #include "common/rt64_math.h"
+#include "common/rt64_rs64_env.h"
 #include "common/rt64_diag_bounds.h"
 
 #include <algorithm>
@@ -19,7 +20,7 @@
 namespace RT64 {
     // Auto-matched (id-less) transforms further apart than this on screen (NDC) are not paired: a newly spawned particle would otherwise smear from a leftover one. ROGUESQ_INTERP_AUTO_MAX_SCREEN=0 disables.
     static bool f5AutoMatchTooFar(float screenSpaceDifference) {
-        static const float v = [](){ const char *e = std::getenv("ROGUESQ_INTERP_AUTO_MAX_SCREEN"); return (e && e[0]) ? (float)atof(e) : 0.2f; }();
+        static const float v = rs64env::number("ROGUESQ_INTERP_AUTO_MAX_SCREEN", 0.2f);
         return (v > 0.0f) && (screenSpaceDifference > v);
     }
     static uint32_t s_pairJumpRejects = 0;
@@ -28,7 +29,7 @@ namespace RT64 {
 
     // ROGUESQ_LOG_INTERP_PAIR=1: per real frame, paired/total transforms per id class (top nibble, A = AUTO) and ids whose paired state flipped since the previous frame.
     static void logPairing(const GameFrame &frame, const WorkloadQueue &workloadQueue) {
-        static const bool s_on = [](){ const char *e = std::getenv("ROGUESQ_LOG_INTERP_PAIR"); return e && e[0] == '1'; }();
+        static const bool s_on = rs64env::on("ROGUESQ_LOG_INTERP_PAIR");
         if (!s_on) {
             return;
         }
@@ -435,7 +436,7 @@ namespace RT64 {
                 }
                 else {
                     // ROGUESQ_INTERP_ID_MAXJUMP=<frac>: skip id matches that moved more than frac * camera distance in one frame. Off by default: it only ever rejected steady close flybys, which then drew a frame ahead.
-                    static const float s_maxJump = [](){ const char* e = std::getenv("ROGUESQ_INTERP_ID_MAXJUMP"); float f = (e && e[0]) ? (float)atof(e) : 0.0f; return f; }();
+                    static const float s_maxJump = rs64env::number("ROGUESQ_INTERP_ID_MAXJUMP");
                     bool reject = false;
                     if (s_maxJump > 0.0f) {
                         const hlslpp::float4x4 &curM = curWorkload.drawData.worldTransforms[curIt->second];
@@ -451,7 +452,7 @@ namespace RT64 {
                     }
                     else {
                         s_pairJumpRejects++;
-                        static const bool s_log = [](){ const char *e = std::getenv("ROGUESQ_LOG_INTERP_PAIR"); return e && e[0] == '1'; }();
+                        static const bool s_log = rs64env::on("ROGUESQ_LOG_INTERP_PAIR");
                         if (s_log) {
                             const hlslpp::float4x4 &cm = curWorkload.drawData.worldTransforms[curIt->second];
                             const hlslpp::float4x4 &pm = prevWorkload.drawData.worldTransforms[prevIt->second];
@@ -979,7 +980,7 @@ namespace RT64 {
 
         // A node recycled elsewhere in view (Taloraan's cloud wisps wrap around the camera) lands far from where its last motion predicts: its blend
         // swept a cloud across the screen for an in-between frame. ROGUESQ_INTERP_TELEPORT=0 turns this check off.
-        static const bool s_teleport = [](){ const char *e = std::getenv("ROGUESQ_INTERP_TELEPORT"); return !(e && e[0] == '0'); }();
+        static const bool s_teleport = rs64env::on("ROGUESQ_INTERP_TELEPORT", true);
         const float miss = hlslpp::length(curTransform[3].xyz - prevTransform[3].xyz - prevVelocity);
         const bool teleport = s_teleport && (miss > std::max(float(hlslpp::length(prevVelocity)), 0.25f * std::min(prevDist, curDist)));
         s_pairJumpRejects += (teleport && curTransformMap.rigidBody.lerpTranslation) ? 1u : 0u;

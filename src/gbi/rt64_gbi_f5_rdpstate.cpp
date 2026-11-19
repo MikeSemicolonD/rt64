@@ -13,13 +13,7 @@
 
 #include "common/rt64_diag_bounds.h"
 
-extern "C" int rs64_vr_active(void);
-extern "C" int rs64_vr_hud_quads(void);
-
 #include <atomic>
-
-extern "C" void rt64_f5_desync_dump(const char *why, uint32_t badW1);
-extern "C" volatile unsigned g_f5_heur[4];
 
 // Language mods move the game's texture pools to host RAM above 8 MB (24-bit address of each pool's old and new start, size); address-keyed checks map them back.
 struct F5PoolMove {
@@ -68,10 +62,6 @@ namespace RT64 {
 namespace RT64 {
     namespace GBI_F3DFACTOR5 {
 
-        // Cross-module globals the moved handlers read (g_current_scene, g_mempak_hob_base,
-        // g_scene_obj_count, g_most_drawn_fb, g_explosion_hold, s_cart_pass) are declared in the
-        // internal header.
-
         // ROGUESQ_LOG_CI4_TMEM diag state: remember the last CI4 TLUT load (its tile-descriptor
         // slot + the tmem word it deposited the palette at) so the loadBlock/setTile trace can
         // print the palette-bank<->TLUT-tmem mapping for a target model texture. Diag only.
@@ -83,12 +73,12 @@ namespace RT64 {
         // texture source (default 0x555490, the dominant gameplay CI4 hull texture).
         static bool ci4tm_on() {
             static int s = -1;
-            if (s < 0) { const char* v = std::getenv("ROGUESQ_LOG_CI4_TMEM"); s = (v && *v && v[0] != '0') ? 1 : 0; }
+            if (s < 0) { s = rs64env::on("ROGUESQ_LOG_CI4_TMEM") ? 1 : 0; }
             return s == 1;
         }
         static uint32_t ci4tm_target() {
             static uint32_t t = 0xFFFFFFFFu;
-            if (t == 0xFFFFFFFFu) { const char* v = std::getenv("ROGUESQ_CI4_TMEM_SRC"); t = (v && *v) ? (uint32_t)strtoul(v, nullptr, 0) : 0x555490u; }
+            if (t == 0xFFFFFFFFu) { t = rs64env::u32("ROGUESQ_CI4_TMEM_SRC", 0x555490u); }
             return t & 0x00FFFFFFu;
         }
 
@@ -106,7 +96,7 @@ namespace RT64 {
             // bilinearly: does the game ever write bilerp, and does F5's shift/length decode land it?
             {
                 static int s_om = -1;
-                if (s_om == -1) { const char* v = std::getenv("ROGUESQ_LOG_OTHERMODE"); s_om = (v && *v && v[0] != '0') ? 0 : -2; }
+                if (s_om == -1) { s_om = rs64env::on("ROGUESQ_LOG_OTHERMODE") ? 0 : -2; }
                 if (s_om >= 0 && s_om < 200) {
                     ++s_om;
                     const uint32_t size = (*dl)->p0(0, 8), off = (*dl)->p0(8, 8), data = (*dl)->w1;
@@ -147,7 +137,7 @@ namespace RT64 {
             // game's baseline requests bilerp (bits 12-13) and whether we decode it.
             {
                 static int s_om = -1;
-                if (s_om == -1) { const char* v = std::getenv("ROGUESQ_LOG_OTHERMODE"); s_om = (v && *v && v[0] != '0') ? 0 : -2; }
+                if (s_om == -1) { s_om = rs64env::on("ROGUESQ_LOG_OTHERMODE") ? 0 : -2; }
                 if (s_om >= 0 && s_om < 40) {
                     ++s_om;
                     GBI_RDP::setOtherMode(state, dl);
@@ -322,8 +312,7 @@ namespace RT64 {
                 // ROGUESQ_ATTRIB_DEFLICKER=0 disables.
                 static int s_deflicker = -1;
                 if (s_deflicker < 0) {
-                    const char* e = std::getenv("ROGUESQ_ATTRIB_DEFLICKER");
-                    s_deflicker = (e && e[0] == '0') ? 0 : 1;
+                    s_deflicker = rs64env::on("ROGUESQ_ATTRIB_DEFLICKER", true) ? 1 : 0;
                 }
                 if (s_deflicker && g_current_scene == F5_SCENE_ATTRIBUTION && s_attrib_prev_glyphs >= 200) {
                     ++g_f5_heur[3];
@@ -342,7 +331,7 @@ namespace RT64 {
             // DIAG (ROGUESQ_LOG_FILL=1): sample the actual clear color + rect size +
             // target buffer across the whole run, to see what the cinematic/logo
             // buffers are cleared to (chasing the white-bg-not-black symptom).
-            { static int s_fd = -1, s_fc = 0; if (s_fd == -1) { const char* v = std::getenv("ROGUESQ_LOG_FILL"); s_fd = (v && *v && v[0] != '0') ? 0 : -2; }
+            { static int s_fd = -1, s_fc = 0; if (s_fd == -1) { s_fd = rs64env::on("ROGUESQ_LOG_FILL") ? 0 : -2; }
               if (s_fd >= 0) { ++s_fc;
                 const uint32_t lrx = (*dl)->p0(12, 12), lry = (*dl)->p0(0, 12);
                 const bool big = (lrx >= 0x800 /* >=512 in 10.2 fixed (lrx/4>=512?) */) || (lry >= 0x800);
@@ -366,7 +355,7 @@ namespace RT64 {
         // ROGUESQ_LOG_DL_HEALTH=1: every 10 s, texrect follow-up words whose top byte is a nonzero opcode (by op) and garbage color-image rejects (the walk-desync signal).
         struct DlHealth { uint64_t fu = 0, fuOp = 0, op[256] = {}, cimgHi = 0, cimgLow = 0, cimgPast = 0, cimgWidth = 0, cimgWindow = 0; };
         static DlHealth s_dlh;
-        static const bool s_dlhOn = [](){ const char* v = std::getenv("ROGUESQ_LOG_DL_HEALTH"); return v && *v && v[0] != '0'; }();
+        static const bool s_dlhOn = rs64env::on("ROGUESQ_LOG_DL_HEALTH");
         static void dlh_tick() {
             static auto s_last = std::chrono::steady_clock::now();
             const auto now = std::chrono::steady_clock::now();
@@ -479,45 +468,44 @@ namespace RT64 {
             state->updateDrawStatusAttribute(DrawAttribute::Scissor);
         }
 
-        void texrectLLE_guarded(State *state, DisplayList **dl) {
-            // Track per-color-buffer draw ACTIVITY with exponential decay → publish the
-            // most-active buffer as g_most_drawn_fb. This is the buffer the game is
-            // actively rendering into NOW (phase-adaptive: title buffer during the title,
-            // explosion buffer 0x290000 during the explosion). The present queue (mode 4)
-            // presents it, so offscreen-rendered content reaches the screen.
-            {
-                const uint32_t cimg = state->rdp->colorImage.address & 0x00FFFFFFu;
-                if (cimg >= 0x100000u) {  // plausible fb
-                    static std::unordered_map<uint32_t, float> s_act;
-                    static std::unordered_map<uint32_t, uint32_t> s_actw;  // cimg -> its color-image width
-                    static int s_tick = 0;
-                    float &a = s_act[cimg];
-                    a += 1.0f;
-                    s_actw[cimg] = state->rdp->colorImage.width;
-                    if ((++s_tick & 0xFF) == 0) {  // decay every 256 texrects → favor recent
-                        for (auto &kv : s_act) kv.second *= 0.5f;
-                    }
-                    // Update the published most-active fb (+ its width) when this buffer leads. The
-                    // width lets the host present path (rt64_render_context menu fix) set VI_WIDTH to
-                    // match, so a 512-wide menu buffer isn't scanned as 640/1024 -> black. Published
-                    // here (gfx thread, owns the map) so the present thread never iterates it.
-                    static uint32_t s_bestFb = 0; static float s_bestAct = 0;
-                    if (a >= s_bestAct) { s_bestAct = a; s_bestFb = cimg; g_most_drawn_fb = cimg; g_most_drawn_fb_width = state->rdp->colorImage.width; }
-                    else if (cimg == s_bestFb) { s_bestAct = a; }  // track the leader's decay
-                    // Stamp the leader's last texrect so the present-side menu fix can tell a live
-                    // 512-wide menu buffer from a stale one (the mission crawl draws only tris).
-                    if (cimg == s_bestFb) {
-                        g_most_drawn_fb_ms = (unsigned long long)std::chrono::duration_cast<std::chrono::milliseconds>(
-                            std::chrono::steady_clock::now().time_since_epoch()).count();
-                    }
-                    // Periodically re-scan for the true max (leader may have decayed below another).
-                    if ((s_tick & 0x3F) == 0) {
-                        uint32_t mf = 0; float mx = 0;
-                        for (auto &kv : s_act) if (kv.second > mx) { mx = kv.second; mf = kv.first; }
-                        if (mf) { s_bestFb = mf; s_bestAct = mx; g_most_drawn_fb = mf; g_most_drawn_fb_width = s_actw[mf]; }
-                    }
+        // Publishes the colour image the game draws the most texrects into (activity with exponential decay) as g_most_drawn_fb, with its width and
+        // last texrect time. The present queue shows it when the VI points elsewhere (the title, the explosion buffer at 0x290000).
+        static void f5_track_drawn_fb(State *state) {
+            const uint32_t cimg = state->rdp->colorImage.address & 0x00FFFFFFu;
+            if (cimg >= 0x100000u) {  // plausible fb
+                static std::unordered_map<uint32_t, float> s_act;
+                static std::unordered_map<uint32_t, uint32_t> s_actw;  // cimg -> its color-image width
+                static int s_tick = 0;
+                float &a = s_act[cimg];
+                a += 1.0f;
+                s_actw[cimg] = state->rdp->colorImage.width;
+                if ((++s_tick & 0xFF) == 0) {  // decay every 256 texrects → favor recent
+                    for (auto &kv : s_act) kv.second *= 0.5f;
+                }
+                // Update the published most-active fb (+ its width) when this buffer leads. The
+                // width lets the host present path (rt64_render_context menu fix) set VI_WIDTH to
+                // match, so a 512-wide menu buffer isn't scanned as 640/1024 -> black. Published
+                // here (gfx thread, owns the map) so the present thread never iterates it.
+                static uint32_t s_bestFb = 0; static float s_bestAct = 0;
+                if (a >= s_bestAct) { s_bestAct = a; s_bestFb = cimg; g_most_drawn_fb = cimg; g_most_drawn_fb_width = state->rdp->colorImage.width; }
+                else if (cimg == s_bestFb) { s_bestAct = a; }  // track the leader's decay
+                // Stamp the leader's last texrect so the present-side menu fix can tell a live
+                // 512-wide menu buffer from a stale one (the mission crawl draws only tris).
+                if (cimg == s_bestFb) {
+                    g_most_drawn_fb_ms = (unsigned long long)std::chrono::duration_cast<std::chrono::milliseconds>(
+                        std::chrono::steady_clock::now().time_since_epoch()).count();
+                }
+                // Periodically re-scan for the true max (leader may have decayed below another).
+                if ((s_tick & 0x3F) == 0) {
+                    uint32_t mf = 0; float mx = 0;
+                    for (auto &kv : s_act) if (kv.second > mx) { mx = kv.second; mf = kv.first; }
+                    if (mf) { s_bestFb = mf; s_bestAct = mx; g_most_drawn_fb = mf; g_most_drawn_fb_width = s_actw[mf]; }
                 }
             }
+        }
+
+        void texrectLLE_guarded(State *state, DisplayList **dl) {
+            f5_track_drawn_fb(state);
             if (texrect_copy_undefined_tile(state, dl)) {
                 (*dl)++;  // skip the 8-byte texcoord follow-up to keep dispatch aligned
                 return;
@@ -546,10 +534,7 @@ namespace RT64 {
             {
                 static rt64diag::BoundedMap<uint32_t, uint32_t> s_drawsPerFb;
                 static int s_total = 0;
-                static bool s_log = []() {
-                    const char* v = std::getenv("ROGUESQ_LOG_CIMG");
-                    return v && v[0] && v[0] != '0';
-                }();
+                static bool s_log = rs64env::on("ROGUESQ_LOG_CIMG");
                 if (s_log) {
                     s_drawsPerFb[state->rdp->colorImage.address]++;
                     if ((++s_total & 0x3F) == 0) {
@@ -640,7 +625,7 @@ namespace RT64 {
             }
             // ROGUESQ_LOG_TEXRECT_TALL=<min px>: every texrect at least this tall and 16 px wide (menu background strips and sweeps), with its texture start/step and cycle type.
             {
-                static const int s_tall = []() { const char* v = std::getenv("ROGUESQ_LOG_TEXRECT_TALL"); return v ? std::atoi(v) : 0; }();
+                static const int s_tall = rs64env::integer("ROGUESQ_LOG_TEXRECT_TALL");
                 const uint32_t w0 = (*dl)->w0, w1 = (*dl)->w1;
                 const int32_t lrx = (w0 >> 12) & 0xFFF, lry = w0 & 0xFFF, ulx = (w1 >> 12) & 0xFFF, uly = w1 & 0xFFF;
                 if (s_tall > 0 && (lry - uly) >= s_tall * 4 && (lrx - ulx) >= 16 * 4) {
@@ -725,12 +710,7 @@ namespace RT64 {
         static bool f5_tile_split()
         {
 
-            static const bool s_split = [] {
-
-                const char* e = std::getenv("ROGUESQ_F5_NO_TILE_SPLIT");
-
-                return !(e && (e[0] == '1'));
-            }();
+            static const bool s_split = !rs64env::on("ROGUESQ_F5_NO_TILE_SPLIT");
 
             return s_split;
         }
@@ -1010,7 +990,7 @@ namespace RT64 {
                 // RT64's write-back then overwrote the game's heap free list (LucasArts-reveal crash).
                 // Real framebuffers here are 320..640 wide and 64-byte aligned.
                 const uint32_t cimgWidth0 = (w0 & 0xFFFu) + 1;
-                static const bool s_strict = [](){ const char* e = std::getenv("ROGUESQ_F5_CIMG_STRICT"); return !(e && e[0] == '0'); }();
+                static const bool s_strict = rs64env::on("ROGUESQ_F5_CIMG_STRICT", true);
                 if (s_strict && (cimgWidth0 < 16u || ((w1 & 0x3Fu) != 0u))) {
                     s_dlh.cimgWidth++;
                     if (gbi_log_enabled()) {
@@ -1053,10 +1033,7 @@ namespace RT64 {
             {
                 static rt64diag::BoundedMap<uint32_t, uint32_t> s_counts;
                 static int s_total = 0;
-                static bool s_log = []() {
-                    const char* v = std::getenv("ROGUESQ_LOG_CIMG");
-                    return v && v[0] && v[0] != '0';
-                }();
+                static bool s_log = rs64env::on("ROGUESQ_LOG_CIMG");
                 if (s_log) {
                     s_counts[w1]++;
                     if ((++s_total & 0x3FF) == 0) {
@@ -1116,10 +1093,7 @@ namespace RT64 {
             // VI-sampled buffer addrs so we can verify they match VI's
             // expectations (needed for PresentEarly matcher).
             {
-                static bool s_log = []() {
-                    const char* v = std::getenv("ROGUESQ_LOG_CIMG");
-                    return v && v[0] && v[0] != '0';
-                }();
+                static bool s_log = rs64env::on("ROGUESQ_LOG_CIMG");
                 if (s_log) {
                     const uint32_t addr = state->rdp->colorImage.address;
                     if (addr == 0x62B800 || addr == 0x695C00 || addr == 0x795C00) {

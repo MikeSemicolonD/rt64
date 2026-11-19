@@ -3,6 +3,7 @@
 //
 
 #include "rt64_rsp.h"
+#include "common/rt64_rs64_env.h"
 
 #include <cassert>
 #include <cstdio>
@@ -15,8 +16,6 @@
 
 #include "rt64_interpreter.h"
 #include "rt64_state.h"
-
-extern "C" int rs64_vr_active(void);
 
 //#define LOG_SPECIAL_MATRIX_OPERATIONS
 
@@ -1099,6 +1098,249 @@ namespace RT64 {
         state->rdp->setTextureImage(fmt, siz, width, fromSegmented(segAddress));
     }
 
+    // VR: the game's far distance as a plane facing the triangle, so every direction gets the same reach; false when the whole triangle lies past it.
+    struct RS64VrFarPlane {
+        bool active = false;
+        hlslpp::float4x4 inv;
+        hlslpp::float3 n = hlslpp::float3(0.0f, 0.0f, 1.0f);
+        float d = 0.0f;
+    };
+
+    static bool rs64VrFarPlane(const hlslpp::float4x4 &P, const std::vector<hlslpp::float4> &posTransformed, const uint32_t globalIndices[3], float farDepth, RS64VrFarPlane &plane) {
+        static hlslpp::float4x4 s_proj;
+        static hlslpp::float4x4 s_inv;
+        static bool s_haveInv = false;
+
+        if (!s_haveInv || (std::memcmp(&P, &s_proj, sizeof(P)) != 0)) {
+            s_proj = P;
+            s_inv = hlslpp::inverse(P);
+            s_haveInv = true;
+        }
+
+        const float denom = float(P[2][2]) - farDepth * float(P[2][3]);
+        const float zFar = (std::fabs(denom) > 1e-12f) ? (farDepth * float(P[3][3]) - float(P[3][2])) / denom : 0.0f;
+
+        if (std::isfinite(zFar) && (std::fabs(zFar) > 0.0f)) {
+            hlslpp::float3 cam[3];
+            hlslpp::float3 centre(0.0f, 0.0f, 0.0f);
+
+            for (int i = 0; i < 3; i++) {
+                cam[i] = hlslpp::mul(posTransformed[globalIndices[i]], s_inv).xyz;
+                centre += cam[i] / 3.0f;
+            }
+
+            const float len = float(hlslpp::length(centre));
+
+            if (len > 1e-6f) {
+                // The flat far plane reaches zFar / cos from straight ahead, so a sphere at zFar cut the view's outer part in a circle (explosions in
+                // the boot logos); inside the flat view the reach is the plane's, outside it the reach at the view's corners.
+                const float tanX = (std::fabs(float(P[0][0])) > 1e-6f) ? 1.0f / std::fabs(float(P[0][0])) : 1.0f;
+                const float tanY = (std::fabs(float(P[1][1])) > 1e-6f) ? 1.0f / std::fabs(float(P[1][1])) : 1.0f;
+                const float cosCorner = 1.0f / std::sqrt(1.0f + tanX * tanX + tanY * tanY);
+
+                plane.n = centre / len;
+                plane.d = std::fabs(zFar) / std::max(std::fabs(float(plane.n.z)), cosCorner);
+                plane.inv = s_inv;
+
+                int beyond = 0;
+
+                for (int i = 0; i < 3; i++) {
+                    if (float(hlslpp::dot(cam[i], plane.n)) > plane.d) {
+                        beyond++;
+                    }
+                }
+
+                if (beyond == 3) {
+                    return false;
+                }
+
+                plane.active = (beyond > 0);
+            }
+        }
+
+        return true;
+    }
+
+    // Full-frustum CPU clipping (default on; ROGUESQ_F5_NO_NEAR_CLIP=1 disables). RS64's skybox dome
+    // is a small mesh scaled ~25x and wrapped around the camera, so its triangles are gigantic in clip
+    // space (NDC coords in the tens-to-hundreds) and/or cross the near plane (w<=0). Hardware's RSP
+    // clips every triangle to the view frustum before the RDP rasterizes; RT64 hands the GPU the whole
+    // triangle, and coordinates that large overflow the rasterizer guard band -> the triangle is
+    // dropped -> black sky. Fix: Sutherland-Hodgman clip in clip space against the near plane and the
+    // four lateral frustum planes (-w<=x<=w, -w<=y<=w), appending model-space-lerped verts (the GPU CS
+    // re-transform reproduces the exact clipped position because MVP is affine). Triggered only for
+    // triangles that actually leave the guard band (any vertex w<=near, or |x|,|y| > kGuard*w), so
+    // normal on-screen geometry keeps its exact prior path and the GPU guard band handles mild
+    // edge-straddling. The far plane z <= w is clipped too, as the F5 ucode does (trivial reject + clipper overlay);
+    // the GPU's own depth clip sits at ndc 513/511 with the 1/1024 depth mapping, so geometry past the far plane survived. ROGUESQ_F5_FAR_CLIP=0 disables.
+    bool RSP::clipTriangle(Workload &workload, FramebufferPair &fbPair, const uint32_t globalIndices[3], uint32_t geometryMode, bool doubleSided, uint32_t cullTestMask) {
+        auto &drawCall = state->drawCall;
+        auto &minMatrix = drawCall.minWorldMatrix;
+        auto &maxMatrix = drawCall.maxWorldMatrix;
+        constexpr float kNearW = 1e-4f;
+        constexpr float kGuard = 2.0f;   // clip only when a vertex leaves this NDC band (GPU guard band is larger)
+        // The x band follows the widescreen widening, or an ultrawide view (32:9 is ~2.5x) cuts the sky dome inside the screen.
+        const hlslpp::float2 resScale = state->ext.sharedQueueResources->resolutionScale;
+        const float widen = (float(resScale.y) > 0.0f) ? float(resScale.x) / float(resScale.y) : 1.0f;
+        const float guardX = std::max(kGuard, 1.25f * widen);
+        const bool degenerate = (globalIndices[0] == globalIndices[1]) || (globalIndices[1] == globalIndices[2]) || (globalIndices[0] == globalIndices[2]);
+        static int s_clip = -1;
+        if (s_clip < 0) { s_clip = rs64env::on("ROGUESQ_F5_NO_NEAR_CLIP") ? 0 : 1; }
+
+        static const bool s_farClip = rs64env::on("ROGUESQ_F5_FAR_CLIP", true);
+        bool extreme = false;
+        bool anyNear = false;
+        int farCount = 0;
+        const float farDepth = ((farClipGeomMode != 0) && (geometryMode == farClipGeomMode)) ? std::min(farClipDepth, farClipGeomDepth) : farClipDepth;
+        // VR draws each eye with its own projection after recording, so near and side clips against the game camera would cut what the head turns to; the GPU clips per eye.
+        // The game's far distance still cuts geometry (Taloraan's cloud layers), on a plane facing each triangle so every direction gets the same reach.
+        // Camera space is clip space times the inverse projection (affine for these points, w stays 1).
+        const bool vr = rs64_vr_active() != 0;
+        RS64VrFarPlane vrFarPlane;
+
+        // The crawl's starfield sits at the far distance (and further once VR pushes it back), so the crawl keeps it all.
+        if (s_clip && !degenerate && vr && s_farClip && (rs64_crawl_playing() == 0)) {
+            if (!rs64VrFarPlane(viewProjMatrixStack[projectionMatrixStackSize - 1], workload.drawData.posTransformed, globalIndices, farDepth, vrFarPlane)) {
+                return true;
+            }
+        }
+
+        if (s_clip && !degenerate && !vr) {
+            for (int i = 0; i < 3; i++) {
+                const hlslpp::float4 p = workload.drawData.posTransformed[globalIndices[i]];
+                const float pw = p.w, px = p.x, py = p.y;
+                if (s_farClip && p.z > farDepth * pw) farCount++;
+                if (pw <= kNearW) { extreme = true; anyNear = true; }
+                const float apx = px < 0.0f ? -px : px;
+                const float apy = py < 0.0f ? -py : py;
+                if (apx > guardX * pw || apy > kGuard * pw) extreme = true;
+            }
+        }
+        if (farCount == 3) return true;
+        if (farCount > 0) extreme = true;
+
+        if (vrFarPlane.active) {
+            extreme = true;
+            farCount = 1;
+        }
+        // The skybox dome (the only cull=BOTH geometry) is pinned to a flat far-plane primDepth in
+        // State::loadDrawState. Its back hemisphere (101 of 149 tris sit behind the camera) would then
+        // draw its near-plane cap at the far plane. The front hemisphere alone covers the whole view,
+        // so drop any dome tri that touches the near plane, matching the RSP's hardware near-clip.
+        // Only the game-pinned sky (zSource=PRIM) is flattened; other cull=BOTH geometry keeps real depth.
+        const bool isDomeTri = cullBothMask != 0 && (geometryMode & cullBothMask) == cullBothMask &&
+                               (state->rdp->otherMode.L & G_ZS_PRIM) != 0;
+        // ROGUESQ_F5_DOME_NEAR_DROP=0 near-clips these tris instead of dropping them.
+        static const bool s_domeNearDrop = rs64env::on("ROGUESQ_F5_DOME_NEAR_DROP", true);
+        if (anyNear && isDomeTri && s_domeNearDrop) return true;
+
+        if (extreme) {
+            // Signed distance to near and the guard-band lateral planes; clipping at |x| = w cut the sky at the 4:3 edge once widescreen widens the view.
+            auto planeDist = [guardX, farDepth, &vrFarPlane](const hlslpp::float4 &p, int plane) -> float {
+                const float x = p.x, y = p.y, z = p.z, w = p.w;
+                switch (plane) {
+                    case 0:  return w - kNearW;
+                    case 1:  return guardX * w + x;
+                    case 2:  return guardX * w - x;
+                    case 3:  return kGuard * w + y;
+                    case 4:  return kGuard * w - y;
+                    case 6:  return vrFarPlane.d - float(hlslpp::dot(hlslpp::mul(p, vrFarPlane.inv).xyz, vrFarPlane.n));
+                    default: return farDepth * w - z;
+                }
+            };
+            uint32_t poly[12];
+            poly[0] = globalIndices[0]; poly[1] = globalIndices[1]; poly[2] = globalIndices[2];
+            int polyN = 3;
+            const int planeFirst = vrFarPlane.active ? 6 : 0;
+            const int planeCount = vrFarPlane.active ? 7 : ((farCount > 0) ? 6 : 5);
+            for (int pl = planeFirst; pl < planeCount && polyN > 0; pl++) {
+                uint32_t out[12];
+                int outCnt = 0;
+                for (int i = 0; i < polyN; i++) {
+                    const uint32_t gA = poly[i];
+                    const uint32_t gB = poly[(i + 1) % polyN];
+                    const float dA = planeDist(workload.drawData.posTransformed[gA], pl);
+                    const float dB = planeDist(workload.drawData.posTransformed[gB], pl);
+                    const bool inA = dA >= 0.0f;
+                    const bool inB = dB >= 0.0f;
+                    if (inA && outCnt < 12) out[outCnt++] = gA;
+                    if ((inA != inB) && outCnt < 12) {
+                        const float t = dA / (dA - dB);
+                        out[outCnt++] = appendClippedVertex(gA, gB, t);
+                    }
+                }
+                polyN = outCnt;
+                for (int i = 0; i < polyN; i++) poly[i] = out[i];
+            }
+            // appendClippedVertex reallocated the drawData vectors; access them fresh (the outer
+            // faceIndices/worldIndices/posScreen/tcFloats references may now dangle).
+            auto &fFaceIndices = workload.drawData.faceIndices;
+            auto &fWorldIndices = workload.drawData.worldIndices;
+            auto &fPosScreen = workload.drawData.posScreen;
+            auto &fTcFloats = workload.drawData.tcFloats;
+
+            // While RT shadows are on, a triangle wholly outside the view (behind the camera, off to a side) is kept for the shadow casters only. It is never
+            // drawn: unclipped, its behind-the-camera vertices smear across the screen edge (interpolated frames rebuild them from screen space). ROGUESQ_RT_SHADOWS_OFFSCREEN=0 drops it.
+            static const bool s_castOffscreen = rs64lights::envFloat("ROGUESQ_RT_SHADOWS_OFFSCREEN", 1.0f) != 0.0f;
+
+            // The boot logo sequence (level 19, gCurrentLevel u32 at 0x80130B70) stages its next logo out of view, so nothing off screen casts there.
+            constexpr uint32_t kCurrentLevelPhys = 0x130B70u;
+            constexpr uint32_t kBootLogoLevel = 19u;
+            const bool bootIntro = (state->RDRAM != nullptr) && (*reinterpret_cast<const uint32_t *>(state->RDRAM + kCurrentLevelPhys) == kBootLogoLevel);
+            // A triangle clipped at the near plane or the guard band casts whole too: a huge close object (a World Devastator) otherwise cast only its
+            // on-screen pieces, and its shadow came out cut into bands.
+            const bool castWhole = s_castOffscreen && !bootIntro && (farCount == 0) && !isDomeTri && rs64lights::config().shadows.load(std::memory_order_relaxed);
+            if (castWhole) {
+                const interop::OtherMode &om = otherModeStack[otherModeStackSize - 1];
+                workload.rs64CastOnly.push_back({ { globalIndices[0], globalIndices[1], globalIndices[2] }, om.L, om.H, fWorldIndices[globalIndices[0]], workload.drawData.viewProjIndices[globalIndices[0]] });
+            }
+
+            if (polyN < 3) {
+                return true;
+            }
+            const bool usesCulling = !doubleSided && (geometryMode & cullTestMask);
+            const FixedRect &scissorRect = state->rdp->scissorRectStack[state->rdp->scissorStackSize - 1];
+            for (int f = 1; f + 1 < polyN; f++) {
+                const uint32_t gg[3] = { poly[0], poly[f], poly[f + 1] };
+                for (int i = 0; i < 3; i++) {
+                    state->rdp->updateCallTexcoords(fTcFloats[gg[i] * 2 + 0], fTcFloats[gg[i] * 2 + 1]);
+                    fFaceIndices.push_back(gg[i]);
+                    minMatrix = std::min(minMatrix, fWorldIndices[gg[i]]);
+                    maxMatrix = std::max(maxMatrix, fWorldIndices[gg[i]]);
+                }
+                bool visibleTri = true;
+                if (usesCulling) {
+                    const hlslpp::float3 U = fPosScreen[gg[1]] - fPosScreen[gg[0]];
+                    const hlslpp::float3 V = fPosScreen[gg[2]] - fPosScreen[gg[0]];
+                    const hlslpp::float3 N = hlslpp::cross(V, U);
+                    visibleTri = (N.z >= 0.0f);
+                }
+                if (visibleTri && !scissorRect.isNull()) {
+                    fbPair.scissorRect.merge(scissorRect);
+                    FixedRect drawRect;
+                    for (int i = 0; i < 3; i++) {
+                        const hlslpp::float3 &v = fPosScreen[gg[i]];
+                        drawRect.ulx = std::min(drawRect.ulx, int32_t(v[0] * 4.0f));
+                        drawRect.uly = std::min(drawRect.uly, int32_t(v[1] * 4.0f));
+                        drawRect.lrx = std::max(drawRect.lrx, int32_t(hlslpp::ceil(v.x).x * 4.0f));
+                        drawRect.lry = std::max(drawRect.lry, int32_t(hlslpp::ceil(v.y).x * 4.0f));
+                    }
+                    drawRect = scissorRect.intersection(drawRect);
+                    if (!drawRect.isNull()) {
+                        fbPair.drawColorRect.merge(drawRect);
+                        if (otherModeStack[otherModeStackSize - 1].zUpd()) {
+                            fbPair.drawDepthRect.merge(drawRect);
+                        }
+                    }
+                }
+                drawCall.triangleCount++;
+            }
+            return true;
+        }
+
+        return false;
+    }
+
     void RSP::drawIndexedTri(uint32_t a, uint32_t b, uint32_t c, bool rawGlobalIndices) {
         // Copy mode is not supported when drawing regular tris and crashes the hardware.
         const uint32_t cycleType = state->rdp->otherMode.cycleType();
@@ -1173,233 +1415,8 @@ namespace RT64 {
 
         // Indicates the vertex has been used in a tri. Whatever routines modify the vertex afterwards must use a new index instead.
 
-        // (Skybox dome depth handling moved to State::loadDrawState: pin the cull=BOTH dome to max depth
-        // via zSource=PRIM so it sits behind everything. See rt64_state.cpp.)
-
-        // Full-frustum CPU clipping (default on; ROGUESQ_F5_NO_NEAR_CLIP=1 disables). RS64's skybox dome
-        // is a small mesh scaled ~25x and wrapped around the camera, so its triangles are gigantic in clip
-        // space (NDC coords in the tens-to-hundreds) and/or cross the near plane (w<=0). Hardware's RSP
-        // clips every triangle to the view frustum before the RDP rasterizes; RT64 hands the GPU the whole
-        // triangle, and coordinates that large overflow the rasterizer guard band -> the triangle is
-        // dropped -> black sky. Fix: Sutherland-Hodgman clip in clip space against the near plane and the
-        // four lateral frustum planes (-w<=x<=w, -w<=y<=w), appending model-space-lerped verts (the GPU CS
-        // re-transform reproduces the exact clipped position because MVP is affine). Triggered only for
-        // triangles that actually leave the guard band (any vertex w<=near, or |x|,|y| > kGuard*w), so
-        // normal on-screen geometry keeps its exact prior path and the GPU guard band handles mild
-        // edge-straddling. The far plane z <= w is clipped too, as the F5 ucode does (trivial reject + clipper overlay);
-        // the GPU's own depth clip sits at ndc 513/511 with the 1/1024 depth mapping, so geometry past the far plane survived. ROGUESQ_F5_FAR_CLIP=0 disables.
-        {
-            constexpr float kNearW = 1e-4f;
-            constexpr float kGuard = 2.0f;   // clip only when a vertex leaves this NDC band (GPU guard band is larger)
-            // The x band follows the widescreen widening, or an ultrawide view (32:9 is ~2.5x) cuts the sky dome inside the screen.
-            const hlslpp::float2 resScale = state->ext.sharedQueueResources->resolutionScale;
-            const float widen = (float(resScale.y) > 0.0f) ? float(resScale.x) / float(resScale.y) : 1.0f;
-            const float guardX = std::max(kGuard, 1.25f * widen);
-            const bool degenerate = (globalIndices[0] == globalIndices[1]) || (globalIndices[1] == globalIndices[2]) || (globalIndices[0] == globalIndices[2]);
-            static int s_clip = -1;
-            if (s_clip < 0) { const char* e = std::getenv("ROGUESQ_F5_NO_NEAR_CLIP"); s_clip = (e && e[0] == '1') ? 0 : 1; }
-
-            static const bool s_farClip = [](){ const char *e = std::getenv("ROGUESQ_F5_FAR_CLIP"); return !(e && e[0] == '0'); }();
-            bool extreme = false;
-            bool anyNear = false;
-            int farCount = 0;
-            const float farDepth = ((farClipGeomMode != 0) && (geometryMode == farClipGeomMode)) ? std::min(farClipDepth, farClipGeomDepth) : farClipDepth;
-            // VR draws each eye with its own projection after recording, so near and side clips against the game camera would cut what the head turns to; the GPU clips per eye.
-            // The game's far distance still cuts geometry (Taloraan's cloud layers), on a plane facing each triangle so every direction gets the same reach.
-            // Camera space is clip space times the inverse projection (affine for these points, w stays 1).
-            const bool vr = rs64_vr_active() != 0;
-            bool vrFar = false;
-            hlslpp::float4x4 vrInv;
-            hlslpp::float3 vrN(0.0f, 0.0f, 1.0f);
-            float vrD = 0.0f;
-
-            // The crawl's starfield sits at the far distance (and further once VR pushes it back), so the crawl keeps it all.
-            if (s_clip && !degenerate && vr && s_farClip && (rs64_crawl_playing() == 0)) {
-                static hlslpp::float4x4 s_proj;
-                static hlslpp::float4x4 s_inv;
-                static bool s_haveInv = false;
-                const hlslpp::float4x4 &P = viewProjMatrixStack[projectionMatrixStackSize - 1];
-
-                if (!s_haveInv || (std::memcmp(&P, &s_proj, sizeof(P)) != 0)) {
-                    s_proj = P;
-                    s_inv = hlslpp::inverse(P);
-                    s_haveInv = true;
-                }
-
-                const float denom = float(P[2][2]) - farDepth * float(P[2][3]);
-                const float zFar = (std::fabs(denom) > 1e-12f) ? (farDepth * float(P[3][3]) - float(P[3][2])) / denom : 0.0f;
-
-                if (std::isfinite(zFar) && (std::fabs(zFar) > 0.0f)) {
-                    hlslpp::float3 cam[3];
-                    hlslpp::float3 centre(0.0f, 0.0f, 0.0f);
-
-                    for (int i = 0; i < 3; i++) {
-                        cam[i] = hlslpp::mul(workload.drawData.posTransformed[globalIndices[i]], s_inv).xyz;
-                        centre += cam[i] / 3.0f;
-                    }
-
-                    const float len = float(hlslpp::length(centre));
-
-                    if (len > 1e-6f) {
-                        // The flat far plane reaches zFar / cos from straight ahead, so a sphere at zFar cut the view's outer part in a circle (explosions in
-                        // the boot logos); inside the flat view the reach is the plane's, outside it the reach at the view's corners.
-                        const float tanX = (std::fabs(float(P[0][0])) > 1e-6f) ? 1.0f / std::fabs(float(P[0][0])) : 1.0f;
-                        const float tanY = (std::fabs(float(P[1][1])) > 1e-6f) ? 1.0f / std::fabs(float(P[1][1])) : 1.0f;
-                        const float cosCorner = 1.0f / std::sqrt(1.0f + tanX * tanX + tanY * tanY);
-
-                        vrN = centre / len;
-                        vrD = std::fabs(zFar) / std::max(std::fabs(float(vrN.z)), cosCorner);
-                        vrInv = s_inv;
-
-                        int beyond = 0;
-
-                        for (int i = 0; i < 3; i++) {
-                            if (float(hlslpp::dot(cam[i], vrN)) > vrD) {
-                                beyond++;
-                            }
-                        }
-
-                        if (beyond == 3) {
-                            return;
-                        }
-
-                        vrFar = (beyond > 0);
-                    }
-                }
-            }
-
-            if (s_clip && !degenerate && !vr) {
-                for (int i = 0; i < 3; i++) {
-                    const hlslpp::float4 p = workload.drawData.posTransformed[globalIndices[i]];
-                    const float pw = p.w, px = p.x, py = p.y;
-                    if (s_farClip && p.z > farDepth * pw) farCount++;
-                    if (pw <= kNearW) { extreme = true; anyNear = true; }
-                    const float apx = px < 0.0f ? -px : px;
-                    const float apy = py < 0.0f ? -py : py;
-                    if (apx > guardX * pw || apy > kGuard * pw) extreme = true;
-                }
-            }
-            if (farCount == 3) return;
-            if (farCount > 0) extreme = true;
-
-            if (vrFar) {
-                extreme = true;
-                farCount = 1;
-            }
-            // The skybox dome (the only cull=BOTH geometry) is pinned to a flat far-plane primDepth in
-            // State::loadDrawState. Its back hemisphere (101 of 149 tris sit behind the camera) would then
-            // draw its near-plane cap at the far plane. The front hemisphere alone covers the whole view,
-            // so drop any dome tri that touches the near plane, matching the RSP's hardware near-clip.
-            // Only the game-pinned sky (zSource=PRIM) is flattened; other cull=BOTH geometry keeps real depth.
-            const bool isDomeTri = cullBothMask != 0 && (geometryMode & cullBothMask) == cullBothMask &&
-                                   (state->rdp->otherMode.L & G_ZS_PRIM) != 0;
-            // ROGUESQ_F5_DOME_NEAR_DROP=0 near-clips these tris instead of dropping them.
-            static const bool s_domeNearDrop = [](){ const char *e = std::getenv("ROGUESQ_F5_DOME_NEAR_DROP"); return !(e && e[0] == '0'); }();
-            if (anyNear && isDomeTri && s_domeNearDrop) return;
-
-            if (extreme) {
-                // Signed distance to near and the guard-band lateral planes; clipping at |x| = w cut the sky at the 4:3 edge once widescreen widens the view.
-                auto planeDist = [guardX, farDepth, &vrInv, vrN, vrD](const hlslpp::float4 &p, int plane) -> float {
-                    const float x = p.x, y = p.y, z = p.z, w = p.w;
-                    switch (plane) {
-                        case 0:  return w - kNearW;
-                        case 1:  return guardX * w + x;
-                        case 2:  return guardX * w - x;
-                        case 3:  return kGuard * w + y;
-                        case 4:  return kGuard * w - y;
-                        case 6:  return vrD - float(hlslpp::dot(hlslpp::mul(p, vrInv).xyz, vrN));
-                        default: return farDepth * w - z;
-                    }
-                };
-                uint32_t poly[12];
-                poly[0] = globalIndices[0]; poly[1] = globalIndices[1]; poly[2] = globalIndices[2];
-                int polyN = 3;
-                const int planeFirst = vrFar ? 6 : 0;
-                const int planeCount = vrFar ? 7 : ((farCount > 0) ? 6 : 5);
-                for (int pl = planeFirst; pl < planeCount && polyN > 0; pl++) {
-                    uint32_t out[12];
-                    int outCnt = 0;
-                    for (int i = 0; i < polyN; i++) {
-                        const uint32_t gA = poly[i];
-                        const uint32_t gB = poly[(i + 1) % polyN];
-                        const float dA = planeDist(workload.drawData.posTransformed[gA], pl);
-                        const float dB = planeDist(workload.drawData.posTransformed[gB], pl);
-                        const bool inA = dA >= 0.0f;
-                        const bool inB = dB >= 0.0f;
-                        if (inA && outCnt < 12) out[outCnt++] = gA;
-                        if ((inA != inB) && outCnt < 12) {
-                            const float t = dA / (dA - dB);
-                            out[outCnt++] = appendClippedVertex(gA, gB, t);
-                        }
-                    }
-                    polyN = outCnt;
-                    for (int i = 0; i < polyN; i++) poly[i] = out[i];
-                }
-                // appendClippedVertex reallocated the drawData vectors; access them fresh (the outer
-                // faceIndices/worldIndices/posScreen/tcFloats references may now dangle).
-                auto &fFaceIndices = workload.drawData.faceIndices;
-                auto &fWorldIndices = workload.drawData.worldIndices;
-                auto &fPosScreen = workload.drawData.posScreen;
-                auto &fTcFloats = workload.drawData.tcFloats;
-
-                // While RT shadows are on, a triangle wholly outside the view (behind the camera, off to a side) is kept for the shadow casters only. It is never
-                // drawn: unclipped, its behind-the-camera vertices smear across the screen edge (interpolated frames rebuild them from screen space). ROGUESQ_RT_SHADOWS_OFFSCREEN=0 drops it.
-                static const bool s_castOffscreen = rs64lights::envFloat("ROGUESQ_RT_SHADOWS_OFFSCREEN", 1.0f) != 0.0f;
-
-                // The boot logo sequence (level 19, gCurrentLevel u32 at 0x80130B70) stages its next logo out of view, so nothing off screen casts there.
-                constexpr uint32_t kCurrentLevelPhys = 0x130B70u;
-                constexpr uint32_t kBootLogoLevel = 19u;
-                const bool bootIntro = (state->RDRAM != nullptr) && (*reinterpret_cast<const uint32_t *>(state->RDRAM + kCurrentLevelPhys) == kBootLogoLevel);
-                // A triangle clipped at the near plane or the guard band casts whole too: a huge close object (a World Devastator) otherwise cast only its
-                // on-screen pieces, and its shadow came out cut into bands.
-                const bool castWhole = s_castOffscreen && !bootIntro && (farCount == 0) && !isDomeTri && rs64lights::config().shadows.load(std::memory_order_relaxed);
-                if (castWhole) {
-                    const interop::OtherMode &om = otherModeStack[otherModeStackSize - 1];
-                    workload.rs64CastOnly.push_back({ { globalIndices[0], globalIndices[1], globalIndices[2] }, om.L, om.H, fWorldIndices[globalIndices[0]], workload.drawData.viewProjIndices[globalIndices[0]] });
-                }
-
-                if (polyN < 3) {
-                    return;
-                }
-                const bool usesCulling = !doubleSided && (geometryMode & cullTestMask);
-                const FixedRect &scissorRect = state->rdp->scissorRectStack[state->rdp->scissorStackSize - 1];
-                for (int f = 1; f + 1 < polyN; f++) {
-                    const uint32_t gg[3] = { poly[0], poly[f], poly[f + 1] };
-                    for (int i = 0; i < 3; i++) {
-                        state->rdp->updateCallTexcoords(fTcFloats[gg[i] * 2 + 0], fTcFloats[gg[i] * 2 + 1]);
-                        fFaceIndices.push_back(gg[i]);
-                        minMatrix = std::min(minMatrix, fWorldIndices[gg[i]]);
-                        maxMatrix = std::max(maxMatrix, fWorldIndices[gg[i]]);
-                    }
-                    bool visibleTri = true;
-                    if (usesCulling) {
-                        const hlslpp::float3 U = fPosScreen[gg[1]] - fPosScreen[gg[0]];
-                        const hlslpp::float3 V = fPosScreen[gg[2]] - fPosScreen[gg[0]];
-                        const hlslpp::float3 N = hlslpp::cross(V, U);
-                        visibleTri = (N.z >= 0.0f);
-                    }
-                    if (visibleTri && !scissorRect.isNull()) {
-                        fbPair.scissorRect.merge(scissorRect);
-                        FixedRect drawRect;
-                        for (int i = 0; i < 3; i++) {
-                            const hlslpp::float3 &v = fPosScreen[gg[i]];
-                            drawRect.ulx = std::min(drawRect.ulx, int32_t(v[0] * 4.0f));
-                            drawRect.uly = std::min(drawRect.uly, int32_t(v[1] * 4.0f));
-                            drawRect.lrx = std::max(drawRect.lrx, int32_t(hlslpp::ceil(v.x).x * 4.0f));
-                            drawRect.lry = std::max(drawRect.lry, int32_t(hlslpp::ceil(v.y).x * 4.0f));
-                        }
-                        drawRect = scissorRect.intersection(drawRect);
-                        if (!drawRect.isNull()) {
-                            fbPair.drawColorRect.merge(drawRect);
-                            if (otherModeStack[otherModeStackSize - 1].zUpd()) {
-                                fbPair.drawDepthRect.merge(drawRect);
-                            }
-                        }
-                    }
-                    drawCall.triangleCount++;
-                }
-                return;
-            }
+        if (clipTriangle(workload, fbPair, globalIndices, geometryMode, doubleSided, cullTestMask)) {
+            return;
         }
 
         for (int i = 0; i < 3; i++) {

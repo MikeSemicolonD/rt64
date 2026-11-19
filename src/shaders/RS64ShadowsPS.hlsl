@@ -2,7 +2,7 @@
 
 #include "shared/rt64_rs64_shadows_cb.h"
 #include "shared/rt64_rsp_fog.h"
-#include "RS64CutoutAlpha.hlsli"
+#include "RS64Trace.hlsli"
 #include "RS64TerrainNormal.hlsli"
 #include "RS64WaterRipple.hlsli"
 

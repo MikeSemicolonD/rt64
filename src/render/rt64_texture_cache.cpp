@@ -5,6 +5,7 @@
 #define STB_IMAGE_IMPLEMENTATION
 
 #include "ddspp/ddspp.h"
+#include "common/rt64_rs64_env.h"
 #include "stb/stb_image.h"
 #include "xxHash/xxh3.h"
 
@@ -1280,7 +1281,7 @@ namespace RT64 {
         newUpload.decodeTMEM = decodeTMEM && DecodesTexturesOnGPU(directWorker->device->getCapabilities());
 
         // ROGUESQ_LOG_TEX_UPLOADS=1: one line per new texture-cache entry (a cache hit on an existing hash uploads nothing).
-        static const bool logUploads = []() { const char *e = std::getenv("ROGUESQ_LOG_TEX_UPLOADS"); return (e != nullptr) && (e[0] == '1'); }();
+        static const bool logUploads = rs64env::on("ROGUESQ_LOG_TEX_UPLOADS");
         if (logUploads) {
             fprintf(stderr, "[tex-upload] frame=%llu hash=%016llX %dx%d fmt=%u siz=%u bytes=%d\n", (unsigned long long)creationFrame, (unsigned long long)hash, width, height, loadTile.fmt, loadTile.siz, bytesCount);
         }

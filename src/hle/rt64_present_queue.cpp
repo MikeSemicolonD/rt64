@@ -3,6 +3,7 @@
 //
 
 #include "rt64_present_queue.h"
+#include "common/rt64_rs64_env.h"
 
 #include <algorithm>
 #include <atomic>
@@ -30,18 +31,11 @@
 #include "rt64_rs64_vr.h"
 #include "rt64_workload_queue.h"
 #include "shared/rt64_rs64_vr_hands_cb.h"
-
-// Most draw-active color buffer, published by the F3DFACTOR5 GBI module. Present
-// mode 4 presents it so offscreen-rendered content (e.g. the cinematic explosion
-// in 0x290000) reaches the screen.
-extern "C" volatile unsigned g_most_drawn_fb;
+#include "rt64_rs64_host.h"
 
 // ROGUESQ_LOG_SWAPCHAIN=1: surface suspend/resume and swapchain resize events (the Vulkan backend logs acquire/present results).
 static bool rs64LogSwapChain() {
-    static const bool enabled = []() {
-        const char *v = std::getenv("ROGUESQ_LOG_SWAPCHAIN");
-        return (v != nullptr) && (v[0] != '\0') && (v[0] != '0');
-    }();
+    static const bool enabled = rs64env::on("ROGUESQ_LOG_SWAPCHAIN");
     return enabled;
 }
 
@@ -91,8 +85,8 @@ namespace RT64 {
     }
 
     static bool rs64QueueScreenshot(RenderDevice *device, RenderCommandList *commandList, const VIRenderer::RenderParams &params) {
-        static const double every = []() { const char *v = std::getenv("ROGUESQ_SCREENSHOT_EVERY"); return (v != nullptr) ? std::atof(v) : 0.0; }();
-        static const int maxShots = []() { const char *v = std::getenv("ROGUESQ_SCREENSHOT_MAX"); return (v != nullptr) ? std::max(std::atoi(v), 1) : 20; }();
+        static const double every = rs64env::number("ROGUESQ_SCREENSHOT_EVERY");
+        static const int maxShots = std::max(rs64env::integer("ROGUESQ_SCREENSHOT_MAX", 20), 1);
         RS64Screenshot &s = rs64Screenshot;
         const bool rgba8 = (params.textureFormat == RenderFormat::R8G8B8A8_UNORM);
         if (!rgba8 && (params.textureFormat != RenderFormat::R16G16B16A16_UNORM)) {
@@ -779,6 +773,180 @@ namespace RT64 {
         return true;
     }
 
+    // The attribution screen has the VI showing a buffer the game only clears while the text lands in another: when the VI's buffer is not among this
+    // frame's colour images, the first other one is presented. ROGUESQ_VI_FOLLOW_DRAW=0 keeps the VI's buffer.
+    Framebuffer *PresentQueue::rs64FollowDraw(Framebuffer *viFb, uint32_t viAddr) {
+        static const bool s_follow = rs64env::on("ROGUESQ_VI_FOLLOW_DRAW", true);
+        const auto &vec = ext.sharedResources->colorImageAddressVector;
+        if (!s_follow || vec.empty() || (std::find(vec.begin(), vec.end(), viAddr) != vec.end())) {
+            return viFb;
+        }
+
+        const auto other = std::find_if(vec.begin(), vec.end(), [viAddr](uint32_t a) { return a != viAddr; });
+        Framebuffer *recentFb = (other != vec.end()) ? ext.sharedResources->framebufferManager.find(*other) : nullptr;
+        if (recentFb == nullptr) {
+            return viFb;
+        }
+
+        static std::atomic<uint64_t> s_overrides{ 0 };
+        const uint64_t v = ++s_overrides;
+        if ((v <= 5) || ((v % 60) == 0)) {
+            std::fprintf(stderr, "[vi-follow-draw] #%llu viAddr=0x%08X -> override to recentAddr=0x%08X (setSize=%zu)\n", (unsigned long long)v, viAddr, *other, vec.size());
+            std::fflush(stderr);
+        }
+
+        return recentFb;
+    }
+
+    // Whether this present shows black: the first buffer of a new video mode until the game draws it, or a zero-height VI.
+    bool PresentQueue::rs64TransitionBlack(const Present &present, const Framebuffer *viFb) {
+        const Framebuffer *presentFb = viFb;
+        // The first buffer of a new video mode is CPU-zeroed (black on hardware) but RT64 still holds an older target there.
+        static const bool s_tr_gate = !rs64env::on("ROGUESQ_NO_TRANSITION_BLANK");
+        static rs64transition::Gate s_trGate;
+        const uint32_t trArmed = g_rs64_cpu_cleared_fb.exchange(0, std::memory_order_acq_rel);
+        bool transitionBlack = false;
+        uint64_t trDrawnWid = 0;
+        if (s_tr_gate) {
+            if (trArmed != 0) {
+                s_trGate.arm(trArmed, g_rs64_cpu_cleared_wid.load(std::memory_order_acquire));
+            }
+
+            // The vector is rebuilt by the workload thread without a lock here; only trust a hit when its workload id is unchanged across the scan.
+            if (s_trGate.armedFb() != 0) {
+                const uint64_t widBefore = ext.sharedResources->colorImageWorkloadId.load(std::memory_order_acquire);
+                bool hit = false;
+                for (uint32_t a : ext.sharedResources->colorImageAddressVector) {
+                    if (rs64transition::viShowsBuffer(a, s_trGate.armedFb())) {
+                        hit = true;
+                        break;
+                    }
+                }
+
+                const uint64_t widAfter = ext.sharedResources->colorImageWorkloadId.load(std::memory_order_acquire);
+                if (hit && (widBefore == widAfter)) {
+                    trDrawnWid = widAfter;
+                }
+            }
+
+            transitionBlack = s_trGate.shouldBlack(present.screenVI.fbAddress(), trDrawnWid);
+            g_rs64_transition_gate_fb.store(s_trGate.armedFb(), std::memory_order_release);
+        }
+
+        // A zero-height VI (the game's mode-change blank, vStart == vEnd) gives fbSize (0,0); the VI pass would divide by it and paint the whole swapchain.
+        static const bool s_zeroSizeDraw = rs64env::on("ROGUESQ_VI_ZERO_SIZE_DRAW");
+        const hlslpp::uint2 trFbSize = present.screenVI.fbSize();
+        const bool zeroSizeVI = (trFbSize.x == 0) || (trFbSize.y == 0);
+        if (zeroSizeVI && !s_zeroSizeDraw) {
+            transitionBlack = true;
+        }
+
+        // ROGUESQ_LOG_TRANSITION=1: every present for 120 presents after each mode-change buffer clear.
+        static const bool s_tr_log = rs64env::on("ROGUESQ_LOG_TRANSITION");
+        if (s_tr_log) {
+            static uint32_t s_lastArm = 0;
+            static int s_left = 0;
+            if (trArmed != 0) {
+                s_lastArm = trArmed;
+                s_left = 120;
+            }
+
+            if (zeroSizeVI) {
+                std::fprintf(stderr, "[transition] zero-size VI present vi=0x%08X w=%u vRegion=0x%08X hRegion=0x%08X presentWid=%llu drawn=%d\n",
+                    present.screenVI.fbAddress(), (unsigned)present.screenVI.width, (unsigned)present.screenVI.vRegion.word, (unsigned)present.screenVI.hRegion.word,
+                    (unsigned long long)present.workloadId, s_zeroSizeDraw ? 1 : 0);
+                std::fflush(stderr);
+            }
+
+            // Presents before a clear go to a ring that is dumped when the clear arrives.
+            constexpr int kRing = 160;
+            static std::string s_ring[kRing];
+            static int s_head = 0;
+            if (trArmed != 0) {
+                std::fprintf(stderr, "[transition] ---- last %d presents before clear 0x%06X ----\n", kRing, trArmed);
+                for (int i = 0; i < kRing; i++) {
+                    const std::string &e = s_ring[(s_head + i) % kRing];
+                    if (!e.empty()) {
+                        std::fprintf(stderr, "%s\n", e.c_str());
+                    }
+                }
+
+                std::fprintf(stderr, "[transition] ---- end ring ----\n");
+            }
+
+            const long long ms = (long long)(std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now().time_since_epoch()).count() % 100000);
+            char line[320];
+            std::snprintf(line, sizeof(line), "[transition] present t=%05lld vi=0x%08X w=%u size=%ux%u chosen=0x%08X lastWrite=%d branch=%s armed=0x%06X black=%d armWid=%llu drawnWid=%llu presentWid=%llu",
+                ms, present.screenVI.fbAddress(), (unsigned)present.screenVI.width, (unsigned)trFbSize.x, (unsigned)trFbSize.y, (presentFb != nullptr) ? presentFb->addressStart : 0u,
+                (presentFb != nullptr) ? (int)presentFb->lastWriteType : -1, (viFb != nullptr) ? "A" : "B", s_lastArm, transitionBlack ? 1 : 0,
+                (unsigned long long)s_trGate.armWorkloadId, (unsigned long long)trDrawnWid, (unsigned long long)present.workloadId);
+            if (s_left > 0) {
+                --s_left;
+                std::fprintf(stderr, "%s\n", line);
+                std::fflush(stderr);
+            }
+            else {
+                s_ring[s_head] = line;
+                s_head = (s_head + 1) % kRing;
+            }
+        }
+
+        return transitionBlack;
+    }
+
+    // VR, once per headset frame: submits this frame's screen or eye pair, or shows the last one again, and counts which it was.
+    void PresentQueue::rs64VrSubmitFrame(const Present &present, RenderTarget *colorTarget, const InterpolatedFrameCounters &frameCounters, int32_t frame, UserConfiguration::Filtering filtering, bool removeBlackBorders) {
+        RS64VrStats &vs = rs64VrStats;
+        rs64VrBeginPending();
+        const int vrRender = rs64VrPending;
+        const Timestamp waitStart = rs64VrPendingWaitStart;
+        const Timestamp waitEnd = rs64VrPendingWaitEnd;
+        rs64VrPending = kVrNone;
+        if (vrRender == 1) {
+            rs64VrDrawHands(ext.device, ext.presentGraphicsWorker, ext.shaderLibrary, ext.sharedResources);
+        }
+
+        const Timestamp handsEnd = Timer::current();
+
+        std::vector<std::unique_ptr<RenderTarget>> &vrRight = ext.sharedResources->vrRightTargets;
+        std::vector<rs64vr::EyeViews> &vrViews = ext.sharedResources->vrTargetViews;
+        // Only a workload that rendered both eyes into its own targets has a pair; the vectors keep older frames' eyes otherwise.
+        const bool haveEyes = frameCounters.vr && (colorTarget != nullptr) && (uint32_t(frame) < vrRight.size()) && (uint32_t(frame) < vrViews.size()) && vrViews[frame].valid;
+        const bool vrFresh = (vrRender == 1) && (colorTarget != nullptr) && (frameCounters.vrScreen || haveEyes);
+        const bool vrHoldOld = rs64VrFade(vrFresh, frameCounters.vrScreen);
+        if ((vrRender == 1) && vrHoldOld) {
+            rs64VrRepeat();
+            vs.fadeHeld++;
+        }
+        else if ((vrRender == 1) && frameCounters.vrScreen && (colorTarget != nullptr) && rs64SubmitScreen(colorTarget, present.screenVI, filtering, removeBlackBorders)) {
+            rs64VrLastScreen = true;
+            vs.screen++;
+        }
+        else if ((vrRender == 1) && !frameCounters.vrScreen && haveEyes && rs64SubmitEyes(ext.presentGraphicsWorker, ext.shaderLibrary, colorTarget, vrRight[frame].get(), vrViews[frame])) {
+            rs64VrLastViews = vrViews[frame];
+            rs64VrLastScreen = false;
+            vs.fresh++;
+        }
+        else if (vrRender == 1) {
+            rs64VrRepeat();
+            if (colorTarget == nullptr) vs.noColor++;
+            else if (!frameCounters.vr) vs.noEyes++;
+            else if (uint32_t(frame) >= vrRight.size()) vs.noRight++;
+            else if ((uint32_t(frame) >= vrViews.size()) || !vrViews[frame].valid) vs.noViews++;
+            else vs.submitFail++;
+        }
+        else if (vrRender == 0) {
+            rs64_vr_end_frame(nullptr);
+            vs.noRender++;
+        }
+        else {
+            vs.failed++;
+        }
+
+        rs64VrTime(vrRender, waitStart, waitEnd, handsEnd);
+        rs64VrLogStats();
+    }
+
     void PresentQueue::threadPresent(const Present &present, bool &swapChainValid) {
         FramebufferManager &fbManager = ext.sharedResources->framebufferManager;
         RenderTargetManager &targetManager = ext.sharedResources->renderTargetManager;
@@ -833,171 +1001,12 @@ namespace RT64 {
                 viFb = fbManager.find(present.screenVI.fbAddress());
             }
 
-            // VI_FOLLOW_DRAW (2026-05-13, ported from reverted commit e718774).
-            //
-            // Rogue Squadron's attribution period has VI sampling a lo-res fb
-            // (0x6BA000/0x6DD000, never drawn to) while the game renders to a
-            // hi-res scratch fb (0x62B800). Result without fix: VI presents
-            // an empty buffer = pure black, even though there's valid
-            // attribution-text content rendered at 0x62B800.
-            //
-            // Workaround: when VI's chosen fb is NOT in the recently-written
-            // color-image set, present the most-recently-written color fb
-            // instead. The present worker composites at the rt's native
-            // dimensions, bypassing VI's stale width register entirely.
-            //
-            // ROGUESQ_VI_FOLLOW_DRAW=0 disables (VI lookup only).
             if (!viewRDRAM) {
-                static const bool s_follow = []() {
-                    const char *e = std::getenv("ROGUESQ_VI_FOLLOW_DRAW");
-                    return !(e && *e == '0');
-                }();
-                const uint32_t viAddr = present.screenVI.fbAddress();
-                if (s_follow && !ext.sharedResources->colorImageAddressVector.empty())
-                {
-                    const auto &vec = ext.sharedResources->colorImageAddressVector;
-                    // Override only when VI's fb is stale.
-                    bool viInRecent = false;
-                    for (uint32_t a : vec) {
-                        if (a == viAddr) { viInRecent = true; break; }
-                    }
-                    if (!viInRecent) {
-                        // Pick the first vec entry that's NOT the VI address.
-                        // For Rogue Squadron attribution, VI cycles between
-                        // lo-res fbs that only receive fillRect clears,
-                        // while the actual text content lands in a different
-                        // (hi-res) fb. Front of vec may be the lo-res clear
-                        // (most recent setColorImage), so we skip it and
-                        // pick the next distinct addr.
-                        uint32_t recentAddr = 0;
-                        bool found = false;
-                        for (uint32_t a : vec) {
-                            if (a != viAddr) {
-                                recentAddr = a;
-                                found = true;
-                                break;
-                            }
-                        }
-                        if (found) {
-                            Framebuffer *recentFb = fbManager.find(recentAddr);
-                            if (recentFb != nullptr) {
-                                viFb = recentFb;
-                                static std::atomic<uint64_t> ovr{0};
-                                uint64_t v = ++ovr;
-                                if (v <= 5 || (v % 60) == 0) {
-                                    std::fprintf(stderr,
-                                        "[vi-follow-draw] #%llu viAddr=0x%08X "
-                                        "-> override to recentAddr=0x%08X (setSize=%zu)\n",
-                                        (unsigned long long)v,
-                                        viAddr, recentAddr, vec.size());
-                                    std::fflush(stderr);
-                                }
-                            }
-                        }
-                    }
-                }
+                viFb = rs64FollowDraw(viFb, present.screenVI.fbAddress());
             }
 
             Framebuffer *presentFb = viFb;
-
-            // The first buffer of a new video mode is CPU-zeroed (black on hardware) but RT64 still holds an older target there.
-            static const bool s_tr_gate = []() {
-                const char *v = std::getenv("ROGUESQ_NO_TRANSITION_BLANK");
-                return !(v && v[0] && v[0] != '0');
-            }();
-            static rs64transition::Gate s_trGate;
-            const uint32_t trArmed = g_rs64_cpu_cleared_fb.exchange(0, std::memory_order_acq_rel);
-            bool transitionBlack = false;
-            uint64_t trDrawnWid = 0;
-            if (s_tr_gate) {
-                if (trArmed != 0) {
-                    s_trGate.arm(trArmed, g_rs64_cpu_cleared_wid.load(std::memory_order_acquire));
-                }
-
-                // The vector is rebuilt by the workload thread without a lock here; only trust a hit when its workload id is unchanged across the scan.
-                if (s_trGate.armedFb() != 0) {
-                    const uint64_t widBefore = ext.sharedResources->colorImageWorkloadId.load(std::memory_order_acquire);
-                    bool hit = false;
-                    for (uint32_t a : ext.sharedResources->colorImageAddressVector) {
-                        if (rs64transition::viShowsBuffer(a, s_trGate.armedFb())) {
-                            hit = true;
-                            break;
-                        }
-                    }
-
-                    const uint64_t widAfter = ext.sharedResources->colorImageWorkloadId.load(std::memory_order_acquire);
-                    if (hit && (widBefore == widAfter)) {
-                        trDrawnWid = widAfter;
-                    }
-                }
-
-                transitionBlack = s_trGate.shouldBlack(present.screenVI.fbAddress(), trDrawnWid);
-                g_rs64_transition_gate_fb.store(s_trGate.armedFb(), std::memory_order_release);
-            }
-
-            // A zero-height VI (the game's mode-change blank, vStart == vEnd) gives fbSize (0,0); the VI pass would divide by it and paint the whole swapchain.
-            static const bool s_zeroSizeDraw = []() {
-                const char *v = std::getenv("ROGUESQ_VI_ZERO_SIZE_DRAW");
-                return v && v[0] && v[0] != '0';
-            }();
-            const hlslpp::uint2 trFbSize = present.screenVI.fbSize();
-            const bool zeroSizeVI = (trFbSize.x == 0) || (trFbSize.y == 0);
-            if (zeroSizeVI && !s_zeroSizeDraw) {
-                transitionBlack = true;
-            }
-
-            // ROGUESQ_LOG_TRANSITION=1: every present for 120 presents after each mode-change buffer clear.
-            static const bool s_tr_log = []() {
-                const char *v = std::getenv("ROGUESQ_LOG_TRANSITION");
-                return v && v[0] && v[0] != '0';
-            }();
-            if (s_tr_log) {
-                static uint32_t s_lastArm = 0;
-                static int s_left = 0;
-                if (trArmed != 0) {
-                    s_lastArm = trArmed;
-                    s_left = 120;
-                }
-
-                if (zeroSizeVI) {
-                    std::fprintf(stderr, "[transition] zero-size VI present vi=0x%08X w=%u vRegion=0x%08X hRegion=0x%08X presentWid=%llu drawn=%d\n",
-                        present.screenVI.fbAddress(), (unsigned)present.screenVI.width, (unsigned)present.screenVI.vRegion.word, (unsigned)present.screenVI.hRegion.word,
-                        (unsigned long long)present.workloadId, s_zeroSizeDraw ? 1 : 0);
-                    std::fflush(stderr);
-                }
-
-                // Presents before a clear go to a ring that is dumped when the clear arrives.
-                constexpr int kRing = 160;
-                static std::string s_ring[kRing];
-                static int s_head = 0;
-                if (trArmed != 0) {
-                    std::fprintf(stderr, "[transition] ---- last %d presents before clear 0x%06X ----\n", kRing, trArmed);
-                    for (int i = 0; i < kRing; i++) {
-                        const std::string &e = s_ring[(s_head + i) % kRing];
-                        if (!e.empty()) {
-                            std::fprintf(stderr, "%s\n", e.c_str());
-                        }
-                    }
-
-                    std::fprintf(stderr, "[transition] ---- end ring ----\n");
-                }
-
-                const long long ms = (long long)(std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now().time_since_epoch()).count() % 100000);
-                char line[320];
-                std::snprintf(line, sizeof(line), "[transition] present t=%05lld vi=0x%08X w=%u size=%ux%u chosen=0x%08X lastWrite=%d branch=%s armed=0x%06X black=%d armWid=%llu drawnWid=%llu presentWid=%llu",
-                    ms, present.screenVI.fbAddress(), (unsigned)present.screenVI.width, (unsigned)trFbSize.x, (unsigned)trFbSize.y, (presentFb != nullptr) ? presentFb->addressStart : 0u,
-                    (presentFb != nullptr) ? (int)presentFb->lastWriteType : -1, (viFb != nullptr) ? "A" : "B", s_lastArm, transitionBlack ? 1 : 0,
-                    (unsigned long long)s_trGate.armWorkloadId, (unsigned long long)trDrawnWid, (unsigned long long)present.workloadId);
-                if (s_left > 0) {
-                    --s_left;
-                    std::fprintf(stderr, "%s\n", line);
-                    std::fflush(stderr);
-                }
-                else {
-                    s_ring[s_head] = line;
-                    s_head = (s_head + 1) % kRing;
-                }
-            }
+            const bool transitionBlack = rs64TransitionBlack(present, viFb);
 
             // Show the framebuffer the debugger has requested instead.
             if (present.debuggerFramebuffer.view) {
@@ -1052,10 +1061,7 @@ namespace RT64 {
 
                 RenderTargetKey colorTargetKey(presentFb->addressStart, presentFb->width, presentFb->siz, Framebuffer::Type::Color);
                 colorTarget = &targetManager.get(colorTargetKey, true);
-                static const bool s_depthAsColor = []() {
-                    const char *v = std::getenv("ROGUESQ_PRESENT_DEPTH_AS_COLOR");
-                    return v && v[0] && v[0] != '0';
-                }();
+                static const bool s_depthAsColor = rs64env::on("ROGUESQ_PRESENT_DEPTH_AS_COLOR");
                 if (!colorTarget->isEmpty()) {
                     // A buffer last written as depth is a stale Z buffer at a reused address; show black, not Z-as-RGBA16 white.
                     if (!s_depthAsColor && (presentFb->lastWriteType == Framebuffer::Type::Depth)) {
@@ -1189,55 +1195,7 @@ namespace RT64 {
             // released image); ending a frame with no layers would clear the display.
             const bool vrSession = (rs64_vr_session() != 0);
             if (vrSession && (i < framesToPresent)) {
-                RS64VrStats &vs = rs64VrStats;
-                rs64VrBeginPending();
-                const int vrRender = rs64VrPending;
-                const Timestamp waitStart = rs64VrPendingWaitStart;
-                const Timestamp waitEnd = rs64VrPendingWaitEnd;
-                rs64VrPending = kVrNone;
-                if (vrRender == 1) {
-                    rs64VrDrawHands(ext.device, ext.presentGraphicsWorker, ext.shaderLibrary, ext.sharedResources);
-                }
-
-                const Timestamp handsEnd = Timer::current();
-
-                std::vector<std::unique_ptr<RenderTarget>> &vrRight = ext.sharedResources->vrRightTargets;
-                std::vector<rs64vr::EyeViews> &vrViews = ext.sharedResources->vrTargetViews;
-                // Only a workload that rendered both eyes into its own targets has a pair; the vectors keep older frames' eyes otherwise.
-                const bool haveEyes = frameCounters.vr && (colorTarget != nullptr) && (uint32_t(i) < vrRight.size()) && (uint32_t(i) < vrViews.size()) && vrViews[i].valid;
-                const bool vrFresh = (vrRender == 1) && (colorTarget != nullptr) && (frameCounters.vrScreen || haveEyes);
-                const bool vrHoldOld = rs64VrFade(vrFresh, frameCounters.vrScreen);
-                if ((vrRender == 1) && vrHoldOld) {
-                    rs64VrRepeat();
-                    vs.fadeHeld++;
-                }
-                else if ((vrRender == 1) && frameCounters.vrScreen && (colorTarget != nullptr) && rs64SubmitScreen(colorTarget, present.screenVI, filtering, removeBlackBorders)) {
-                    rs64VrLastScreen = true;
-                    vs.screen++;
-                }
-                else if ((vrRender == 1) && !frameCounters.vrScreen && haveEyes && rs64SubmitEyes(ext.presentGraphicsWorker, ext.shaderLibrary, colorTarget, vrRight[i].get(), vrViews[i])) {
-                    rs64VrLastViews = vrViews[i];
-                    rs64VrLastScreen = false;
-                    vs.fresh++;
-                }
-                else if (vrRender == 1) {
-                    rs64VrRepeat();
-                    if (colorTarget == nullptr) vs.noColor++;
-                    else if (!frameCounters.vr) vs.noEyes++;
-                    else if (uint32_t(i) >= vrRight.size()) vs.noRight++;
-                    else if ((uint32_t(i) >= vrViews.size()) || !vrViews[i].valid) vs.noViews++;
-                    else vs.submitFail++;
-                }
-                else if (vrRender == 0) {
-                    rs64_vr_end_frame(nullptr);
-                    vs.noRender++;
-                }
-                else {
-                    vs.failed++;
-                }
-
-                rs64VrTime(vrRender, waitStart, waitEnd, handsEnd);
-                rs64VrLogStats();
+                rs64VrSubmitFrame(present, colorTarget, frameCounters, i, filtering, removeBlackBorders);
             }
 
             // The window mirrors the left eye at most 30 times a second, so a 60 Hz FIFO swapchain never holds back the headset.

@@ -3,6 +3,7 @@
 //
 
 #include "rt64_application.h"
+#include "common/rt64_rs64_env.h"
 #include "rhi/rt64_render_hooks.h"
 
 #include <cinttypes>
@@ -228,8 +229,7 @@ namespace RT64 {
 
         // Without the ubershader draws wait for their specialized shaders; texture slots imply it, ROGUESQ_UBERSHADER=0 forces it for testing.
         textureSlots = UsesTextureSlots(chosenGraphicsAPI == UserConfiguration::GraphicsAPI::D3D11, chosenGraphicsAPI == UserConfiguration::GraphicsAPI::D3D12, device->getCapabilities());
-        const char *ubershaderSetting = std::getenv("ROGUESQ_UBERSHADER");
-        skipUbershader = textureSlots || ((ubershaderSetting != nullptr) && (ubershaderSetting[0] == '0'));
+        skipUbershader = textureSlots || !rs64env::on("ROGUESQ_UBERSHADER", true);
         if (skipUbershader) {
             fprintf(stderr, "[RT64] ubershader off%s: draws wait for their specialized shaders\n", textureSlots ? " (texture slots)" : "");
         }

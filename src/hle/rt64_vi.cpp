@@ -11,6 +11,7 @@
 #include <stdio.h>
 
 #include "common/rt64_common.h"
+#include "common/rt64_rs64_env.h"
 #include "gbi/rt64_f3d.h"
 
 #include "rt64_vi.h"
@@ -130,10 +131,7 @@ namespace RT64 {
     // Horizontal pixel aspect as displayed: the VI active region on a 640x480 raster vs the framebuffer size (~1.25 for a 512-wide buffer, 320x240 snaps to 1).
     // ROGUESQ_VI_PIXEL_ASPECT=0 restores square pixels.
     float VI::pixelAspect() const {
-        static const bool s_enabled = []() {
-            const char *v = std::getenv("ROGUESQ_VI_PIXEL_ASPECT");
-            return !(v && v[0] == '0');
-        }();
+        static const bool s_enabled = rs64env::on("ROGUESQ_VI_PIXEL_ASPECT", true);
 
         const hlslpp::uint2 size = fbSize();
         const int hSpan = int(hRegion.hEnd) - int(hRegion.hStart);

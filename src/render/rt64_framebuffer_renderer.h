@@ -155,6 +155,92 @@ namespace RT64 {
         bool rtSupport = false;
 #   endif
 
+        // One colour target and its framebuffer, rebuilt when the size changes.
+        struct RS64Target {
+            std::unique_ptr<RenderTexture> texture;
+            std::unique_ptr<RenderFramebuffer> framebuffer;
+            uint32_t width = 0;
+            uint32_t height = 0;
+
+            void ensure(RenderDevice *device, uint32_t w, uint32_t h, RenderFormat format);
+        };
+
+        // RS64 passes of one framebuffer pair: their constant buffers, descriptor sets and intermediate targets, and which passes were filled.
+        struct RS64FramebufferState {
+            std::unique_ptr<RenderBuffer> lightsBuffer;
+            std::unique_ptr<RS64LightsDescriptorSet> lightsSet;
+            // Point lights at half resolution (ROGUESQ_RT_LIGHTS_HALF): drawn into lightsHalf, then added to the frame by the upsample.
+            std::unique_ptr<RS64LightsUpsampleDescriptorSet> lightsUpsampleSet;
+            RS64Target lightsHalf;
+            bool lightsHalfOn = false;
+            // MSAA colour target: the passes read depth from depthCopy (sample 0) and colour from the target's resolve.
+            std::unique_ptr<RenderTargetCopyDescriptorSet> depthResolveSet;
+            RS64Target depthCopy;
+            bool msaa = false;
+            // Glowing panel faces: the lights CB in faces-only mode, drawn over the frame (the lights pass itself only tints it).
+            std::unique_ptr<RenderBuffer> panelsBuffer;
+            std::unique_ptr<RS64LightsDescriptorSet> panelsSet;
+            bool panels = false;
+            bool lightsDebug = false;
+            std::unique_ptr<RenderBuffer> shadowsBuffer;
+            std::unique_ptr<RS64TracedDescriptorSet> shadowsSet;
+            bool shadowsDebug = false;
+            bool lightsOn = false;
+            bool shadowsOn = false;
+            std::unique_ptr<RS64TracedDescriptorSet> lightsShadowedSet;
+            bool lightsShadowed = false;
+            const void *target = nullptr;
+            // This pair draws a new view over an earlier 3D pair on the same colour target after clearing its depth (the cockpit over the world).
+            bool newView = false;
+            std::unique_ptr<RenderBuffer> fogBuffer;
+            std::unique_ptr<RS64TracedDescriptorSet> fogSet;
+            bool fogDebug = false;
+            bool fogOn = false;
+            bool fogShade = false;
+            bool hazeOn = false;
+            // Haze at half resolution: traced into hazeHalf (bound as the fog set's gColor), then added to the frame by the upsample.
+            RS64Target hazeHalf;
+            std::unique_ptr<RenderTexture> softMask;
+            std::unique_ptr<RenderTexture> softPing;
+            std::unique_ptr<RenderTexture> softIndirect;
+            std::unique_ptr<RenderTexture> softIndirectPing;
+            std::unique_ptr<RenderFramebuffer> softMaskFb;
+            std::unique_ptr<RenderFramebuffer> softPingFb;
+            uint32_t softW = 0;
+            uint32_t softH = 0;
+            bool softHalf = false;
+            std::unique_ptr<RS64ShadowBlurDescriptorSet> blurHSet;
+            std::unique_ptr<RS64ShadowBlurDescriptorSet> blurVSet;
+            std::unique_ptr<RenderBuffer> blurHBuffer;
+            std::unique_ptr<RenderBuffer> blurVBuffer;
+            bool shadowsSoft = false;
+            // Horizon mirror: the trace's third target (where missed water rays found their sky, weight, sky colour) and the colour target after the view's last draw.
+            std::unique_ptr<RenderTexture> softMirror;
+            std::unique_ptr<RenderTexture> mirrorLate;
+            std::unique_ptr<RS64WaterMirrorDescriptorSet> mirrorSet;
+            bool mirrorOn = false;
+            uint32_t mirrorW = 0;
+            uint32_t mirrorH = 0;
+            RenderFormat mirrorFormat = RenderFormat::UNKNOWN;
+            // Temporal AO / indirect history (mask + indirect), two sets alternating: the pass writes histWrite and reads the other.
+            std::unique_ptr<RenderTexture> histMask[2];
+            std::unique_ptr<RenderTexture> histIndirect[2];
+            std::unique_ptr<RenderFramebuffer> histFb[2];
+            std::unique_ptr<RS64ShadowTemporalDescriptorSet> temporalSet;
+            uint32_t histWrite = 0;
+            bool temporalOn = false;
+            // Interpolated frame reusing the real frame's trace: the temporal pass reprojects history histWrite into the other set, which stays the spare.
+            bool reuseTrace = false;
+            uint32_t histTarget = 0;
+            // The previous frame of this slot: its main view's objects by matrix id, screen-from-view and viewport (history is reprojected through them).
+            std::unordered_map<uint32_t, rs64lights::Mat4> prevObjects;
+            rs64lights::Mat4 prevScreenFromView = {};
+            float prevViewport[4] = {};
+            bool histValid = false;
+
+            void create(RenderDevice *device);
+        };
+
         struct Framebuffer {
             std::unique_ptr<RenderBuffer> paramsBuffer;
             std::unique_ptr<FramebufferRendererDescriptorFramebufferSet> descRealFbSet;
@@ -162,85 +248,7 @@ namespace RT64 {
             std::set<RenderTarget *> transitionRenderTargetSet;
             RenderTargetDrawCall renderTargetDrawCall;
             RenderViewport viewport;
-            std::unique_ptr<RenderBuffer> rs64LightsBuffer;
-            std::unique_ptr<RS64LightsDescriptorSet> rs64LightsSet;
-            // Point lights at half resolution (ROGUESQ_RT_LIGHTS_HALF): drawn into rs64LightsHalfTex, then added to the frame by the upsample.
-            std::unique_ptr<RS64LightsUpsampleDescriptorSet> rs64LightsUpsampleSet;
-            std::unique_ptr<RenderTexture> rs64LightsHalfTex;
-            std::unique_ptr<RenderFramebuffer> rs64LightsHalfFb;
-            uint32_t rs64LightsHalfW = 0;
-            uint32_t rs64LightsHalfH = 0;
-            bool rs64LightsHalf = false;
-            // MSAA colour target: the passes read depth from rs64DepthCopy (sample 0) and colour from the target's resolve.
-            std::unique_ptr<RenderTargetCopyDescriptorSet> rs64DepthResolveSet;
-            std::unique_ptr<RenderTexture> rs64DepthCopy;
-            std::unique_ptr<RenderFramebuffer> rs64DepthCopyFb;
-            uint32_t rs64DepthCopyW = 0;
-            uint32_t rs64DepthCopyH = 0;
-            bool rs64MSAA = false;
-            // Glowing panel faces: the lights CB in faces-only mode, drawn over the frame (the lights pass itself only tints it).
-            std::unique_ptr<RenderBuffer> rs64PanelsBuffer;
-            std::unique_ptr<RS64LightsDescriptorSet> rs64PanelsSet;
-            bool rs64Panels = false;
-            bool rs64LightsDebug = false;
-            std::unique_ptr<RenderBuffer> rs64ShadowsBuffer;
-            std::unique_ptr<RS64TracedDescriptorSet> rs64ShadowsSet;
-            bool rs64ShadowsDebug = false;
-            bool rs64LightsOn = false;
-            bool rs64ShadowsOn = false;
-            std::unique_ptr<RS64TracedDescriptorSet> rs64LightsShadowedSet;
-            bool rs64LightsShadowed = false;
-            const void *rs64Target = nullptr;
-            // This pair draws a new view over an earlier 3D pair on the same colour target after clearing its depth (the cockpit over the world).
-            bool rs64NewView = false;
-            std::unique_ptr<RenderBuffer> rs64FogBuffer;
-            std::unique_ptr<RS64TracedDescriptorSet> rs64FogSet;
-            bool rs64FogDebug = false;
-            bool rs64FogOn = false;
-            bool rs64FogShade = false;
-            bool rs64HazeOn = false;
-            // Haze at half resolution: traced into rs64HazeHalfTex (bound as the fog set's gColor), then added to the frame by the upsample.
-            std::unique_ptr<RenderTexture> rs64HazeHalfTex;
-            std::unique_ptr<RenderFramebuffer> rs64HazeHalfFb;
-            uint32_t rs64HazeHalfW = 0;
-            uint32_t rs64HazeHalfH = 0;
-            std::unique_ptr<RenderTexture> rs64SoftMask;
-            std::unique_ptr<RenderTexture> rs64SoftPing;
-            std::unique_ptr<RenderTexture> rs64SoftIndirect;
-            std::unique_ptr<RenderTexture> rs64SoftIndirectPing;
-            std::unique_ptr<RenderFramebuffer> rs64SoftMaskFb;
-            std::unique_ptr<RenderFramebuffer> rs64SoftPingFb;
-            uint32_t rs64SoftW = 0;
-            uint32_t rs64SoftH = 0;
-            bool rs64SoftHalf = false;
-            std::unique_ptr<RS64ShadowBlurDescriptorSet> rs64BlurHSet;
-            std::unique_ptr<RS64ShadowBlurDescriptorSet> rs64BlurVSet;
-            std::unique_ptr<RenderBuffer> rs64BlurHBuffer;
-            std::unique_ptr<RenderBuffer> rs64BlurVBuffer;
-            bool rs64ShadowsSoft = false;
-            // Horizon mirror: the trace's third target (where missed water rays found their sky, weight, sky colour) and the colour target after the view's last draw.
-            std::unique_ptr<RenderTexture> rs64SoftMirror;
-            std::unique_ptr<RenderTexture> rs64MirrorLate;
-            std::unique_ptr<RS64WaterMirrorDescriptorSet> rs64MirrorSet;
-            bool rs64MirrorOn = false;
-            uint32_t rs64MirrorW = 0;
-            uint32_t rs64MirrorH = 0;
-            RenderFormat rs64MirrorFormat = RenderFormat::UNKNOWN;
-            // Temporal AO / indirect history (mask + indirect), two sets alternating: the pass writes rs64HistWrite and reads the other.
-            std::unique_ptr<RenderTexture> rs64HistMask[2];
-            std::unique_ptr<RenderTexture> rs64HistIndirect[2];
-            std::unique_ptr<RenderFramebuffer> rs64HistFb[2];
-            std::unique_ptr<RS64ShadowTemporalDescriptorSet> rs64TemporalSet;
-            uint32_t rs64HistWrite = 0;
-            bool rs64TemporalOn = false;
-            // Interpolated frame reusing the real frame's trace: the temporal pass reprojects history rs64HistWrite into the other set, which stays the spare.
-            bool rs64ReuseTrace = false;
-            uint32_t rs64HistTarget = 0;
-            // The previous frame of this slot: its main view's objects by matrix id, screen-from-view and viewport (history is reprojected through them).
-            std::unordered_map<uint32_t, rs64lights::Mat4> rs64PrevObjects;
-            rs64lights::Mat4 rs64PrevScreenFromView = {};
-            float rs64PrevViewport[4] = {};
-            bool rs64HistValid = false;
+            RS64FramebufferState rs64;
         };
 
         // Per displayed frame: the main view's opaque casters as one mesh over worldPosBuffer (plume's Vulkan BLAS build handles one mesh only).
@@ -411,6 +419,31 @@ namespace RT64 {
             bool rs64Lights = false;
         };
 
+        // The RS64 passes of one framebuffer pair: which run, the main 3D view they light and the call after which they split the raster scenes.
+        struct RS64Passes {
+            bool msaa = false;
+            bool newView = false;
+            bool lightsWanted = false;
+            bool shadowsWanted = false;
+            bool fogWanted = false;
+            bool lightShadowsWanted = false;
+            bool sceneWanted = false;
+            bool postWanted = false;
+            uint32_t projIndex = UINT32_MAX;
+            uint32_t lastIndex = UINT32_MAX;
+            uint32_t splitProj = UINT32_MAX;
+            uint32_t splitCall = UINT32_MAX;
+
+            // Set while the projections are recorded: the main view's transforms and screen mapping, and where the scenes were split.
+            bool sawPersp = false;
+            bool split = false;
+            bool mirrorSplit = false;
+            bool haveProj = false;
+            uint32_t transformsIndex = 0;
+            hlslpp::float2 screenScale = { 1.0f, 1.0f };
+            hlslpp::float2 screenOffset = { 0.0f, 0.0f };
+        };
+
         FramebufferRenderer(RenderWorker *worker, bool rtSupport, UserConfiguration::GraphicsAPI graphicsAPI, const ShaderLibrary *shaderLibrary);
         ~FramebufferRenderer();
         void resetFramebuffers(RenderWorker *worker, bool ubershadersVisible, float ditherNoiseStrength, const RenderMultisampling &multisampling);
@@ -428,8 +461,15 @@ namespace RT64 {
         bool submitDepthAccess(RenderWorker *worker, RenderFramebufferStorage *fbStorage, bool readOnly, bool &depthState);
         void submitRasterScene(RenderWorker *worker, const Framebuffer &framebuffer, RenderFramebufferStorage *fbStorage, const RasterScene &rasterScene, bool &depthState);
         void addFramebuffer(const DrawParams &p);
+        void stampRenderIndices(const DrawData &drawData, const InstanceDrawCall &call, uint32_t instanceIndex);
         static float aspectRatioScaleFor(const FixedRect &scissorRect, float pixelAspect, float aspectRatioSource, float aspectRatioTarget);
         static FixedRect targetWriteRect(const FixedRect &rect, const FixedRect &scissorRect, hlslpp::float2 resolutionScale, int32_t fbWidth, float aspectRatioScale);
+        RS64Passes planRS64Passes(const DrawParams &p, Framebuffer &framebuffer);
+        void finishRS64Passes(const DrawParams &p, Framebuffer &framebuffer, const RS64Passes &passes);
+        void fillRS64ScenePasses(const DrawParams &p, Framebuffer &framebuffer, const RS64Passes &passes, bool lightsFilled, bool &shadowsFilled, bool &fogFilled);
+        rs64lights::Sun resolveRS64Sun(const DrawParams &p, const RS64Passes &passes, uint32_t mainTi, const std::vector<interop::float4x4> &terrainWorld, const rs64lights::TerrainFrame &tf);
+        rs64lights::FogParams pickRS64Fog(const DrawParams &p, uint32_t mainTi);
+        void setRS64TerrainAnchor(const DrawParams &p, const GameCall &call, interop::float2 resolution);
         bool fillRS64Lights(const DrawParams &p, Framebuffer &framebuffer, uint32_t transformsIndex, hlslpp::float2 screenScale, hlslpp::float2 screenOffset);
         bool rs64ViewFromScreen(const DrawParams &p, uint32_t transformsIndex, hlslpp::float2 screenScale, hlslpp::float2 screenOffset, rs64lights::Mat4 &out, rs64lights::ScreenMap *mapOut = nullptr);
         bool fillRS64Shadows(const DrawParams &p, Framebuffer &framebuffer, uint32_t transformsIndex, hlslpp::float2 screenScale, hlslpp::float2 screenOffset, const rs64lights::Sun &sun, const rs64lights::FogParams &fog);

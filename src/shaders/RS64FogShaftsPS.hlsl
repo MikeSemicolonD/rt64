@@ -2,7 +2,7 @@
 
 #include "shared/rt64_rs64_fog_shafts_cb.h"
 #include "shared/rt64_rsp_fog.h"
-#include "RS64CutoutAlpha.hlsli"
+#include "RS64Trace.hlsli"
 
 ConstantBuffer<RS64FogShaftsCB> gFog : register(b1, space3);
 Texture2D<float> gDepth : register(t2, space3);

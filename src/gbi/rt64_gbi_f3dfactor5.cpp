@@ -33,43 +33,29 @@
 #include <cmath>
 #include <chrono>
 
-// g_most_drawn_fb_width: width of its color image. g_most_drawn_fb_ms: steady-clock ms of its last texrect. g_f5_task_hops/faces: previous task's chunk transitions and emitted faces (diagnostic).
+// g_f5_task_hops/faces: previous task's chunk transitions and emitted faces (diagnostic).
 extern "C" { volatile unsigned g_most_drawn_fb = 0; }
 extern "C" { volatile unsigned g_most_drawn_fb_width = 0; }
 extern "C" { volatile unsigned long long g_most_drawn_fb_ms = 0; }
 extern "C" { volatile unsigned g_f5_task_hops = 0; }
 extern "C" { volatile unsigned g_f5_task_faces = 0; }
-// Heuristic firing counts (ROGUESQ_LOG_HEURISTICS): 0 = op 0x0A seen, 1 = op_01 shape rule
-// disagrees with byte1 bit0, 2 = B4 filler guard fired, 3 = attribution de-flicker skip.
 extern "C" { volatile unsigned g_f5_heur[4] = {}; }
 extern "C" { volatile int g_explosion_hold = 0; }
-extern "C" int rs64_static_terrain_mode(void);
-extern "C" int rs64_terrain_fog_clip(void);
-extern "C" float rs64_fog_dist(void);
-extern "C" float rs64_fog_tail_end(void);
-extern "C" int rs64_level_has_clouds(void);
-extern "C" float rs64_draw_dist(void);
-extern "C" int rs64_credits_active(void);
 
 namespace RT64 {
     namespace GBI_F3DFACTOR5 {
         // ---------------------------------------------------------------- gates
         static GBIFunction s_mw_orig = nullptr;
-        static bool env_on(const char* name, bool def) {
-            const char* v = std::getenv(name);
-            if (!v || !v[0]) return def;
-            return v[0] != '0';
-        }
 
         // ROGUESQ_LOG_GBI=1 enables per-handler diagnostic logs.
         bool gbi_log_enabled() {
-            static bool s = env_on("ROGUESQ_LOG_GBI", false);
+            static bool s = rs64env::on("ROGUESQ_LOG_GBI", false);
             return s;
         }
 
         // ROGUESQ_F5_NATIVE=0 turns the geometry emission off (parse-only).
         static bool f5_native_active() {
-            static bool s = env_on("ROGUESQ_F5_NATIVE", true);
+            static bool s = rs64env::on("ROGUESQ_F5_NATIVE", true);
             return s;
         }
 
@@ -78,7 +64,7 @@ namespace RT64 {
         // matrix load. Diagnostic for the rotated/zoomed 3D glyph strip on the
         // name-entry screen vs the model-texture bug (transform-vs-UV).
         static bool face_uv_log_enabled() {
-            static bool s = env_on("ROGUESQ_LOG_FACE_UV", false);
+            static bool s = rs64env::on("ROGUESQ_LOG_FACE_UV", false);
             return s;
         }
 
@@ -91,7 +77,7 @@ namespace RT64 {
         // map is rebuilt every frame (a buffer's map clears when its slot 0 is written), so it can't
         // accumulate the stale mappings that made the earlier persistent pointer map warp.
         static bool f5_node_id_enabled() {
-            static bool s = env_on("ROGUESQ_F5_NODE_ID", true);
+            static bool s = rs64env::on("ROGUESQ_F5_NODE_ID", true);
             return s;
         }
         // The terrain root re-centers in whole grid cells (node+0x40/+0x48, integral) while its tiles shift the opposite way.
@@ -135,11 +121,11 @@ namespace RT64 {
         static bool s_root_lag = false;
         static uint64_t s_root_lag_task = ~0ull;
         static bool f5_regrid_comp_enabled() {
-            static const bool s = env_on("ROGUESQ_F5_REGRID_COMP", true);
+            static const bool s = rs64env::on("ROGUESQ_F5_REGRID_COMP", true);
             return s;
         }
         static uint32_t f5_node_regrid_generation(const uint8_t* ram, uint32_t node) {
-            static const bool s_on = env_on("ROGUESQ_F5_REGRID_SNAP", true);
+            static const bool s_on = rs64env::on("ROGUESQ_F5_REGRID_SNAP", true);
             s_regrid_cur = 0;
             if (!s_on) return 0;
             union { uint32_t u; float f; } a, b;
@@ -185,7 +171,7 @@ namespace RT64 {
                     // L must fit the records' int16 vertices, so it drops back to 0 past 16 cells. The id stays: the stamp records the dropped
                     // shift for RT64 to move the previous transform by (Workload::rs64Rebase), or the terrain snapped ahead and back for a frame.
                     if ((std::abs(e.lx) > 8192) || (std::abs(e.lz) > 8192)) {
-                        static const bool s_rebaseInterp = env_on("ROGUESQ_F5_REBASE_INTERP", true);
+                        static const bool s_rebaseInterp = rs64env::on("ROGUESQ_F5_REBASE_INTERP", true);
                         if (s_rebaseInterp) {
                             s_rebase = { node, (float)e.lx, (float)e.lz };
                         }
@@ -308,7 +294,7 @@ namespace RT64 {
         static void f5_sprite_count_rotate(State* state) {
             static uint64_t s_task = ~0ull;
             if (state->displayListCounter != s_task) {
-                static const bool s_log = env_on("ROGUESQ_LOG_INTERP_PAIR", false);
+                static const bool s_log = rs64env::on("ROGUESQ_LOG_INTERP_PAIR", false);
                 if (s_log && (s_faceStats[0] + s_faceStats[1] + s_faceStats[2] + s_faceStats[3] + s_faceStats[4]) > 0) {
                     std::fprintf(stderr, "[facesprite] new=%u gap=%u restart=%u jump=%u cont=%u\n", s_faceStats[0], s_faceStats[1], s_faceStats[2], s_faceStats[3], s_faceStats[4]);
                 }
@@ -323,7 +309,7 @@ namespace RT64 {
         // Id for a sprite from the mesh face that emitted it (per node, since instanced models share faces). A new generation starts when the
         // face was not drawn last frame, its flipbook restarts (texture address drops back) or it jumps far beyond its size: the pool slot was reused.
         static uint32_t f5_face_sprite_id(State* state, uint32_t face, uint32_t node, uint32_t tex, float cx, float cy, float cz, float half) {
-            static const bool s_on = env_on("ROGUESQ_F5_SPRITE_FACE_ID", true);
+            static const bool s_on = rs64env::on("ROGUESQ_F5_SPRITE_FACE_ID", true);
             if (!s_on || (face < 0x80000000u)) return 0;
             struct Entry { uint64_t task; uint32_t tex, gen; float x, y, z, half, vx, vy, vz; };
             static std::unordered_map<uint64_t, Entry> s_faces;
@@ -371,7 +357,7 @@ namespace RT64 {
         // Returns a persistent id for a sprite at local centre (cx,cy,cz) with local half-size `half` under node `node` (0 = none), or 0 to leave it to the auto matcher.
         // Matches first in the node's local space (sprites riding a moving object, e.g. engine glows), then in the world-stable frame (puffs left behind by an emitter or camera).
         static uint32_t f5_world_sprite_id(State* state, const hlslpp::float4x4& model, uint32_t node, uint32_t ordinal, float cx, float cy, float cz, float half) {
-            static const bool s_on = env_on("ROGUESQ_F5_SPRITE_WORLD_MATCH", true);
+            static const bool s_on = rs64env::on("ROGUESQ_F5_SPRITE_WORLD_MATCH", true);
             if (!s_on) return 0;
             const bool haveWorld = (s_world_task == state->displayListCounter);
             const float lr = std::max(half, 1.0f);
@@ -439,7 +425,7 @@ namespace RT64 {
             return id;
         }
         static bool f5_node_sprite_dense(State* state, uint32_t id) {
-            static const bool s_on = !env_on("ROGUESQ_F5_SPRITE_XFORM", true);
+            static const bool s_on = !rs64env::on("ROGUESQ_F5_SPRITE_XFORM", true);
             if (!s_on) return false;
             f5_sprite_count_rotate(state);
             auto it = s_sprites_prev.find(id);
@@ -452,7 +438,7 @@ namespace RT64 {
         static uint32_t s_node_alias[4][F5_NODE_MAP_SLOTS] = {};
         static rs64cable::CableRoles s_cable_roles;
         static bool f5_cable_ids_enabled() {
-            static const bool s = env_on("ROGUESQ_F5_CABLE_IDS", true);
+            static const bool s = rs64env::on("ROGUESQ_F5_CABLE_IDS", true);
             return s;
         }
         // A node only gets an interpolation id if it existed last frame (stable). Transient nodes
@@ -480,7 +466,7 @@ namespace RT64 {
             const uint32_t off = ringDst & 0x00FFFFFFu;
             const int buf = f5_ring_buffer(off);
             if (buf < 0) {
-                static const bool s_lg = env_on("ROGUESQ_LOG_INTERP_PAIR", false);
+                static const bool s_lg = rs64env::on("ROGUESQ_LOG_INTERP_PAIR", false);
                 static uint32_t s_n = 0;
                 if (s_lg && ((++s_n % 200) == 1)) std::fprintf(stderr, "[nodemap-outside] dst=%08X node=%08X count=%u\n", ringDst, nodeId, s_n);
                 return;
@@ -502,10 +488,10 @@ namespace RT64 {
             }
             s_nodes_cur.insert(nodeId);
             // With ROGUESQ_F5_NODE_STABLE_ONLY=1 a node gets an id only once it existed last frame; off by default, since an id from the first frame lets a new object pair one frame sooner (measured fewer unpaired draws).
-            static const bool s_stable_only = env_on("ROGUESQ_F5_NODE_STABLE_ONLY", false);
+            static const bool s_stable_only = rs64env::on("ROGUESQ_F5_NODE_STABLE_ONLY", false);
             s_node_map[buf][slot] = (!s_stable_only || s_nodes_prev.count(nodeId)) ? nodeId : 0u;
             s_node_alias[buf][slot] = (f5_cable_ids_enabled() && (ring == 0)) ? s_cable_roles.aliasFor(nodeId) : 0u;
-            { static const bool s_lg = env_on("ROGUESQ_LOG_INTERP_PAIR", false);
+            { static const bool s_lg = rs64env::on("ROGUESQ_LOG_INTERP_PAIR", false);
               static uint32_t s_frames = 0, s_hits = 0, s_subs = 0;
               if (s_lg && (ring == 0) && (s_node_alias[buf][slot] != 0)) s_hits++;
               if (s_lg && (ring == 0) && (slot == 0)) s_subs += (s_cable_roles.framesSinceSubmit <= 1) ? s_cable_roles.n : 0;
@@ -557,7 +543,7 @@ namespace RT64 {
         // Tracked by position: each face takes the id of the previous-frame face with the same texture and vertex count nearest its predicted position (world frame when the terrain root gives one, else camera space),
         // within its size; otherwise a fresh id, so a light pops rather than blending into a different one. 0 = leave as is.
         static uint32_t f5_baked_face_id(State* state, const RSP::Vertex* v, int n) {
-            static const bool s_on = env_on("ROGUESQ_F5_BAKED_VTX_INTERP", true);
+            static const bool s_on = rs64env::on("ROGUESQ_F5_BAKED_VTX_INTERP", true);
             if (!s_on || (n <= 0)) {
                 return 0;
             }
@@ -571,7 +557,7 @@ namespace RT64 {
             static uint32_t s_next = 1;
             if (state->displayListCounter != s_task) {
                 s_prevTask = s_task;
-                static const bool s_lgf = env_on("ROGUESQ_LOG_INTERP_PAIR", false);
+                static const bool s_lgf = rs64env::on("ROGUESQ_LOG_INTERP_PAIR", false);
                 if (s_lgf && !s_cur.empty()) {
                     std::map<uint32_t, int> perTex;
                     for (const Face& f : s_cur) perTex[f.tex]++;
@@ -680,7 +666,7 @@ namespace RT64 {
             }
             else {
                 cur.id = 0x30000000u | (s_next++ & 0x0FFFFFFFu);
-                static const bool s_lg = env_on("ROGUESQ_LOG_INTERP_PAIR", false);
+                static const bool s_lg = rs64env::on("ROGUESQ_LOG_INTERP_PAIR", false);
                 if (s_lg) {
                     float nd = -1.0f, nr = 0.0f;
                     int sameTex = 0, otherFrame = 0, used = 0;
@@ -703,7 +689,7 @@ namespace RT64 {
 
         // ROGUESQ_LOG_INTERP_PAIR: draws made while the transform group is AUTO (no interpolation id), per draw site, summed over 60 frames.
         void f5_hud_probe(State* state, const char* tag, float cx, float cy, float w, float h) {
-            static const bool s_on = env_on("ROGUESQ_LOG_HUD_PROBE", false);
+            static const bool s_on = rs64env::on("ROGUESQ_LOG_HUD_PROBE", false);
             if (!s_on) {
                 return;
             }
@@ -716,7 +702,7 @@ namespace RT64 {
 
         // Screen centre and size of the verts just loaded into the face slot.
         static void f5_hud_probe_slot(State* state, const char* tag, int base, int n) {
-            static const bool s_on = env_on("ROGUESQ_LOG_HUD_PROBE", false);
+            static const bool s_on = rs64env::on("ROGUESQ_LOG_HUD_PROBE", false);
             if (!s_on) {
                 return;
             }
@@ -733,7 +719,7 @@ namespace RT64 {
         }
 
         static void f5_count_auto(State* state, int site) {
-            static const bool s_on = env_on("ROGUESQ_LOG_INTERP_PAIR", false);
+            static const bool s_on = rs64env::on("ROGUESQ_LOG_INTERP_PAIR", false);
             if (!s_on) {
                 return;
             }
@@ -759,7 +745,7 @@ namespace RT64 {
 
         // ROGUESQ_LOG_INTERP_PAIR: do a node's face vertices (local space) change between frames? Split by zSource=PRIM (glows/shafts) vs normal faces.
         static void f5_probe_face_verts(State* state, const RSP::Vertex* v, int n, bool prim) {
-            static const bool s_on = env_on("ROGUESQ_LOG_INTERP_PAIR", false);
+            static const bool s_on = rs64env::on("ROGUESQ_LOG_INTERP_PAIR", false);
             if (!s_on) {
                 return;
             }
@@ -828,7 +814,7 @@ namespace RT64 {
         // Id for a camera-facing quad from the face record the game built it from (buildOrientedFaceGeometry hook). The record holds the particle's world position at +8,
         // so it tracks through camera turns; a new generation when the face was not drawn last frame or lands far from its predicted spot (the pool slot was reused). 0 = no record, or one drawn twice this frame.
         static uint32_t f5_oriented_face_id(State* state, uint32_t face) {
-            static const bool s_on = env_on("ROGUESQ_F5_ORIENTED_FACE_ID", true);
+            static const bool s_on = rs64env::on("ROGUESQ_F5_ORIENTED_FACE_ID", true);
             if (!s_on || (face < 0x80000000u))
             {
                 return 0;
@@ -894,12 +880,6 @@ namespace RT64 {
             return s_node_alias[buf][slot];
         }
 
-        // Kept for the sibling modules' declarations (the software MVP composer is gone).
-        bool f5_compose_mvp(const uint8_t*, float Mout[12]) {
-            for (int i = 0; i < 12; ++i) Mout[i] = 0.0f;
-            return false;
-        }
-
         // op_02's per-vertex RGBA buffer (declared in the internal header).
         thread_local uint32_t s_last_op02_colorbuf = 0, s_last_op02_colorcnt = 0;
 
@@ -926,7 +906,7 @@ namespace RT64 {
         // words), deduped by opcode. If a particle/sprite batch command is being silently consumed,
         // it shows here with structured (non-filler) payload.
         static void drop_log(const char* who, DisplayList** dl) {
-            static bool s_on = env_on("ROGUESQ_DROP_PROBE", false);
+            static bool s_on = rs64env::on("ROGUESQ_DROP_PROBE", false);
             if (!s_on) return;
             const uint32_t w0 = (*dl)->w0, w1 = (*dl)->w1;
             const uint8_t op = (uint8_t)(w0 >> 24);
@@ -1046,7 +1026,7 @@ namespace RT64 {
             const bool backLinked = fwdValid && f5_rd32(state, target + 4) == (0x80000000u | base);
             const bool linked = backLinked;
             // ROGUESQ_F5_LINK_PROBE: log the forward-valid-but-back-link-mismatch case (the overlay-drop signature).
-            { static const bool s_lp = env_on("ROGUESQ_F5_LINK_PROBE", false); static int s_lpn = 0;
+            { static const bool s_lp = rs64env::on("ROGUESQ_F5_LINK_PROBE", false); static int s_lpn = 0;
               if (s_lp && fwdValid && !backLinked && ++s_lpn <= 24) {
                   std::fprintf(stderr, "[f5-link] fwd-valid but bad back-link: base=%06X target=%06X prev=%08X (want %08X)\n",
                       base, target, f5_rd32(state, target + 4), 0x80000000u | base); std::fflush(stderr); } }
@@ -1054,7 +1034,7 @@ namespace RT64 {
             // Cap = F5_CHAIN_MAX, the window f5_chunk_revisit can still detect a cycle in. A dense frame
             // legitimately chains ~84 chunks (LucasArts flyover, 359 tiles / 1597 faces); the old cap of 64
             // truncated those lists mid-frame and dropped a contiguous block of terrain.
-            static const uint32_t s_chain_cap = [](){ const char* e = std::getenv("ROGUESQ_F5_CHAIN_CAP"); return (e && *e) ? (uint32_t)std::atoi(e) : (uint32_t)F5_CHAIN_MAX; }();
+            static const uint32_t s_chain_cap = uint32_t(rs64env::integer("ROGUESQ_F5_CHAIN_CAP", F5_CHAIN_MAX));
             const bool tooLong = d < (uint32_t)F5_MAX_DEPTH && s_chain_len[d] >= s_chain_cap;
             if (!linked || tooLong || target == base || ++s_chunk_hops > 4096u || f5_chunk_revisit(d, target)) {
                 static int s_n = 0;
@@ -1077,7 +1057,7 @@ namespace RT64 {
         }
 
         static bool f5_ran_off_chunk(State* state, const DisplayList* dl) {
-            static bool s_on = env_on("ROGUESQ_F5_CHUNK_BOUND", true);
+            static bool s_on = rs64env::on("ROGUESQ_F5_CHUNK_BOUND", true);
             if (!s_on) return false;
             const uint32_t off = f5_dl_off(state, dl);
             if (state->displayListCounter != s_chunk_counter) {   // new task: root chunk starts here
@@ -1109,7 +1089,7 @@ namespace RT64 {
 
                 // ROGUESQ_LOG_GFX_TASK: one line per finished F5 task (faces/entries/hops + whether a
                 // budget cap ended it) to correlate object flicker with dropped geometry.
-                { static bool s_tl = env_on("ROGUESQ_LOG_GFX_TASK", false);
+                { static bool s_tl = rs64env::on("ROGUESQ_LOG_GFX_TASK", false);
                   if (s_tl) { std::fprintf(stderr, "[f5-task] done before #%llu: faces=%u entries=%u hops=%u budget_trip=%u tiles=%u maxchain=%u\n",
                       (unsigned long long)s_chunk_counter, s_task_faces, s_task_entries, s_chunk_hops, s_task_budget_trip, s_task_tiles, s_task_maxchain); std::fflush(stderr); } }
                 s_task_budget_trip = 0; s_task_tiles = 0; s_task_maxchain = 0;
@@ -1255,7 +1235,7 @@ namespace RT64 {
                 }
             }
 
-            static const bool s_lg = env_on("ROGUESQ_LOG_MESH_ID", false);
+            static const bool s_lg = rs64env::on("ROGUESQ_LOG_MESH_ID", false);
             if (rebuilt && s_lg) {
                 std::fprintf(stderr, "[mesh-id] HOB table changed: %zu meshes, %zu DL chunks mapped\n", r.names.size(), r.chunkMesh.size());
             }
@@ -1899,7 +1879,7 @@ namespace RT64 {
 
         template <int OP>
         static void f5_mesh_probe(State* state, const DisplayList* dl) {
-            static const bool s_on = env_on("ROGUESQ_LOG_MESH_ID", false);
+            static const bool s_on = rs64env::on("ROGUESQ_LOG_MESH_ID", false);
             if (!s_on) return;
             F5MeshProbe& p = s_mesh_probe;
             F5MeshRegistry& reg = f5_mesh_registry(state);
@@ -2054,8 +2034,8 @@ namespace RT64 {
             // Per-task budgets: a stale call into recycled chunks otherwise storms the parser with thousands of
             // garbage faces. Ending the task drops the rest of one frame (HUD included), so the caps sit well above
             // a long draw distance with distant stand-ins (Rescue on Kessel at 8x passes 4096 faces).
-            static const uint32_t s_entry_cap = [](){ const char* e = std::getenv("ROGUESQ_F5_ENTRY_CAP"); return (e && *e) ? (uint32_t)std::atoi(e) : 16384u; }();
-            static const uint32_t s_face_cap = [](){ const char* e = std::getenv("ROGUESQ_F5_FACE_CAP"); return (e && *e) ? (uint32_t)std::atoi(e) : 65536u; }();
+            static const uint32_t s_entry_cap = uint32_t(rs64env::integer("ROGUESQ_F5_ENTRY_CAP", 16384));
+            static const uint32_t s_face_cap = uint32_t(rs64env::integer("ROGUESQ_F5_FACE_CAP", 65536));
             if (s_task_entries > s_entry_cap || s_task_faces > s_face_cap) {
                 s_task_budget_trip = 1;
                 static int s_n = 0;
@@ -2188,7 +2168,7 @@ namespace RT64 {
         // ROGUESQ_LOG_TERRAIN_CRACKS=1: per task, compare every tile-edge point's world height with the
         // neighbour tile's value at the same position; logs mismatches (cracks) every 5 s.
         static void f5_terrain_crack_check(State* state, int32_t x0, int32_t z0, float step, const float y5[25], int kind) {
-            static const bool s_on = env_on("ROGUESQ_LOG_TERRAIN_CRACKS", false);
+            static const bool s_on = rs64env::on("ROGUESQ_LOG_TERRAIN_CRACKS", false);
             if (!s_on) return;
             static std::unordered_map<uint64_t, std::pair<float, int>> s_pts;
             static uint64_t s_task = ~0ull;
@@ -2226,7 +2206,7 @@ namespace RT64 {
         // The ucode spans a tile over texels 0..dim-1, so neighbours meet one texel off; span the full dim under the game's clamp.
         // A wrap mask instead bleeds the opposite edge of transition textures.
         static int32_t f5_terrain_uv_span(State* state, int32_t span) {
-            static bool s_on = env_on("ROGUESQ_F5_TERRAIN_FULL_UV", true);
+            static bool s_on = rs64env::on("ROGUESQ_F5_TERRAIN_FULL_UV", true);
             if (!s_on) return span;
             const LoadTile& T = state->rdp->tiles[state->rsp->textureState.tile & 7];
             const int dim = ((T.lrs - T.uls) >> 2) + 1;
@@ -2244,7 +2224,7 @@ namespace RT64 {
         // The `05 05 00 xx` form DMAs a height/color grid and tessellates it (overlays 0x14/0x18); see f5_tile_grid.
         static void f5_tile_quad(State* state, DisplayList* rec) {
             if (!f5_native_active()) return;
-            static bool s_tiles = env_on("ROGUESQ_F5_TILES", true);
+            static bool s_tiles = rs64env::on("ROGUESQ_F5_TILES", true);
             if (!s_tiles) return;
             const uint32_t w1 = rec[0].w1, w2 = rec[1].w0;
             const uint32_t col[4] = { rec[1].w1, rec[2].w0, rec[2].w1, rec[3].w0 };
@@ -2283,14 +2263,8 @@ namespace RT64 {
 
         // ROGUESQ_F5_TERRAIN_SUB / _SUB_FAR (1-4) subdivide a 5x5 tile; far tiles (game shift >= 1) default to the near value, as a lower one leaves T-junction hairline cracks at the LOD boundary.
         static int f5_terrain_sub(bool farTile) {
-            static const int s_near = [] {
-                const char* v = std::getenv("ROGUESQ_F5_TERRAIN_SUB");
-                return std::clamp((v && *v) ? std::atoi(v) : 2, 1, 4);
-            }();
-            static const int s_far = [] {
-                const char* v = std::getenv("ROGUESQ_F5_TERRAIN_SUB_FAR");
-                return std::clamp((v && *v) ? std::atoi(v) : s_near, 1, 4);
-            }();
+            static const int s_near = std::clamp(rs64env::integer("ROGUESQ_F5_TERRAIN_SUB", 2), 1, 4);
+            static const int s_far = std::clamp(rs64env::integer("ROGUESQ_F5_TERRAIN_SUB_FAR", s_near), 1, 4);
             return farTile ? s_far : s_near;
         }
 
@@ -2356,7 +2330,7 @@ namespace RT64 {
         // bilinear-subdivided to a finer mesh (ROGUESQ_F5_TERRAIN_SUB, default 2) for smooth slopes.
         static void f5_tile_grid(State* state, DisplayList* rec) {
             if (!f5_native_active()) return;
-            static bool s_grid = env_on("ROGUESQ_F5_TERRAIN", true);
+            static bool s_grid = rs64env::on("ROGUESQ_F5_TERRAIN", true);
             if (!s_grid) return;
             const uint32_t hptr = rec[1].w0 & 0x00FFFFFFu;   // N*N s8 heights
             const uint32_t cptr = rec[1].w1 & 0x00FFFFFFu;   // N*N RGBA8888 vertex colors
@@ -2415,7 +2389,7 @@ namespace RT64 {
             // 4-sample-span line by w. Equal and w != 0: odd samples morph toward their neighbours' midpoint.
             // The game sends the coarser tile down "equal" and the finer down "differs" with the coarser
             // tile's w, so a shared edge moves in lockstep on both sides.
-            static bool s_seam = env_on("ROGUESQ_F5_TERRAIN_SEAMS", true);
+            static bool s_seam = rs64env::on("ROGUESQ_F5_TERRAIN_SEAMS", true);
             const uint32_t nbw = rec[0].w1;
             const int nbXmin = (int)((nbw >> 24) & 0xFF), nbXmax = (int)((nbw >> 16) & 0xFF);
             const int nbZmin = (int)((nbw >> 8) & 0xFF), nbZmax = (int)(nbw & 0xFF);
@@ -2488,7 +2462,7 @@ namespace RT64 {
                 for (int ch = 0; ch < 4; ++ch) C[r * 5 + c][ch] = Lt[r][c][1 + ch];
             }
             // ROGUESQ_LOG_GFX_TASK: trace near-LOD (shift 0) and blended tiles to catch transition garbage.
-            { static bool s_lg = env_on("ROGUESQ_LOG_GFX_TASK", false); static int s_n = 0;
+            { static bool s_lg = rs64env::on("ROGUESQ_LOG_GFX_TASK", false); static int s_n = 0;
               const uint32_t w5 = rec[2].w1 & 0xFFFF, w6 = rec[3].w0 & 0xFFFF;
               bool blank = true; for (int k = 0; k < 25 && blank; ++k) blank = (H[k] == 0.0f);
               if (s_lg && (shift == 0 || w5 || w6 || blank) && ++s_n <= 600) {
@@ -2535,7 +2509,7 @@ namespace RT64 {
         // colours as-is and interpolated in between. The record differs where the game lit the cell with runtime lights (the lit pool,
         // unpackGridVertexBytes 0x8004B644); returns whether it did. ROGUESQ_F5_STATIC_TERRAIN_CHECK=1 logs sample totals every 300 tasks.
         static bool f5_static_record_colors(State* state, const DisplayList* rec, const uint8_t* colors, bool flat, float C[25][4]) {
-            static const bool s_log = env_on("ROGUESQ_F5_STATIC_TERRAIN_CHECK", false);
+            static const bool s_log = rs64env::on("ROGUESQ_F5_STATIC_TERRAIN_CHECK", false);
             static uint64_t s_task = ~0ull;
             static uint32_t s_tasks = 0, s_same = 0, s_diff = 0;
             if (s_log && (state->displayListCounter != s_task)) {
@@ -2646,7 +2620,7 @@ namespace RT64 {
                 if ((rel >= 0) && (rel % 0x1E == 0) && (t < (int64_t)m.tileCell.size()) && (m.tileCell[t] >= 0)) {
                     const int32_t ex = m.tileCell[t] % (int32_t)m.width - rx / rs64lights::TerrainTileSpan;
                     const int32_t ez = m.tileCell[t] / (int32_t)m.width - rz / rs64lights::TerrainTileSpan;
-                    static const bool s_check = env_on("ROGUESQ_F5_STATIC_TERRAIN_CHECK", false);
+                    static const bool s_check = rs64env::on("ROGUESQ_F5_STATIC_TERRAIN_CHECK", false);
                     static uint64_t s_mismatchTask = ~0ull;
                     if (s_check && ((ex != s_ox) || (ez != s_oz)) && (s_mismatchTask != state->displayListCounter)) {
                         s_mismatchTask = state->displayListCounter;
@@ -2718,7 +2692,7 @@ namespace RT64 {
             }
             // ROGUESQ_F5_STATIC_TERRAIN_CHECK also counts replaced records and why the rest fell back, every 300 tasks.
             enum { Replaced, NoMap, NoCamera, Shape, Outside, Missing, Heights, Lit, Reasons };
-            static const bool s_count = env_on("ROGUESQ_F5_STATIC_TERRAIN_CHECK", false);
+            static const bool s_count = rs64env::on("ROGUESQ_F5_STATIC_TERRAIN_CHECK", false);
             static uint32_t s_counts[Reasons] = {};
             static uint64_t s_countTask = ~0ull;
             static uint32_t s_countTasks = 0;
@@ -2916,7 +2890,7 @@ namespace RT64 {
                 if (wl.gameCallCount != calls + 1)
                 {
                     // ROGUESQ_F5_STATIC_TERRAIN_CHECK: the anchor merged into another call, so this record falls back to the game's own terrain draw.
-                    static const bool s_checkMiss = env_on("ROGUESQ_F5_STATIC_TERRAIN_CHECK", false);
+                    static const bool s_checkMiss = rs64env::on("ROGUESQ_F5_STATIC_TERRAIN_CHECK", false);
 
                     if (s_checkMiss) {
                         std::fprintf(stderr, "[static-terrain] anchor not its own call (calls %u -> %u) task %llu\n", calls, wl.gameCallCount, (unsigned long long)state->displayListCounter);
@@ -2981,7 +2955,7 @@ namespace RT64 {
             wl.rs64Terrain.exactZ = oz * rs64lights::TerrainTileSpan - pass.offsetZ;
 
             // ROGUESQ_F5_STATIC_TERRAIN_CHECK: across a grid re-center, origin * 512 - offset stays put when the regrid compensation keeps the map still.
-            static const bool s_check = env_on("ROGUESQ_F5_STATIC_TERRAIN_CHECK", false);
+            static const bool s_check = rs64env::on("ROGUESQ_F5_STATIC_TERRAIN_CHECK", false);
             static uint64_t s_offTask = ~0ull;
 
             if (s_check && ((s_mv_off_x != pass.offsetX) || (s_mv_off_z != pass.offsetZ)) && (s_offTask != state->displayListCounter))
@@ -3013,7 +2987,7 @@ namespace RT64 {
             const uint32_t w0 = (*dl)->w0;
 
             // ROGUESQ_LOG_GFX_TASK: an op-05 header whose byte 1 (samples per row) is not 5 is walked as a plain 8-byte command.
-            static const bool s_lg = env_on("ROGUESQ_LOG_GFX_TASK", false);
+            static const bool s_lg = rs64env::on("ROGUESQ_LOG_GFX_TASK", false);
             static int s_n = 0;
 
             if (s_lg && ((w0 >> 16) & 0xFFu) != 0x05u && ++s_n <= 40) {
@@ -3065,7 +3039,7 @@ namespace RT64 {
         static bool s_f5_fog_stock = false;
         static void f5_apply_fog(State* state) {
             static int s_nofog = -1;
-            if (s_nofog < 0) { const char* e = std::getenv("ROGUESQ_F5_NO_FOG"); s_nofog = (e && e[0] && e[0] != '0') ? 1 : 0; }
+            if (s_nofog < 0) { s_nofog = rs64env::on("ROGUESQ_F5_NO_FOG") ? 1 : 0; }
             if (s_nofog) { state->rsp->fog.mul = 0.0f; state->rsp->fog.offset = 0.0f; state->rsp->fogChanged = true; return; }
             double m = s_f5_fog_m;
             double o = s_f5_fog_o;
@@ -3145,7 +3119,7 @@ namespace RT64 {
         // near terrain get clipped at the exact viewport edges. Match stock: apply ratio 2 (env-tunable).
         static void f5_apply_clip_ratio(State* state) {
             static int s_cr = -1;
-            if (s_cr < 0) { const char* v = std::getenv("ROGUESQ_F5_CLIPRATIO"); s_cr = (v && *v) ? std::atoi(v) : 2; if (s_cr < 1) s_cr = 1; if (s_cr > 15) s_cr = 15; }
+            if (s_cr < 0) { s_cr = rs64env::integer("ROGUESQ_F5_CLIPRATIO", 2); if (s_cr < 1) s_cr = 1; if (s_cr > 15) s_cr = 15; }
             state->rsp->setClipRatioAll((int16_t)s_cr);
         }
 
@@ -3188,7 +3162,7 @@ namespace RT64 {
         static bool s_cull_skip = false;
         static float f5_cull_dist2() {
             static float d2 = -1.0f;
-            if (d2 < -0.5f) { const char* e = std::getenv("ROGUESQ_F5_CULL_DIST"); float d = (e && e[0]) ? (float)std::atof(e) : 0.0f; d2 = (d > 0.0f) ? d * d : 0.0f; }
+            if (d2 < -0.5f) { const float d = rs64env::number("ROGUESQ_F5_CULL_DIST"); d2 = (d > 0.0f) ? d * d : 0.0f; }
             return d2;
         }
 
@@ -3233,7 +3207,7 @@ namespace RT64 {
                     const float ty = (float)rd_be_s16(ram, addr + 2 * 13) + (float)rd_be_u16(ram, addr + 32 + 2 * 13) / 65536.0f;
                     const float tz = (float)rd_be_s16(ram, addr + 2 * 14) + (float)rd_be_u16(ram, addr + 32 + 2 * 14) / 65536.0f;
                     s_cull_skip = (tx * tx + ty * ty + tz * tz) > thr2;
-                    { static bool s_lg = env_on("ROGUESQ_F5_CULL_LOG", false); static int s_n = 0;
+                    { static bool s_lg = rs64env::on("ROGUESQ_F5_CULL_LOG", false); static int s_n = 0;
                       if (s_lg && (++s_n & 31) == 0) { std::fprintf(stderr, "[f5-cull] dist=%.0f thr=%.0f skip=%d\n",
                           std::sqrt(tx*tx+ty*ty+tz*tz), std::sqrt(thr2), (int)s_cull_skip); std::fflush(stderr); } }
                 } else {
@@ -3251,7 +3225,7 @@ namespace RT64 {
                           id = 0x20000000u | (nodePtr & 0x00FFFFFFu) | (f5_node_regrid_generation(state->RDRAM, nodePtr) << 24);
                           if (s_cut_node == nodePtr) {
                               state->ext.workloadQueue->workloads[state->ext.workloadQueue->writeCursor].rs64Cut = true;
-                              static const bool s_logCut = env_on("ROGUESQ_F5_STATIC_TERRAIN_CHECK", false);
+                              static const bool s_logCut = rs64env::on("ROGUESQ_F5_STATIC_TERRAIN_CHECK", false);
                               if (s_logCut) {
                                   std::fprintf(stderr, "[cut] id %08X task %llu\n", id, (unsigned long long)state->displayListCounter);
                               }
@@ -3275,7 +3249,7 @@ namespace RT64 {
                   }
                   s_mv_candidate_id = id;
                   s_mv_last_w1 = w1;
-                  { static const bool s_lg = env_on("ROGUESQ_LOG_INTERP_PAIR", false);
+                  { static const bool s_lg = rs64env::on("ROGUESQ_LOG_INTERP_PAIR", false);
                     if (s_lg && (id == 0)) {
                         static std::map<uint32_t, uint32_t> s_hist;
                         static uint64_t s_ht = ~0ull;
@@ -3412,7 +3386,7 @@ namespace RT64 {
 
         // ROGUESQ_F5_FLIPBOOK_BLEND (default on): tags the next draw with the effect's id so its animation image crossfades from the previous one. The new call needs its own tile entries.
         static void f5_flipbook_mark(State* state, uint32_t id) {
-            static const bool s_on = env_on("ROGUESQ_F5_FLIPBOOK_BLEND", true);
+            static const bool s_on = rs64env::on("ROGUESQ_F5_FLIPBOOK_BLEND", true);
 
             if (!s_on || (state->drawCall.rs64FlipbookId == id)) {
                 return;
@@ -3428,7 +3402,7 @@ namespace RT64 {
         // screen-space texrect. First-pass HLE: emit a quad around the cached center (op_04) with the
         // record color + bound texture, GPU-projected. Gated ROGUESQ_F5_SPRITES (off until validated).
         void op_bd_sprite(State* state, DisplayList** dl) {
-            static bool s_on = env_on("ROGUESQ_F5_SPRITES", true);   // F5 billboard sprites (fire/smoke/explosion); ROGUESQ_F5_SPRITES=0 disables
+            static bool s_on = rs64env::on("ROGUESQ_F5_SPRITES", true);   // F5 billboard sprites (fire/smoke/explosion); ROGUESQ_F5_SPRITES=0 disables
             const uint32_t w0 = (*dl)->w0, w1 = (*dl)->w1;
             if (s_on && f5_native_active()) {
                 const uint32_t slot = ((w0 >> 5) & 0x7F8u) / 0x28u;
@@ -3473,10 +3447,10 @@ namespace RT64 {
                     float rx = R[0], ry = R[1], rz = R[2], ux = U[0], uy = U[1], uz = U[2];
                     const bool haveView = (rx*rx + ry*ry + rz*rz) > 0.01f && (ux*ux + uy*uy + uz*uz) > 0.01f;
                     // Each sprite gets its own transform (the node transform moved to the sprite centre, quad built around the origin) so interpolation can pair particles one by one.
-                    static const bool s_sprite_xform = env_on("ROGUESQ_F5_SPRITE_XFORM", true);
+                    static const bool s_sprite_xform = rs64env::on("ROGUESQ_F5_SPRITE_XFORM", true);
                     const float ox = s_sprite_xform ? 0.0f : (float)c.x, oy = s_sprite_xform ? 0.0f : (float)c.y, oz = s_sprite_xform ? 0.0f : (float)c.z;
                     // With a per-sprite transform, build the quad at a fixed reference size and put the sprite's size in the transform scale, so a growing puff interpolates its size instead of stepping at the game rate. ROGUESQ_F5_SPRITE_SCALE_XFORM=0 bakes the size into the verts.
-                    static const bool s_scale_xform = env_on("ROGUESQ_F5_SPRITE_SCALE_XFORM", true);
+                    static const bool s_scale_xform = rs64env::on("ROGUESQ_F5_SPRITE_SCALE_XFORM", true);
                     constexpr float SpriteRefSize = 256.0f;
                     const float spriteSize = (float)std::max(halfX, halfY);
                     const bool scaleXform = s_sprite_xform && s_scale_xform && haveView;
@@ -3509,7 +3483,7 @@ namespace RT64 {
                     state->rdp->setPrimColor(0, 0xFF, w1);
                     // The ucode sets the fog register per sprite (w2 RGB, alpha = the centre's fog) and leaves it set; the glint faces drawn after it blend fog by FOG
                     // alpha (otherL C410...), so without this they take the level's fog colour at full alpha. ROGUESQ_F5_SPRITE_FOGCOLOR=0 disables for A/B.
-                    static const bool s_spriteFog = env_on("ROGUESQ_F5_SPRITE_FOGCOLOR", true);
+                    static const bool s_spriteFog = rs64env::on("ROGUESQ_F5_SPRITE_FOGCOLOR", true);
                     if (s_spriteFog && (state->rsp->geometryModeStack[state->rsp->geometryModeStackSize - 1] & G_FOG)) {
                         const float cz = (float)c.x * (float)mv[0][2] + (float)c.y * (float)mv[1][2] + (float)c.z * (float)mv[2][2] + (float)mv[3][2];
                         const float cw = (float)c.x * (float)mv[0][3] + (float)c.y * (float)mv[1][3] + (float)c.z * (float)mv[2][3] + (float)mv[3][3];
@@ -3526,7 +3500,7 @@ namespace RT64 {
                     // primDepth from the last DL command (near on the first cinematic pass, far after the
                     // attract demo runs) which is the loop-dependent "behind terrain" bug.
                     // The quad is screen-parallel, so per-vertex depth equals primDepth on real frames and, unlike primDepth, follows frame interpolation (a constant primDepth sinks glows into the surfaces they sit on). ROGUESQ_F5_SPRITE_PIXEL_Z=0 restores zSource=PRIM.
-                    static const bool s_pixelz = env_on("ROGUESQ_F5_SPRITE_PIXEL_Z", true);
+                    static const bool s_pixelz = rs64env::on("ROGUESQ_F5_SPRITE_PIXEL_Z", true);
                     state->rdp->setOtherMode(state->rdp->otherMode.H, s_pixelz ? 0x00504A50u : 0x00504A54u);
                     // Billboards are UNLIT (hw draws them as screen-space texrects). Force lighting off
                     // so the scene's environment light doesn't modulate the sprite (white-scene -> white,
@@ -3820,7 +3794,7 @@ namespace RT64 {
 
         // Crosshair rings are texrects, which RT64 never interpolates. A texrect that matches a ring element of the HUD struct draws instead as a camera-space quad on its own transform id. ROGUESQ_F5_XHAIR_QUAD=0 keeps the texrect.
         bool f5_crosshair_quad(State* state, const DisplayList* dl) {
-            static const bool s_on = env_on("ROGUESQ_F5_XHAIR_QUAD", true);
+            static const bool s_on = rs64env::on("ROGUESQ_F5_XHAIR_QUAD", true);
             if (!s_on || !f5_native_active() || (((state->rdp->otherMode.H >> 20) & 3u) != 0)) {
                 return false;
             }
@@ -3903,7 +3877,7 @@ namespace RT64 {
         // The credits scroll their glyphs as texrects, which RT64 never interpolates, so they moved at 30 fps. Drawn as quads on stable ids they
         // interpolate like the 3D scene. ROGUESQ_F5_CREDITS_QUAD=0 keeps the texrects.
         bool f5_credits_glyph_quad(State* state, const DisplayList* dl) {
-            static const bool s_on = env_on("ROGUESQ_F5_CREDITS_QUAD", true);
+            static const bool s_on = rs64env::on("ROGUESQ_F5_CREDITS_QUAD", true);
             const uint32_t cycle = (state->rdp->otherMode.H >> 20) & 3u;
             if (!s_on || !f5_native_active() || !rs64_credits_active() || (cycle > 1)) {
                 return false;
@@ -4043,6 +4017,108 @@ namespace RT64 {
             return (int16_t)(v > 32767 ? 32767 : (v < -32768 ? -32768 : v));
         }
 
+        // Pushes the interpolation group a tracked face draws under; the caller pops it after drawing.
+        static void f5_push_face_id(State* state, uint32_t id) {
+            state->rsp->matrixId(id, /*push*/true, /*proj*/false, /*decompose*/true,
+                G_EX_COMPONENT_INTERPOLATE, G_EX_COMPONENT_INTERPOLATE, G_EX_COMPONENT_INTERPOLATE, G_EX_COMPONENT_INTERPOLATE, G_EX_COMPONENT_INTERPOLATE,
+                G_EX_COMPONENT_AUTO, G_EX_COMPONENT_SKIP, G_EX_COMPONENT_AUTO, G_EX_COMPONENT_AUTO,
+                G_EX_ORDER_LINEAR, G_EX_ASPECT_AUTO, G_EX_EDIT_NONE, /*idIsAddress*/false, /*editGroup*/false);
+            state->rsp->modelViewProjChanged = true;
+        }
+
+        // VR: a camera-facing quad (glints, fire) faces the game camera, so a turned head saw it edge-on. It is centred on its own transform, which
+        // the head-rotation pass turns toward the eye like a sprite.
+        static void f5_vr_billboard(State* state, RSP::Vertex* tmp, int n, const hlslpp::float4x4& savedModel) {
+            auto& modelTop = state->rsp->modelMatrixStack[state->rsp->modelMatrixStackSize - 1];
+            float cx = 0.0f;
+            float cy = 0.0f;
+            float cz = 0.0f;
+            for (int k = 0; k < n; ++k) {
+                cx += tmp[k].x;
+                cy += tmp[k].y;
+                cz += tmp[k].z;
+            }
+
+            cx = std::round(cx / n);
+            cy = std::round(cy / n);
+            cz = std::round(cz / n);
+
+            for (int k = 0; k < n; ++k) {
+                tmp[k].x = (int16_t)(tmp[k].x - cx);
+                tmp[k].y = (int16_t)(tmp[k].y - cy);
+                tmp[k].z = (int16_t)(tmp[k].z - cz);
+            }
+
+            const hlslpp::float4x4 toCentre(1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, cx, cy, cz, 1);
+            modelTop = hlslpp::mul(toCentre, savedModel);
+            state->rsp->modelViewProjChanged = true;
+            state->rsp->rs64Billboard = true;
+        }
+
+        // VR crawl: the starfield sits only ~4x the logo's depth, a wall right behind the text in stereo. Scaling it about the eye keeps every star on
+        // its view ray and moves the sheet back; the planet backdrop follows it (s_crawl_star_depth).
+        static void f5_vr_crawl_stars(State* state, const hlslpp::float4x4& savedModel) {
+            auto& modelTop = state->rsp->modelMatrixStack[state->rsp->modelMatrixStackSize - 1];
+            constexpr float kStarPush = 2.0f;
+            const hlslpp::float4x4 proj = state->rsp->viewProjMatrixStack[state->rsp->projectionMatrixStackSize - 1];
+            const float w = float(proj[2][3]);
+            const float depth = std::fabs(float(savedModel[3][2]));
+            float push = kStarPush;
+            if ((std::fabs(w) >= 1e-6f) && (depth > 0.0f)) {
+                const float a = float(proj[2][2]) / w;
+                const float b = float(proj[3][2]) / w;
+                const float farPlane = std::max(std::fabs(b / (1.0f - a)), std::fabs(b / (-1.0f - a)));
+                if (std::isfinite(farPlane)) {
+                    push = std::clamp(0.5f * farPlane / depth, 1.0f, kStarPush);
+                }
+            }
+
+            const hlslpp::float4x4 scale(push, 0, 0, 0, 0, push, 0, 0, 0, 0, push, 0, 0, 0, 0, 1);
+            modelTop = hlslpp::mul(savedModel, scale);
+            s_crawl_star_depth = depth * push;
+            state->rsp->modelViewProjChanged = true;
+        }
+
+        // Full-screen overlay quads (the pause dim) are world quads sized to the 4:3 frustum; widescreen would leave the sides uncovered, so they grow in their own plane.
+        static void f5_widen_overlay_quad(State* state, RSP::Vertex* tmp, int n) {
+            const int wc = state->ext.workloadQueue->writeCursor;
+            const auto &pt = state->ext.workloadQueue->workloads[wc].drawData.posTransformed;
+            float x0 = 9, x1 = -9, y0 = 9, y1 = -9;
+            bool front = true;
+            for (int k = 0; k < n; ++k) {
+                const auto &p = pt[state->rsp->indices[F5_FACE_SLOT + k]];
+                const float w = (float)p[3];
+                if (w <= 0.0f) {
+                    front = false;
+                    break;
+                }
+                const float x = (float)p[0] / w, y = (float)p[1] / w;
+                x0 = std::min(x0, x);
+                x1 = std::max(x1, x);
+                y0 = std::min(y0, y);
+                y1 = std::max(y1, y);
+            }
+            const bool fullScreen = front && (x0 <= -1.0f) && (x1 >= 1.0f) && (y0 <= -1.0f) && (y1 >= 1.0f) && (x1 < 2.0f) && (x0 > -2.0f) && (std::fabs(x0 + x1) < 0.2f) && (std::fabs(y0 + y1) < 0.2f);
+            if (fullScreen) {
+                float cx = 0, cy = 0, cz = 0;
+                for (int k = 0; k < n; ++k) {
+                    cx += tmp[k].x;
+                    cy += tmp[k].y;
+                    cz += tmp[k].z;
+                }
+                cx /= n;
+                cy /= n;
+                cz /= n;
+                auto grow = [](float c, int16_t v) { return (int16_t)std::clamp(c + (v - c) * 4.0f, -32768.0f, 32767.0f); };
+                for (int k = 0; k < n; ++k) {
+                    tmp[k].x = grow(cx, tmp[k].x);
+                    tmp[k].y = grow(cy, tmp[k].y);
+                    tmp[k].z = grow(cz, tmp[k].z);
+                }
+                state->rsp->setVertex(0x80000000u | (F5_VTX_SCRATCH + F5_FACE_SLOT * sizeof(RSP::Vertex)), n, F5_FACE_SLOT);
+            }
+        }
+
         // Emit one face from cache indices. Texcoords are per-face, so the referenced vertices are
         // re-emitted into temp slots with their UVs scaled by the current 03 82 texcoord scale.
         static void f5_emit_face(State* state, const uint32_t* idx, int n, const uint32_t* st, uint32_t colorWord) {
@@ -4127,70 +4203,24 @@ namespace RT64 {
                         }
 
                         if (id != 0) {
-                            state->rsp->matrixId(id, /*push*/true, /*proj*/false, /*decompose*/true,
-                                G_EX_COMPONENT_INTERPOLATE, G_EX_COMPONENT_INTERPOLATE, G_EX_COMPONENT_INTERPOLATE, G_EX_COMPONENT_INTERPOLATE, G_EX_COMPONENT_INTERPOLATE,
-                                G_EX_COMPONENT_AUTO, G_EX_COMPONENT_SKIP, G_EX_COMPONENT_AUTO, G_EX_COMPONENT_AUTO,
-                                G_EX_ORDER_LINEAR, G_EX_ASPECT_AUTO, G_EX_EDIT_NONE, /*idIsAddress*/false, /*editGroup*/false);
-                            state->rsp->modelViewProjChanged = true;
+                            f5_push_face_id(state, id);
                             bakedGroup = true;
                             flipId = ((id >> 28) == 0xAu) ? id : 0u;
                         }
                     }
                 }
-                // VR: a camera-facing quad (glints, fire) faces the game camera, so a turned head saw it edge-on. Centre it on its own transform, which
-                // the head-rotation pass turns toward the eye like a sprite.
                 auto& modelTop = state->rsp->modelMatrixStack[state->rsp->modelMatrixStackSize - 1];
                 const hlslpp::float4x4 savedModel = modelTop;
                 const bool billboard = (flipId != 0) && (n >= 3) && (rs64_vr_active() != 0);
                 if (billboard) {
-                    float cx = 0.0f;
-                    float cy = 0.0f;
-                    float cz = 0.0f;
-                    for (int k = 0; k < n; ++k) {
-                        cx += tmp[k].x;
-                        cy += tmp[k].y;
-                        cz += tmp[k].z;
-                    }
-
-                    cx = std::round(cx / n);
-                    cy = std::round(cy / n);
-                    cz = std::round(cz / n);
-
-                    for (int k = 0; k < n; ++k) {
-                        tmp[k].x = (int16_t)(tmp[k].x - cx);
-                        tmp[k].y = (int16_t)(tmp[k].y - cy);
-                        tmp[k].z = (int16_t)(tmp[k].z - cz);
-                    }
-
-                    const hlslpp::float4x4 toCentre(1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, cx, cy, cz, 1);
-                    modelTop = hlslpp::mul(toCentre, savedModel);
-                    state->rsp->modelViewProjChanged = true;
-                    state->rsp->rs64Billboard = true;
+                    f5_vr_billboard(state, tmp, n, savedModel);
                 }
 
-                // VR crawl: the starfield (texture x shade on an intensity texture) sits only ~4x the logo's depth, a wall right behind the text in stereo.
-                // Scaling it about the eye keeps every star on its view ray and moves the sheet back; the planet backdrop follows it (s_crawl_star_depth).
+                // VR crawl: the starfield is pushed back about the eye.
                 const bool crawlStars = !billboard && (rs64_vr_active() != 0) && (rs64_crawl_playing() != 0) && (state->rdp->texture.fmt == G_IM_FMT_I) &&
                     ((cc.L & 0x00FFFFFFu) == 0x00127FFFu) && (cc.H == 0xFFFFFC3Fu);
                 if (crawlStars) {
-                    constexpr float kStarPush = 2.0f;
-                    const hlslpp::float4x4 proj = state->rsp->viewProjMatrixStack[state->rsp->projectionMatrixStackSize - 1];
-                    const float w = float(proj[2][3]);
-                    const float depth = std::fabs(float(savedModel[3][2]));
-                    float push = kStarPush;
-                    if ((std::fabs(w) >= 1e-6f) && (depth > 0.0f)) {
-                        const float a = float(proj[2][2]) / w;
-                        const float b = float(proj[3][2]) / w;
-                        const float farPlane = std::max(std::fabs(b / (1.0f - a)), std::fabs(b / (-1.0f - a)));
-                        if (std::isfinite(farPlane)) {
-                            push = std::clamp(0.5f * farPlane / depth, 1.0f, kStarPush);
-                        }
-                    }
-
-                    const hlslpp::float4x4 scale(push, 0, 0, 0, 0, push, 0, 0, 0, 0, push, 0, 0, 0, 0, 1);
-                    modelTop = hlslpp::mul(savedModel, scale);
-                    s_crawl_star_depth = depth * push;
-                    state->rsp->modelViewProjChanged = true;
+                    f5_vr_crawl_stars(state, savedModel);
                 }
 
                 // The crawl blends the stars toward black by their fog amount, and VR measures fog by distance, past the flat depth (pushed or not), so the
@@ -4203,49 +4233,13 @@ namespace RT64 {
                 }
                 state->rsp->setVertex(0x80000000u | (F5_VTX_SCRATCH + F5_FACE_SLOT * sizeof(RSP::Vertex)), n, F5_FACE_SLOT);
                 state->rsp->rs64Billboard = false;
-                // Full-screen overlay quads (the pause dim) are world quads sized to the 4:3 frustum; widescreen would leave the sides uncovered, so grow them in their own plane.
-                static const bool s_widen_overlay = env_on("ROGUESQ_F5_OVERLAY_WIDEN", true);
+                static const bool s_widen_overlay = rs64env::on("ROGUESQ_F5_OVERLAY_WIDEN", true);
                 if (s_widen_overlay && !billboard && (n == 4) && (st == nullptr)) {
-                    const int wc = state->ext.workloadQueue->writeCursor;
-                    const auto &pt = state->ext.workloadQueue->workloads[wc].drawData.posTransformed;
-                    float x0 = 9, x1 = -9, y0 = 9, y1 = -9;
-                    bool front = true;
-                    for (int k = 0; k < n; ++k) {
-                        const auto &p = pt[state->rsp->indices[F5_FACE_SLOT + k]];
-                        const float w = (float)p[3];
-                        if (w <= 0.0f) {
-                            front = false;
-                            break;
-                        }
-                        const float x = (float)p[0] / w, y = (float)p[1] / w;
-                        x0 = std::min(x0, x);
-                        x1 = std::max(x1, x);
-                        y0 = std::min(y0, y);
-                        y1 = std::max(y1, y);
-                    }
-                    const bool fullScreen = front && (x0 <= -1.0f) && (x1 >= 1.0f) && (y0 <= -1.0f) && (y1 >= 1.0f) && (x1 < 2.0f) && (x0 > -2.0f) && (std::fabs(x0 + x1) < 0.2f) && (std::fabs(y0 + y1) < 0.2f);
-                    if (fullScreen) {
-                        float cx = 0, cy = 0, cz = 0;
-                        for (int k = 0; k < n; ++k) {
-                            cx += tmp[k].x;
-                            cy += tmp[k].y;
-                            cz += tmp[k].z;
-                        }
-                        cx /= n;
-                        cy /= n;
-                        cz /= n;
-                        auto grow = [](float c, int16_t v) { return (int16_t)std::clamp(c + (v - c) * 4.0f, -32768.0f, 32767.0f); };
-                        for (int k = 0; k < n; ++k) {
-                            tmp[k].x = grow(cx, tmp[k].x);
-                            tmp[k].y = grow(cy, tmp[k].y);
-                            tmp[k].z = grow(cz, tmp[k].z);
-                        }
-                        state->rsp->setVertex(0x80000000u | (F5_VTX_SCRATCH + F5_FACE_SLOT * sizeof(RSP::Vertex)), n, F5_FACE_SLOT);
-                    }
+                    f5_widen_overlay_quad(state, tmp, n);
                 }
                 float flatDepth = -1.0f;
                 if ((state->rdp->otherMode.L & 0x04u) && !s_prim_depth_from_game) {
-                    static const bool s_mpd = env_on("ROGUESQ_F5_MESH_PRIMDEPTH", true);
+                    static const bool s_mpd = rs64env::on("ROGUESQ_F5_MESH_PRIMDEPTH", true);
                     if (s_mpd) {
                         // Depth from the verts just transformed (posScreen.z == the GPU depth), not a
                         // re-multiply through rsp->modelViewProjMatrix, which is stale here -- see op_bd.
@@ -4266,14 +4260,14 @@ namespace RT64 {
                 }
                 // A constant primDepth does not follow frame interpolation, so glows and light shafts sink into (or pop out of) the surfaces they sit on between real frames.
                 // ROGUESQ_F5_PRIM_FLATTEN puts the verts on the primDepth plane instead and draws with per-vertex depth; =0 keeps zSource=PRIM.
-                static const bool s_flatten = env_on("ROGUESQ_F5_PRIM_FLATTEN", true);
+                static const bool s_flatten = rs64env::on("ROGUESQ_F5_PRIM_FLATTEN", true);
                 const uint32_t savedL = state->rdp->otherMode.L;
                 bool flattened = false;
                 bool flatGroup = false;
                 if (s_flatten && !billboard && !crawlStars && (flatDepth >= 0.0f) && (n <= 8) && f5_flatten_to_depth(state, tmp, n, flatDepth)) {
                     // Flattened verts depend on this frame's camera, so between real frames they must blend too: each face gets its own id (node + PRIM face order) with vertex interpolation.
-                    static const bool s_flat_vtx = env_on("ROGUESQ_F5_PRIM_FLATTEN_VTX", true);
-                    { static const bool s_lg = env_on("ROGUESQ_LOG_INTERP_PAIR", false); static int s_nn = 0;
+                    static const bool s_flat_vtx = rs64env::on("ROGUESQ_F5_PRIM_FLATTEN_VTX", true);
+                    { static const bool s_lg = rs64env::on("ROGUESQ_LOG_INTERP_PAIR", false); static int s_nn = 0;
                       if (s_lg && (s_mv_candidate_id == 0) && ((++s_nn % 100) == 1)) {
                           const auto &grp = state->rsp->extended.modelMatrixIdStack[state->rsp->extended.modelMatrixIdStackSize - 1];
                           std::fprintf(stderr, "[flat-noid] lastMV=%08X grp=%08X stack=%d count=%d\n", s_mv_last_w1, grp.matrixId, state->rsp->extended.modelMatrixIdStackSize, s_nn); } }
@@ -4286,17 +4280,13 @@ namespace RT64 {
                         }
                         const uint32_t ord = s_flat_ord[s_mv_candidate_id]++;
                         const uint32_t id = 0x70000000u | ((s_mv_candidate_id * 0x9E3779B1u + ord * 0x85EBCA6Bu) & 0x0FFFFFFFu);
-                        state->rsp->matrixId(id, /*push*/true, /*proj*/false, /*decompose*/true,
-                            G_EX_COMPONENT_INTERPOLATE, G_EX_COMPONENT_INTERPOLATE, G_EX_COMPONENT_INTERPOLATE, G_EX_COMPONENT_INTERPOLATE, G_EX_COMPONENT_INTERPOLATE,
-                            G_EX_COMPONENT_AUTO, G_EX_COMPONENT_SKIP, G_EX_COMPONENT_AUTO, G_EX_COMPONENT_AUTO,
-                            G_EX_ORDER_LINEAR, G_EX_ASPECT_AUTO, G_EX_EDIT_NONE, /*idIsAddress*/false, /*editGroup*/false);
-                        state->rsp->modelViewProjChanged = true;
+                        f5_push_face_id(state, id);
                         flatGroup = true;
                     }
                     state->rsp->setVertex(0x80000000u | (F5_VTX_SCRATCH + F5_FACE_SLOT * sizeof(RSP::Vertex)), n, F5_FACE_SLOT);
                     state->rdp->setOtherMode(state->rdp->otherMode.H, savedL & ~0x04u);
                     flattened = true;
-                    { static const bool s_lg = env_on("ROGUESQ_LOG_INTERP_PAIR", false); static int s_nf = 0;
+                    { static const bool s_lg = rs64env::on("ROGUESQ_LOG_INTERP_PAIR", false); static int s_nf = 0;
                       if (s_lg && ((++s_nf % 200) == 1)) {
                           const auto &ps = state->ext.workloadQueue->workloads[state->ext.workloadQueue->writeCursor].drawData.posScreen;
                           float err = 0.0f;
@@ -4306,7 +4296,7 @@ namespace RT64 {
                 else if (s_flatten && !billboard && !crawlStars && (flatDepth >= 0.0f) && (n <= 8)) {
                     // Flatten refused (vertex behind the camera, extreme scale): load the verts again anyway so the face's vertex count matches frames where it succeeded, or vertex interpolation drops for that frame and the face snaps.
                     state->rsp->setVertex(0x80000000u | (F5_VTX_SCRATCH + F5_FACE_SLOT * sizeof(RSP::Vertex)), n, F5_FACE_SLOT);
-                    { static const bool s_lg = env_on("ROGUESQ_LOG_INTERP_PAIR", false); static int s_nr = 0;
+                    { static const bool s_lg = rs64env::on("ROGUESQ_LOG_INTERP_PAIR", false); static int s_nr = 0;
                       if (s_lg && ((++s_nr % 50) == 1)) std::fprintf(stderr, "[flatten-refused] n=%d depth=%.5f count=%d\n", n, flatDepth, s_nr); }
                 }
                 f5_count_auto(state, 3);
@@ -4353,66 +4343,46 @@ namespace RT64 {
             ++s_task_faces;
         }
 
-        // 0xBF: triangle. 16 bytes (cmd, indices*4 + flags); `w0&2` adds 8 bytes = per-face UVs
-        // (words 3..5 of the 24-byte form).
-        void op_bf_tri(State* state, DisplayList** dl) {
+        // A face command: n vertex indices (x5) in w1 in the ucode's order, bytes 1, 2, 3 then byte 0 (tris (0,1,2) (0,2,3)), and word 2 the per-vertex
+        // colour offsets. With w0 & 2 the command is 32 bytes with a UV per vertex in words 4..7 (a triangle's last word is padding), else 16 bytes.
+        // An unconditional 32 would read the next command as UVs and run the walk away on untextured faces.
+        static void f5_face_command(State* state, DisplayList** dl, int n) {
             s_face_cmd_dl = (uint32_t)(reinterpret_cast<const uint8_t*>(*dl) - state->RDRAM);
-            const uint32_t w0 = (*dl)->w0, w1 = (*dl)->w1;
-            const bool textured = (w0 & 0x2) != 0;
-            const uint32_t idx[3] = { ((w1 >> 16) & 0xFF) / 5u, ((w1 >> 8) & 0xFF) / 5u, (w1 & 0xFF) / 5u };
-            g_op_bf_count = g_op_bf_count + 1;
-            if (textured) {
-                // 32 bytes like 0xB4: [cmd][idx*5][idx*4][flags][st0][st1][st2][pad]
-                const uint32_t st[3] = { (*dl)[2].w0, (*dl)[2].w1, (*dl)[3].w0 };
-                f5_emit_face(state, idx, 3, st, (*dl)[1].w0);
+            const uint32_t w0 = (*dl)->w0;
+            const uint32_t w1 = (*dl)->w1;
+            const uint32_t idx[4] = { ((w1 >> 16) & 0xFF) / 5u, ((w1 >> 8) & 0xFF) / 5u, (w1 & 0xFF) / 5u, (w1 >> 24) / 5u };
+            if (w0 & 0x2) {
+                const uint32_t st[4] = { (*dl)[2].w0, (*dl)[2].w1, (*dl)[3].w0, (*dl)[3].w1 };
+                f5_emit_face(state, idx, n, st, (*dl)[1].w0);
                 (*dl) += 3;
-            } else {
-                f5_emit_face(state, idx, 3, nullptr, (*dl)[1].w0);
+            }
+            else {
+                f5_emit_face(state, idx, n, nullptr, (*dl)[1].w0);
                 (*dl) += 1;
             }
         }
 
-        // 0xB4: oriented quad, 32 bytes: indices*5 (w1), indices*4, flags, 4 UVs. Chunk-tail filler
-        // (byte ramps) means the walk left the list: return.
+        // 0xBF: triangle.
+        void op_bf_tri(State* state, DisplayList** dl) {
+            g_op_bf_count = g_op_bf_count + 1;
+            f5_face_command(state, dl, 3);
+        }
+
+        // 0xB4: oriented quad. Chunk-tail filler (byte ramps) means the walk left the list: return.
         void op_b4_quad(State* state, DisplayList** dl) {
-            s_face_cmd_dl = (uint32_t)(reinterpret_cast<const uint8_t*>(*dl) - state->RDRAM);
-            const uint32_t w0 = (*dl)->w0, w1 = (*dl)->w1;
-            static bool s_guard = !env_on("ROGUESQ_F5_NOFILLERGUARD", false);
-            if (s_guard && (f5_is_byte_ramp(w0) || f5_is_byte_ramp(w1))) {
+            static bool s_guard = !rs64env::on("ROGUESQ_F5_NOFILLERGUARD", false);
+            if (s_guard && (f5_is_byte_ramp((*dl)->w0) || f5_is_byte_ramp((*dl)->w1))) {
                 ++g_f5_heur[2];
                 *dl = state->popReturnAddress();
                 return;
             }
-            // Ucode order: bytes 1,2,3 then byte 0; colors/UVs follow it, tris (0,1,2) (0,2,3).
-            const uint32_t idx[4] = { ((w1 >> 16) & 0xFF) / 5u, ((w1 >> 8) & 0xFF) / 5u, (w1 & 0xFF) / 5u, (w1 >> 24) / 5u };
-            // Textured (w0&2) = 32 bytes with a 4-UV block; untextured = 16 bytes, no UVs. Mirrors
-            // op_13_quad and the hardware stride: an unconditional 32 reads the next command as bogus UVs
-            // AND over-advances 16 bytes, running the walk away on any DL with untextured 0xB4 (proven vs
-            // cine_frame300 with tools/validate/f5_dl_walk.py --b4).
-            if (w0 & 0x2) {
-                const uint32_t st[4] = { (*dl)[2].w0, (*dl)[2].w1, (*dl)[3].w0, (*dl)[3].w1 };
-                f5_emit_face(state, idx, 4, st, (*dl)[1].w0);
-                (*dl) += 3;
-            } else {
-                f5_emit_face(state, idx, 4, nullptr, (*dl)[1].w0);
-                (*dl) += 1;
-            }
+
+            f5_face_command(state, dl, 4);
         }
 
-        // 0x13: quad variant with the 0xBF framing (4 indices in w1; `w0&2` = UV block).
+        // 0x13: quad with the 0xBF framing.
         void op_13_quad(State* state, DisplayList** dl) {
-            s_face_cmd_dl = (uint32_t)(reinterpret_cast<const uint8_t*>(*dl) - state->RDRAM);
-            const uint32_t w0 = (*dl)->w0, w1 = (*dl)->w1;
-            // Ucode order: bytes 1,2,3 then byte 0; colors/UVs follow it, tris (0,1,2) (0,2,3).
-            const uint32_t idx[4] = { ((w1 >> 16) & 0xFF) / 5u, ((w1 >> 8) & 0xFF) / 5u, (w1 & 0xFF) / 5u, (w1 >> 24) / 5u };
-            if (w0 & 0x2) {
-                const uint32_t st[4] = { (*dl)[2].w0, (*dl)[2].w1, (*dl)[3].w0, (*dl)[3].w1 };
-                f5_emit_face(state, idx, 4, st, (*dl)[1].w0);
-                (*dl) += 3;
-            } else {
-                f5_emit_face(state, idx, 4, nullptr, (*dl)[1].w0);
-                (*dl) += 1;
-            }
+            f5_face_command(state, dl, 4);
         }
 
         // 0xBB: G_TEXTURE. The stream sends scale 0 (`BB000001 00000000`), which collapses RT64's
@@ -4425,10 +4395,6 @@ namespace RT64 {
             state->rsp->setTexture(tile, level, on, sc, tc);
         }
 
-        // fillRect wrapper kept for the rdpstate module's declaration (op_02 coupling is gone).
-        void fillRect_op02_aware(State* state, DisplayList** dl) {
-            fillRect_logged(state, dl);
-        }
 
         // ---------------------------------------------------------------- setup
         void setup(GBI* gbi) {
@@ -4506,7 +4472,7 @@ namespace RT64 {
                 }
             };
             gbi->map[0xF5] = &setTile_logged;
-            gbi->map[0xF6] = &fillRect_op02_aware;
+            gbi->map[0xF6] = &fillRect_logged;
             gbi->map[0xF7] = &GBI_RDP::setFillColor;
             gbi->map[0xB9] = [](State *state, DisplayList **dl) {
                 setOtherModeL_logged(state, dl);

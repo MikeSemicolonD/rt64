@@ -101,5 +101,6 @@ namespace RT64 {
         ~ShaderLibrary();
         void setupCommonShaders(RenderInterface *rhi, RenderDevice *device);
         void setupMultisamplingShaders(RenderInterface *rhi, RenderDevice *device, const RenderMultisampling &multisampling);
+        void setupRS64Shaders(RenderDevice *device, const RenderMultisampling &multisampling, RenderShaderFormat shaderFormat, const RenderShader *fullScreenVertexShader);
     };
 };

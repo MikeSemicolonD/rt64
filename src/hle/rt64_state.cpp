@@ -22,6 +22,7 @@
 #include "common/rt64_diag_bounds.h"
 #include "common/rt64_elapsed_timer.h"
 #include "common/rt64_math.h"
+#include "common/rt64_rs64_env.h"
 #include "common/rt64_tmem_hasher.h"
 #include "render/rt64_raster_shader.h"
 #include "preset/rt64_preset_draw_call.h"
@@ -33,17 +34,10 @@
 #include "rt64_rs64_transition.h"
 #include "rt64_rs64_lights.h"
 #include "rt64_rs64_vr.h"
+#include "rt64_rs64_host.h"
 
 #include <atomic>
-// Per-frame RT64 workload accumulators feeding the F5 profiler HUD's RDP slots
-// (no real RDP on the PC path). Summed in State::flush(); read-and-cleared by
-// osDpGetCounters_recomp. tris->white(pipe), draws->magenta(cmd), texloads->green(tmem).
-extern "C" float rs64_fog_tail_end(void);
-extern "C" uint32_t rs64_level_fog_rgb(void);
-// F3DFACTOR5: 1 while the game shows a 2D screen (tasks under 64 3D faces, held for 10 tasks before it changes).
-extern "C" int rs64_f5_screen2d(void);
-// ultramodern: tell the game this graphics task is done before its GPU work finishes.
-extern "C" void rs64_gfx_complete_early(void);
+
 extern "C" { std::atomic<uint32_t> g_rs64_frame_tris{0}; }
 extern "C" { std::atomic<uint32_t> g_rs64_frame_draws{0}; }
 extern "C" { std::atomic<uint32_t> g_rs64_frame_texloads{0}; }
@@ -54,15 +48,9 @@ extern "C" { std::atomic<uint32_t> g_rs64_frame_texloads{0}; }
 #define MI_INTR_DP          0x00000020
 #define MI_INTR_SP          0x00000001
 
-// Set to anything but empty or "0".
-static bool rs64EnvOn(const char *name) {
-    const char *e = std::getenv(name);
-    return (e != nullptr) && (e[0] != '\0') && (e[0] != '0');
-}
-
 // Missions skip the copy back to RDRAM and its GPU wait; numMissionObjectives (0x80130B17) is non-zero in one. The env var overrides it: 1 = always skip, 0 = never.
 static bool rs64SkipReadback(const uint8_t *RDRAM, const char *value) {
-    if ((value != nullptr) && (value[0] != '\0')) {
+    if (value != nullptr) {
         return value[0] != '0';
     }
 
@@ -70,13 +58,22 @@ static bool rs64SkipReadback(const uint8_t *RDRAM, const char *value) {
 }
 
 static bool rs64SkipColorReadback(const uint8_t *RDRAM) {
-    static const char *s_value = std::getenv("ROGUESQ_SKIP_COLOR_READBACK");
+    static const char *s_value = rs64env::str("ROGUESQ_SKIP_COLOR_READBACK");
     return rs64SkipReadback(RDRAM, s_value);
 }
 
 static bool rs64SkipDepthReadback(const uint8_t *RDRAM) {
-    static const char *s_value = std::getenv("ROGUESQ_SKIP_DEPTH_READBACK");
+    static const char *s_value = rs64env::str("ROGUESQ_SKIP_DEPTH_READBACK");
     return rs64SkipReadback(RDRAM, s_value);
+}
+
+// The F5 ucode emits garbage colour images in code (~0x470, ~0x3CBxx), the texture-material pool (0x15FDE0) and past 8 MB, where a write-back corrupts
+// the game or host heap; the game's own buffers sit at 0x4B7800 and up. ROGUESQ_RT64_WB_STRICT=1 also wants 64-byte alignment (a width test here blanked the display).
+static bool rs64WritebackAllowed(uint32_t address) {
+    constexpr uint32_t kFbMinAddr = 0x400000;
+    constexpr uint32_t kFbMaxAddr = 0x800000;
+    static const bool s_wbStrict = rs64env::on("ROGUESQ_RT64_WB_STRICT");
+    return (!s_wbStrict || ((address & 0x3F) == 0)) && (address >= kFbMinAddr) && (address < kFbMaxAddr);
 }
 
 namespace RT64 {
@@ -209,6 +206,78 @@ namespace RT64 {
         return true;
     }
 
+    // F5 skybox dome. The game pins it itself (zSource=PRIM, Z_UPD, primDepth 0x7FBF); this only raises
+    // primDepth to 0.99999 so distant terrain between the two values (where RT64's fog, applied in the
+    // wrong depth domain, is still partial) is not hidden behind the sky. Z_UPD must stay on: the dome
+    // refreshes the sky region's depth every frame, or the ship fails against stale depth there.
+    // ROGUESQ_F5_SKY_NO_ZWRITE=0 disables for A/B.
+    // Returns whether the horizon ring fade rewrote the combiner and env colour.
+    bool State::rs64SkyPin() {
+        bool faded = false;
+        static int s_skyFix = -1;
+        if (s_skyFix < 0) { s_skyFix = rs64env::on("ROGUESQ_F5_SKY_NO_ZWRITE", true) ? 1 : 0; }
+        // Matches the game's sky state (zSource=PRIM, Z_UPD, no Z_CMP, primDepth near max) on every sky draw, including the single-sided horizon part.
+        const uint32_t skyL = rdp->otherMode.L;
+        const bool gameSkyPin = (skyL & G_ZS_PRIM) && (skyL & Z_UPD) && !(skyL & Z_CMP) && rdp->primDepthStack[rdp->primDepthStackSize - 1].x >= 0.99f;
+        if (s_skyFix && gameSkyPin) {
+            drawCall.otherMode.L |= (uint32_t)(G_ZS_PRIM | Z_UPD);
+            drawCall.rdpParams.primDepth = { 0.99999f, 0.0f };   // just under the 1.0 clear; remap T (0.995) stays well below
+
+            // The untextured horizon ring fades its shade alpha from 1 at the top to 0 at the bottom, but draws opaque (no FORCE_BL), so on
+            // hardware too its bottom met the below-horizon fill in a hard line. Its colour mixes toward the fill by that alpha instead:
+            // (shade - env) * shade alpha + env, env = the fill colour. ROGUESQ_F5_HORIZON_FADE=0 disables.
+            static const bool s_ringFade = rs64env::on("ROGUESQ_F5_HORIZON_FADE", true);
+            const interop::ColorCombiner &cc = rdp->colorCombinerStack[rdp->colorCombinerStackSize - 1];
+            if (s_ringFade && (cc.L == 0xFCFFFFFFu) && (cc.H == 0xFFFE793Cu)) {
+                const uint32_t fill = rdp->fillColorInside(rdp->scissorRectStack[rdp->scissorStackSize - 1]) & 0xFFFFu;
+                drawCall.colorCombiner.L = 0xFC45FE8Bu;
+                drawCall.colorCombiner.H = 0x55FEF97Cu;
+                drawCall.rdpParams.envColor = { float((fill >> 11) & 31u) / 31.0f, float((fill >> 6) & 31u) / 31.0f, float((fill >> 1) & 31u) / 31.0f, 1.0f };
+                faded = true;
+            }
+        }
+
+        return faded;
+    }
+
+    // ROGUESQ_LOG_ZPRIM=1 / ROGUESQ_LOG_FOG_DRAWS=1: each distinct prim-depth or fog-blended draw state, a few times.
+    void State::rs64LogDrawStateProbes() {
+        static const bool s_logZ = rs64env::on("ROGUESQ_LOG_ZPRIM");
+        if (s_logZ && (rdp->otherMode.L & G_ZS_PRIM)) {
+            static rt64diag::BoundedMap<uint64_t, uint32_t> s_seen;
+            const uint32_t L = rdp->otherMode.L;
+            const uint32_t cull = (rsp->cullBothMask != 0) ? (drawCall.geometryMode & rsp->cullBothMask) : 0;
+            const uint32_t pd = (uint32_t)(rdp->primDepthStack[rdp->primDepthStackSize - 1].x * 32768.0f);
+            const uint64_t key = ((uint64_t)L << 32) ^ ((uint64_t)cull << 16) ^ pd;
+            uint32_t &n = s_seen[key];
+            ++n;
+            if (n == 1 || n == 1000 || n == 100000) {
+                fprintf(stderr, "[zprim] L=%08X H=%08X zcmp=%d zupd=%d zmode=%u cull=%X pd=%04X->%.5f out=%.5f geo=%08X n=%u\n",
+                    L, rdp->otherMode.H, (L & 0x10) ? 1 : 0, (L & 0x20) ? 1 : 0, (L >> 10) & 3, cull, pd,
+                    pd / 32768.0f, drawCall.rdpParams.primDepth.x, drawCall.geometryMode, n);
+            }
+        }
+
+    // ROGUESQ_LOG_FOG_DRAWS=1: each distinct draw state whose blender reads the fog colour (P or M = CLR_FOG in either cycle), once.
+        static const bool s_logFog = rs64env::on("ROGUESQ_LOG_FOG_DRAWS");
+        const uint32_t L = rdp->otherMode.L;
+        const bool blendsFog = (((L >> 30) & 3) == 3) || (((L >> 22) & 3) == 3) || (((L >> 28) & 3) == 3) || (((L >> 20) & 3) == 3);
+        if (s_logFog && blendsFog) {
+            static rt64diag::BoundedMap<uint64_t, uint32_t> s_seen;
+            const interop::float4 &prim = rdp->primColorStack[rdp->primColorStackSize - 1];
+            const interop::float4 &fog = rdp->fogColorStack[rdp->fogColorStackSize - 1];
+            const uint32_t fogKey = ((uint32_t)(fog.x * 255.0f) << 24) | ((uint32_t)(fog.y * 255.0f) << 16) | ((uint32_t)(fog.z * 255.0f) << 8) | (uint32_t)(fog.w * 15.0f);
+            const uint64_t key = ((uint64_t)L << 32) ^ ((uint64_t)drawCall.colorCombiner.L << 8) ^ drawCall.colorCombiner.H ^ ((uint64_t)(drawCall.geometryMode & G_FOG) << 20) ^ (uint64_t)(prim.x * 255.0f) ^ ((uint64_t)fogKey << 3);
+            uint32_t &n = s_seen[key];
+            ++n;
+            if (n == 1 || n == 1000) {
+                fprintf(stderr, "[fog-draw] L=%08X H=%08X cc=%08X:%08X geo=%08X fogOn=%d prim=(%.2f %.2f %.2f %.2f) fogC=(%.2f %.2f %.2f %.2f) fogMul=%.1f fogOff=%.1f n=%u\n",
+                    L, rdp->otherMode.H, drawCall.colorCombiner.L, drawCall.colorCombiner.H, drawCall.geometryMode, (drawCall.geometryMode & G_FOG) ? 1 : 0,
+                    prim.x, prim.y, prim.z, prim.w, fog.x, fog.y, fog.z, fog.w, rsp->fog.mul, rsp->fog.offset, n);
+            }
+        }
+    }
+
     void State::loadDrawState() {
         const bool gpuCopiesEnabled = ext.emulatorConfig->framebuffer.copyWithGPU;
         bool textureCheck = false;
@@ -281,74 +350,8 @@ namespace RT64 {
             drawCall.scissorRightOrigin = rdp->extended.scissorRightOriginStack[rdp->scissorStackSize - 1];
         }
 
-        // F5 skybox dome. The game pins it itself (zSource=PRIM, Z_UPD, primDepth 0x7FBF); this only raises
-        // primDepth to 0.99999 so distant terrain between the two values (where RT64's fog, applied in the
-        // wrong depth domain, is still partial) is not hidden behind the sky. Z_UPD must stay on: the dome
-        // refreshes the sky region's depth every frame, or the ship fails against stale depth there.
-        // ROGUESQ_F5_SKY_NO_ZWRITE=0 disables for A/B.
-        {
-            static int s_skyFix = -1;
-            if (s_skyFix < 0) { const char *e = std::getenv("ROGUESQ_F5_SKY_NO_ZWRITE"); s_skyFix = (e && e[0] == '0') ? 0 : 1; }
-            // Matches the game's sky state (zSource=PRIM, Z_UPD, no Z_CMP, primDepth near max) on every sky draw, including the single-sided horizon part.
-            const uint32_t skyL = rdp->otherMode.L;
-            const bool gameSkyPin = (skyL & G_ZS_PRIM) && (skyL & Z_UPD) && !(skyL & Z_CMP) && rdp->primDepthStack[rdp->primDepthStackSize - 1].x >= 0.99f;
-            if (s_skyFix && gameSkyPin) {
-                drawCall.otherMode.L |= (uint32_t)(G_ZS_PRIM | Z_UPD);
-                drawCall.rdpParams.primDepth = { 0.99999f, 0.0f };   // just under the 1.0 clear; remap T (0.995) stays well below
-
-                // The untextured horizon ring fades its shade alpha from 1 at the top to 0 at the bottom, but draws opaque (no FORCE_BL), so on
-                // hardware too its bottom met the below-horizon fill in a hard line. Its colour mixes toward the fill by that alpha instead:
-                // (shade - env) * shade alpha + env, env = the fill colour. ROGUESQ_F5_HORIZON_FADE=0 disables.
-                static const bool s_ringFade = [](){ const char *e = std::getenv("ROGUESQ_F5_HORIZON_FADE"); return !(e && e[0] == '0'); }();
-                const interop::ColorCombiner &cc = rdp->colorCombinerStack[rdp->colorCombinerStackSize - 1];
-                if (s_ringFade && (cc.L == 0xFCFFFFFFu) && (cc.H == 0xFFFE793Cu)) {
-                    const uint32_t fill = rdp->fillColorInside(rdp->scissorRectStack[rdp->scissorStackSize - 1]) & 0xFFFFu;
-                    drawCall.colorCombiner.L = 0xFC45FE8Bu;
-                    drawCall.colorCombiner.H = 0x55FEF97Cu;
-                    drawCall.rdpParams.envColor = { float((fill >> 11) & 31u) / 31.0f, float((fill >> 6) & 31u) / 31.0f, float((fill >> 1) & 31u) / 31.0f, 1.0f };
-                    s_ringFaded = true;
-                }
-            }
-        }
-
-        {
-            static const bool s_logZ = [](){ const char *e = std::getenv("ROGUESQ_LOG_ZPRIM"); return e && e[0] == '1'; }();
-            if (s_logZ && (rdp->otherMode.L & G_ZS_PRIM)) {
-                static rt64diag::BoundedMap<uint64_t, uint32_t> s_seen;
-                const uint32_t L = rdp->otherMode.L;
-                const uint32_t cull = (rsp->cullBothMask != 0) ? (drawCall.geometryMode & rsp->cullBothMask) : 0;
-                const uint32_t pd = (uint32_t)(rdp->primDepthStack[rdp->primDepthStackSize - 1].x * 32768.0f);
-                const uint64_t key = ((uint64_t)L << 32) ^ ((uint64_t)cull << 16) ^ pd;
-                uint32_t &n = s_seen[key];
-                ++n;
-                if (n == 1 || n == 1000 || n == 100000) {
-                    fprintf(stderr, "[zprim] L=%08X H=%08X zcmp=%d zupd=%d zmode=%u cull=%X pd=%04X->%.5f out=%.5f geo=%08X n=%u\n",
-                        L, rdp->otherMode.H, (L & 0x10) ? 1 : 0, (L & 0x20) ? 1 : 0, (L >> 10) & 3, cull, pd,
-                        pd / 32768.0f, drawCall.rdpParams.primDepth.x, drawCall.geometryMode, n);
-                }
-            }
-        }
-
-        // ROGUESQ_LOG_FOG_DRAWS=1: each distinct draw state whose blender reads the fog colour (P or M = CLR_FOG in either cycle), once.
-        {
-            static const bool s_logFog = [](){ const char *e = std::getenv("ROGUESQ_LOG_FOG_DRAWS"); return e && e[0] == '1'; }();
-            const uint32_t L = rdp->otherMode.L;
-            const bool blendsFog = (((L >> 30) & 3) == 3) || (((L >> 22) & 3) == 3) || (((L >> 28) & 3) == 3) || (((L >> 20) & 3) == 3);
-            if (s_logFog && blendsFog) {
-                static rt64diag::BoundedMap<uint64_t, uint32_t> s_seen;
-                const interop::float4 &prim = rdp->primColorStack[rdp->primColorStackSize - 1];
-                const interop::float4 &fog = rdp->fogColorStack[rdp->fogColorStackSize - 1];
-                const uint32_t fogKey = ((uint32_t)(fog.x * 255.0f) << 24) | ((uint32_t)(fog.y * 255.0f) << 16) | ((uint32_t)(fog.z * 255.0f) << 8) | (uint32_t)(fog.w * 15.0f);
-                const uint64_t key = ((uint64_t)L << 32) ^ ((uint64_t)drawCall.colorCombiner.L << 8) ^ drawCall.colorCombiner.H ^ ((uint64_t)(drawCall.geometryMode & G_FOG) << 20) ^ (uint64_t)(prim.x * 255.0f) ^ ((uint64_t)fogKey << 3);
-                uint32_t &n = s_seen[key];
-                ++n;
-                if (n == 1 || n == 1000) {
-                    fprintf(stderr, "[fog-draw] L=%08X H=%08X cc=%08X:%08X geo=%08X fogOn=%d prim=(%.2f %.2f %.2f %.2f) fogC=(%.2f %.2f %.2f %.2f) fogMul=%.1f fogOff=%.1f n=%u\n",
-                        L, rdp->otherMode.H, drawCall.colorCombiner.L, drawCall.colorCombiner.H, drawCall.geometryMode, (drawCall.geometryMode & G_FOG) ? 1 : 0,
-                        prim.x, prim.y, prim.z, prim.w, fog.x, fog.y, fog.z, fog.w, rsp->fog.mul, rsp->fog.offset, n);
-                }
-            }
-        }
+        s_ringFaded = rs64SkyPin();
+        rs64LogDrawStateProbes();
 
         if (drawStatus.isChanged(DrawAttribute::Texture) || textureCheck) {
             // Detect the tile count based on the LOD setting.
@@ -797,10 +800,7 @@ namespace RT64 {
     }
 
     static bool rs64LogTransition() {
-        static const bool s_on = []() {
-            const char *v = std::getenv("ROGUESQ_LOG_TRANSITION");
-            return v && v[0] && v[0] != '0';
-        }();
+        static const bool s_on = rs64env::on("ROGUESQ_LOG_TRANSITION");
         return s_on;
     }
 
@@ -855,7 +855,7 @@ namespace RT64 {
         };
 
         static std::unordered_map<uint64_t, Entry> s_entries;
-        static const bool s_log = rs64EnvOn("ROGUESQ_LOG_FLIPBOOK");
+        static const bool s_log = rs64env::on("ROGUESQ_LOG_FLIPBOOK");
         static uint64_t s_logFrame = 0;
         static uint32_t s_tiles = 0;
         static uint32_t s_blended = 0;
@@ -1072,7 +1072,7 @@ namespace RT64 {
                 // whether the flood is many distinct CI tiles or the same tiles re-converted.
                 {
                     static int s_rd = -1;
-                    if (s_rd < 0) { const char *e = std::getenv("ROGUESQ_REINT_DIAG"); s_rd = (e && e[0] && e[0] != '0') ? 1 : 0; }
+                    if (s_rd < 0) { s_rd = rs64env::on("ROGUESQ_REINT_DIAG") ? 1 : 0; }
                     if (s_rd) {
                         static uint64_t hits = 0, misses = 0;
                         // Recent-window distinct counts (bounded, keep-recent) so a long
@@ -1139,6 +1139,81 @@ namespace RT64 {
 
     void State::listProcessEnd() {
         dlCpuProfiler.end();
+    }
+
+    // RS64: light presets the host queued (enabled mods, then roguesq_lights.json); a later file overrides a same-named preset.
+    // A reload (a light file changed, or Reload light files) replaces the library, dropping unsaved edits made here.
+    // Mods' runtime presets go on top. Sets the frame's haze and the emissive mesh keys the F5 GBI reads.
+    void State::rs64SyncLightPresets(Workload &workload, int presetLevel) {
+        bool presetsReplace = false;
+        std::vector<std::string> presetTexts = rs64lights::takePresetTexts(presetsReplace);
+        if (presetsReplace) {
+            lightsLibrary.presetMap.clear();
+        }
+
+        for (const std::string &text : presetTexts) {
+            try {
+                const json jroot = json::parse(text);
+                if (jroot.contains("presets")) {
+                    lightsLibrary.readJson(jroot);
+                }
+            }
+            catch (const std::exception &e) {
+                fprintf(stderr, "[RT64] light presets not loaded: %s\n", e.what());
+            }
+        }
+
+        // Mods' runtime presets on top of the files; a name a mod dropped is removed (a file preset it had replaced returns at the next reload).
+        static uint64_t runtimeSeen = 0;
+        static std::vector<std::string> runtimeNames;
+        std::map<std::string, std::string> runtimePresets;
+        if (rs64lights::takeRuntimePresets(runtimeSeen, presetsReplace || !presetTexts.empty(), runtimePresets)) {
+            for (const std::string &name : runtimeNames) {
+                if (runtimePresets.find(name) == runtimePresets.end()) {
+                    lightsLibrary.presetMap.erase(name);
+                }
+            }
+
+            runtimeNames.clear();
+            for (const auto &it : runtimePresets) {
+                try {
+                    PresetLights preset;
+                    if (preset.readJson(json::parse(it.second))) {
+                        lightsLibrary.presetMap[it.first] = preset;
+                        runtimeNames.push_back(it.first);
+                    }
+                }
+                catch (const std::exception &e) {
+                    fprintf(stderr, "[RT64] runtime light preset %s not loaded: %s\n", it.first.c_str(), e.what());
+                }
+            }
+        }
+
+        thread_local std::vector<std::string> emissiveMeshes;
+        thread_local std::vector<uint8_t> emissiveTranslucent;
+        emissiveMeshes.clear();
+        emissiveTranslucent.clear();
+        for (const auto &it : lightsLibrary.presetMap) {
+            if (it.second.enabled && it.second.emissive && !it.second.mesh.empty() && it.second.appliesTo(presetLevel)) {
+                emissiveMeshes.push_back(it.second.mesh);
+                emissiveTranslucent.push_back(it.second.translucentOnly ? 1 : 0);
+            }
+
+            if (it.second.enabled && (it.second.hazeAmount > 0.0f) && (it.second.hazeRange > 0.0f) && it.second.appliesTo(presetLevel)) {
+                workload.rs64Haze.amount = it.second.hazeAmount;
+                workload.rs64Haze.range = it.second.hazeRange;
+                memcpy(workload.rs64Haze.color, it.second.hazeColor, sizeof(workload.rs64Haze.color));
+            }
+        }
+
+        if ((emissiveMeshes != rs64EmissiveMeshes) || (emissiveTranslucent != rs64EmissiveTranslucent)) {
+            rs64EmissiveMeshes = emissiveMeshes;
+            rs64EmissiveTranslucent = emissiveTranslucent;
+            rs64EmissiveGeneration++;
+            if (rs64lights::config().log) {
+                fprintf(stderr, "[rt-lights] emissive presets: %zu mesh keys (generation %u)\n", rs64EmissiveMeshes.size(), rs64EmissiveGeneration);
+            }
+        }
     }
 
     void State::fullSync() {
@@ -1851,7 +1926,7 @@ namespace RT64 {
                 ext.framebufferGraphicsWorker->commandList->end();
                 framebufferRenderer->waitForUploaders();
                 // ROGUESQ_LOG_GPU_WAIT=1: per second, how long the DL walk blocks on the framebuffer GPU work it just submitted.
-                static const bool logGpuWait = []() { const char *e = std::getenv("ROGUESQ_LOG_GPU_WAIT"); return (e != nullptr) && (e[0] == '1'); }();
+                static const bool logGpuWait = rs64env::on("ROGUESQ_LOG_GPU_WAIT");
                 const auto gpuWaitStart = std::chrono::steady_clock::now();
                 ext.framebufferGraphicsWorker->execute();
 
@@ -1862,66 +1937,15 @@ namespace RT64 {
 
                 ext.framebufferGraphicsWorker->wait();
                 if (logGpuWait) {
-                    static auto windowStart = gpuWaitStart;
-                    static double waitMs = 0.0;
-                    static int waits = 0;
-                    const auto now = std::chrono::steady_clock::now();
-                    waitMs += std::chrono::duration<double, std::milli>(now - gpuWaitStart).count();
-                    waits++;
-                    if (std::chrono::duration<double>(now - windowStart).count() >= 1.0) {
-                        fprintf(stderr, "[gpu-wait] %.1f ms/s over %d submits (avg %.1f ms)\n", waitMs, waits, waitMs / waits);
-                        windowStart = now;
-                        waitMs = 0.0;
-                        waits = 0;
-                    }
+                    static rt64diag::PerSecondLog s_waitLog;
+                    s_waitLog.add(std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - gpuWaitStart).count(), "[gpu-wait] %.1f ms/s over %d submits (avg %.1f ms)\n");
                 }
 
                 pairCursor = framebufferPairCursor;
                 while (pairCursor < maxFramebufferPair) {
                     if (getFramebufferPairs(pairCursor)) {
-                        // ROGUE-SQUADRON-RECOMP fix (load-bearing — see
-                        // memory/project_matpool_corruption_resolved_2026_05_20.md,
-                        // memory/project_n64_logo_freeze_audio.md and
-                        // memory/project_slash_literal_corruption.md): gate
-                        // RDRAM writeback on addressStart ∈ [0x400000, 0x800000).
-                        //
-                        // Original gate (2026-05-09): >= 0x100000 only.
-                        // Factor 5 LLE ucode emits SET_COLOR_IMAGE with addrs
-                        // in the .text/.rodata region (~0x470, ~0x3CBxx)
-                        // which RT64 then dutifully scribbles framebuffer
-                        // pixels into, corrupting the "/" string literal.
-                        //
-                        // Tightened lower bound to 0x400000 (2026-05-20):
-                        // Factor 5 HLE cinematic ucode ALSO emits garbage
-                        // SET_COLOR_IMAGE in the heap region [0x100000,
-                        // 0x400000) — specifically 0xFF1410A6 (mask=0x1410A6)
-                        // overlaps the texture-material pool at 0x15FDE0,
-                        // and copyNativeToRAM blits framebuffer pixels over
-                        // the free-list, freezing the cinematic. The HLE
-                        // walker in src/main can't follow segment-mapped
-                        // G_DL sub-DLs so it misses this CIMG; this gate is
-                        // the only chokepoint that catches it regardless of
-                        // walker reach. Real game framebuffers all live at
-                        // >= 0x4B7800 (verified against PJ64 RDRAM dumps),
-                        // so 0x400000 is a safe lower bound.
-                        //
-                        // Added upper bound < 0x800000: garbage CIMGs at
-                        // addresses past 8 MB RDRAM cause copyNativeToRAM
-                        // to write past the RDRAM buffer into the host
-                        // recompile heap (adjacent in the same allocation),
-                        // corrupting a different game heap's free-list.
-                        constexpr uint32_t kFbMinAddr = 0x400000;
-                        constexpr uint32_t kFbMaxAddr = 0x800000;
-                        // RogueSquadron64Recomp (2026-09-08): a garbage registration (width 1 at 0x760000) had
-                        // its write-back land on the game's heap free list. Real buffers are >= 16 wide, 64-aligned.
-                        // Off by default (2026-09-08): any extra condition here blanked the display, so the
-                        // presentation path depends on these copies. Garbage registrations are stopped in the F5 filter.
-                        static const bool s_wbStrict = [](){ const char* e = std::getenv("ROGUESQ_RT64_WB_STRICT"); return e && e[0] && e[0] != '0'; }();
-                        // Width is not usable here (a width test blanked the display); alignment only. The
-                        // width-1 garbage registrations are rejected upstream in setColorImage_filtered.
-                        const bool colorFbPlausible = !s_wbStrict || (colorFb->addressStart & 0x3F) == 0;
                         const bool s_skip_color_wb = !ext.emulatorConfig->framebuffer.writeBack || rs64SkipColorReadback(RDRAM);
-                        if (!s_skip_color_wb && colorFbPlausible && colorFb->addressStart >= kFbMinAddr && colorFb->addressStart < kFbMaxAddr) {
+                        if (!s_skip_color_wb && rs64WritebackAllowed(colorFb->addressStart)) {
                             colorFb->copyNativeToRAM(&(writeBackRDRAM ? writeBackRDRAM : RDRAM)[colorFb->addressStart], colorWriteWidth, colorRowStart, std::min(colorRowEnd, colorFb->height));
                             if (rs64LogTransition() && (colorFb->siz == G_IM_SIZ_16b)) {
                                 const uint8_t *wbRAM = writeBackRDRAM ? writeBackRDRAM : RDRAM;
@@ -1937,15 +1961,14 @@ namespace RT64 {
                             }
                         }
 
-                        static const bool s_wbLog = [](){ const char* e = std::getenv("ROGUESQ_RT64_WB_LOG"); return e && e[0] && e[0] != '0'; }();
+                        static const bool s_wbLog = rs64env::on("ROGUESQ_RT64_WB_LOG");
                         if (s_wbLog && depthWriteWidth > 0) {
                             static std::unordered_set<uint64_t> seenD;
                             const uint64_t key = ((uint64_t)depthFb->addressStart << 32) | ((uint64_t)depthWriteWidth << 16) | (uint64_t)std::min(depthRowEnd, depthFb->height);
                             if (seenD.insert(key).second) { fprintf(stderr, "[wb] depth addr=0x%06X width=%u rows=%u..%u" "\n", depthFb->addressStart, depthWriteWidth, depthRowStart, std::min(depthRowEnd, depthFb->height)); fflush(stderr); }
                         }
-                        const bool depthFbPlausible = !s_wbStrict || (depthFb->addressStart & 0x3F) == 0;
                         const bool s_skip_depth_wb = !ext.emulatorConfig->framebuffer.writeBack || rs64SkipDepthReadback(RDRAM);
-                        if (!s_skip_depth_wb && depthFbPlausible && depthWriteWidth > 0 && depthFb->addressStart >= kFbMinAddr && depthFb->addressStart < kFbMaxAddr) {
+                        if (!s_skip_depth_wb && (depthWriteWidth > 0) && rs64WritebackAllowed(depthFb->addressStart)) {
                             depthFb->copyNativeToRAM(&(writeBackRDRAM ? writeBackRDRAM : RDRAM)[depthFb->addressStart], depthWriteWidth, depthRowStart, std::min(depthRowEnd, depthFb->height));
                         }
                     }
@@ -2122,77 +2145,7 @@ namespace RT64 {
             inspect();
         }
 
-        // RS64: light presets the host queued (enabled mods, then roguesq_lights.json); a later file overrides a same-named preset.
-        // A reload (a light file changed, or Reload light files) replaces the library, dropping unsaved edits made here.
-        bool presetsReplace = false;
-        std::vector<std::string> presetTexts = rs64lights::takePresetTexts(presetsReplace);
-        if (presetsReplace) {
-            lightsLibrary.presetMap.clear();
-        }
-
-        for (const std::string &text : presetTexts) {
-            try {
-                const json jroot = json::parse(text);
-                if (jroot.contains("presets")) {
-                    lightsLibrary.readJson(jroot);
-                }
-            }
-            catch (const std::exception &e) {
-                fprintf(stderr, "[RT64] light presets not loaded: %s\n", e.what());
-            }
-        }
-
-        // Mods' runtime presets on top of the files; a name a mod dropped is removed (a file preset it had replaced returns at the next reload).
-        static uint64_t runtimeSeen = 0;
-        static std::vector<std::string> runtimeNames;
-        std::map<std::string, std::string> runtimePresets;
-        if (rs64lights::takeRuntimePresets(runtimeSeen, presetsReplace || !presetTexts.empty(), runtimePresets)) {
-            for (const std::string &name : runtimeNames) {
-                if (runtimePresets.find(name) == runtimePresets.end()) {
-                    lightsLibrary.presetMap.erase(name);
-                }
-            }
-
-            runtimeNames.clear();
-            for (const auto &it : runtimePresets) {
-                try {
-                    PresetLights preset;
-                    if (preset.readJson(json::parse(it.second))) {
-                        lightsLibrary.presetMap[it.first] = preset;
-                        runtimeNames.push_back(it.first);
-                    }
-                }
-                catch (const std::exception &e) {
-                    fprintf(stderr, "[RT64] runtime light preset %s not loaded: %s\n", it.first.c_str(), e.what());
-                }
-            }
-        }
-
-        thread_local std::vector<std::string> emissiveMeshes;
-        thread_local std::vector<uint8_t> emissiveTranslucent;
-        emissiveMeshes.clear();
-        emissiveTranslucent.clear();
-        for (const auto &it : lightsLibrary.presetMap) {
-            if (it.second.enabled && it.second.emissive && !it.second.mesh.empty() && it.second.appliesTo(presetLevel)) {
-                emissiveMeshes.push_back(it.second.mesh);
-                emissiveTranslucent.push_back(it.second.translucentOnly ? 1 : 0);
-            }
-
-            if (it.second.enabled && (it.second.hazeAmount > 0.0f) && (it.second.hazeRange > 0.0f) && it.second.appliesTo(presetLevel)) {
-                workload.rs64Haze.amount = it.second.hazeAmount;
-                workload.rs64Haze.range = it.second.hazeRange;
-                memcpy(workload.rs64Haze.color, it.second.hazeColor, sizeof(workload.rs64Haze.color));
-            }
-        }
-
-        if ((emissiveMeshes != rs64EmissiveMeshes) || (emissiveTranslucent != rs64EmissiveTranslucent)) {
-            rs64EmissiveMeshes = emissiveMeshes;
-            rs64EmissiveTranslucent = emissiveTranslucent;
-            rs64EmissiveGeneration++;
-            if (rs64lights::config().log) {
-                fprintf(stderr, "[rt-lights] emissive presets: %zu mesh keys (generation %u)\n", rs64EmissiveMeshes.size(), rs64EmissiveGeneration);
-            }
-        }
+        rs64SyncLightPresets(workload, presetLevel);
 
         // Add any lights to the workload from the presets that are activated.
         for (const auto &it : lightsLibrary.presetMap) {
@@ -2548,36 +2501,9 @@ namespace RT64 {
         updateRenderFlagSampleCount();
     }
 
-    void State::inspect() {
-        ext.presentQueue->inspectorMutex.lock();
-        Inspector *inspector = ext.presentQueue->inspector.get();
-        if (inspector == nullptr) {
-            ext.presentQueue->inspectorMutex.unlock();
-            return;
-        }
-
-        enum class InspectorMode {
-            None,
-            Light,
-            Material,
-            DrawCall,
-            Scene
-        };
-
-        UserConfiguration &userConfig = *ext.userConfig;
-        EmulatorConfiguration &emulatorConfig = *ext.emulatorConfig;
-        EnhancementConfiguration &enhancementConfig = *ext.enhancementConfig;
-        bool genConfigChanged = false;
-        bool resConfigChanged = false;
-        bool enhanceConfigChanged = false;
-        bool emulatorConfigChanged = false;
-        bool shaderCacheChanged = false;
-        const uint32_t previousMSAACount = userConfig.msaaSampleCount();
-        Workload &workload = ext.workloadQueue->workloads[lastWorkloadIndex];
-        InspectorMode inspectorMode = InspectorMode::None;
-
-        // RS64: Im3d's camera and cursor ray from the light pass's view in the picked preset's space (its part's model space for a mesh preset,
-        // else the level's map space or camera space), so the Lights tab's spheres and gizmos work; inspector->endFrame draws with the same view.
+    // RS64: Im3d's camera and cursor ray from the light pass's view in the picked preset's space (its part's model space for a mesh preset,
+    // else the level's map space or camera space), so the Lights tab's spheres and gizmos work; inspector->endFrame draws with the same view.
+    void State::rs64SetInspectorCamera() {
         const auto pickedIt = lightsLibrary.presetMap.find(lightsLibraryInspector.selectedPresetName);
         const bool meshPicked = (pickedIt != lightsLibrary.presetMap.end()) && !pickedIt->second.mesh.empty();
         const rs64lights::PresetView presetView = rs64lights::presetView(meshPicked ? rs64lights::PresetMesh : rs64lights::PresetLevel);
@@ -2607,6 +2533,37 @@ namespace RT64 {
             appData.m_keyDown[Im3d::Mouse_Left] = io.MouseDown[0] && !io.WantCaptureMouse;
             appData.m_deltaTime = io.DeltaTime;
         }
+    }
+
+    void State::inspect() {
+        ext.presentQueue->inspectorMutex.lock();
+        Inspector *inspector = ext.presentQueue->inspector.get();
+        if (inspector == nullptr) {
+            ext.presentQueue->inspectorMutex.unlock();
+            return;
+        }
+
+        enum class InspectorMode {
+            None,
+            Light,
+            Material,
+            DrawCall,
+            Scene
+        };
+
+        UserConfiguration &userConfig = *ext.userConfig;
+        EmulatorConfiguration &emulatorConfig = *ext.emulatorConfig;
+        EnhancementConfiguration &enhancementConfig = *ext.enhancementConfig;
+        bool genConfigChanged = false;
+        bool resConfigChanged = false;
+        bool enhanceConfigChanged = false;
+        bool emulatorConfigChanged = false;
+        bool shaderCacheChanged = false;
+        const uint32_t previousMSAACount = userConfig.msaaSampleCount();
+        Workload &workload = ext.workloadQueue->workloads[lastWorkloadIndex];
+        InspectorMode inspectorMode = InspectorMode::None;
+
+        rs64SetInspectorCamera();
 
         finishRDRAMUpload();
         inspector->newFrame(ext.framebufferGraphicsWorker);

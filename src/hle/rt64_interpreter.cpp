@@ -3,6 +3,7 @@
 //
 
 #include "rt64_interpreter.h"
+#include "common/rt64_rs64_env.h"
 
 #include <cassert>
 #include <cstdio>
@@ -32,11 +33,11 @@ namespace RT64 {
     // the hottest opcodes whenever one walk exceeds ~20ms, to attribute the hitch spikes.
     static bool rt64_walk_profile_enabled() {
         static int on = -1;
-        if (on < 0) { const char *e = std::getenv("ROGUESQ_LOG_WALK_PROFILE"); on = (e && e[0] && e[0] != '0') ? 1 : 0; }
+        if (on < 0) { on = rs64env::on("ROGUESQ_LOG_WALK_PROFILE") ? 1 : 0; }
         return on == 1;
     }
     bool rt64_f5_desync_enabled() {
-        if (g_f5ring_on < 0) { const char *e = std::getenv("ROGUESQ_DESYNC_TRACE"); g_f5ring_on = (e && e[0] && e[0] != '0') ? 1 : 0; }
+        if (g_f5ring_on < 0) { g_f5ring_on = rs64env::on("ROGUESQ_DESYNC_TRACE") ? 1 : 0; }
         return g_f5ring_on == 1;
     }
     void rt64_f5_desync_record(uint8_t op, uint32_t w0, uint32_t w1, const void *dl) {

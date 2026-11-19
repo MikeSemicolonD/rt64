@@ -31,6 +31,8 @@
 namespace RT64 {
     struct State;
     struct GBI;
+    struct Workload;
+    struct FramebufferPair;
 
     struct RSP {
         struct Vertex {
@@ -273,6 +275,8 @@ namespace RT64 {
         // Model-space lerp is exact in clip space (MVP is affine), so the GPU CS re-transform
         // reproduces the intended near-plane-clipped position. Returns the new global index.
         uint32_t appendClippedVertex(uint32_t ga, uint32_t gb, float t);
+        // True when the triangle was dropped or drawn clipped; false leaves it to the regular path.
+        bool clipTriangle(Workload &workload, FramebufferPair &fbPair, const uint32_t globalIndices[3], uint32_t geometryMode, bool doubleSided, uint32_t cullTestMask);
         void setGeometryMode(uint32_t mask);
         void pushGeometryMode();
         void popGeometryMode();

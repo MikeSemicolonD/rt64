@@ -8,6 +8,8 @@
 #include <cstdio>
 #include <cstdlib>
 
+#include "common/rt64_diag_bounds.h"
+#include "common/rt64_rs64_env.h"
 #include "common/rt64_thread.h"
 
 #include "rt64_present_queue.h"
@@ -17,8 +19,6 @@
 #define ENABLE_HIGH_RESOLUTION_RENDERER 1
 
 std::atomic<float> g_rs64_hud_placement{ 0.0f };
-
-extern "C" int rs64_vr_active(void);
 
 namespace RT64 {
     // VR: microseconds rendering the left and right eyes (CPU record plus GPU wait) and eye pairs rendered since the last workloads log.
@@ -98,6 +98,55 @@ namespace RT64 {
 
         commandList->barriers(RenderBarrierStage::GRAPHICS, after, uint32_t(std::size(after)));
         out.valid = true;
+    }
+
+    // VR: the eye poses of rendered frame framesRendered, located now and kept per frame so the present thread submits the same ones, and a depth slot
+    // the present thread is not reading for the eyes' scene depths.
+    static const rs64vr::EyeViews *rs64VrBeginFrame(SharedQueueResources &shared, uint32_t framesRendered) {
+        std::vector<rs64vr::EyeViews> &views = shared.vrTargetViews;
+        if (views.size() <= framesRendered) {
+            views.resize(framesRendered + 1);
+        }
+
+        rs64_vr_locate(framesRendered + 1, &views[framesRendered]);
+        const rs64vr::EyeViews *vrViews = &views[framesRendered];
+
+        int slot = 0;
+        std::unique_lock<std::mutex> depthLock(shared.vrDepthMutex);
+        while ((slot == shared.vrDepthPublished) || (slot == shared.vrDepthReading)) {
+            slot++;
+        }
+
+        depthLock.unlock();
+        rs64VrDepthSlot = &shared.vrDepth[slot];
+        rs64VrDepthSlot->views = *vrViews;
+        rs64VrDepthSlot->unitsPerMeter = rs64_vr_units_per_meter();
+        rs64VrDepthSlot->eyes[0].valid = false;
+        rs64VrDepthSlot->eyes[1].valid = false;
+        return vrViews;
+    }
+
+    // VR: the head's rotation in game camera space, the transpose of its view's rotation, which turns billboard sprites to face it. Both eyes share it.
+    static bool rs64VrHeadRotation(const rs64vr::EyeViews *eyeViews, float out[9]) {
+        rs64vr::Pose fakeHead;
+        rs64vr::Mat4 headView;
+        if ((eyeViews != nullptr) && eyeViews->valid) {
+            headView = rs64vr::eyeView(eyeViews->eye[0], 1.0f);
+        }
+        else if (rs64_vr_fake_head(&fakeHead)) {
+            headView = rs64vr::eyeView(fakeHead, 1.0f);
+        }
+        else {
+            return false;
+        }
+
+        for (int r = 0; r < 3; r++) {
+            for (int c = 0; c < 3; c++) {
+                out[r * 3 + c] = headView.m[c][r];
+            }
+        }
+
+        return true;
     }
 
     // WorkloadQueue
@@ -455,26 +504,8 @@ namespace RT64 {
         // The right eye reuses the left eye's transform, tile and look-at uploads: same weights, and nothing else writes those buffers in between.
         const bool rightEye = (eyeViews != nullptr) && (eye == 1);
 
-        // VR: the head's rotation in game camera space, the transpose of its view's rotation, which turns billboard sprites to face it. Both eyes share it.
         float headRotation[9];
-        bool haveHead = false;
-        rs64vr::Pose fakeHead;
-        rs64vr::Mat4 headView;
-        if ((eyeViews != nullptr) && eyeViews->valid) {
-            headView = rs64vr::eyeView(eyeViews->eye[0], 1.0f);
-            haveHead = true;
-        }
-        else if (rs64_vr_fake_head(&fakeHead)) {
-            headView = rs64vr::eyeView(fakeHead, 1.0f);
-            haveHead = true;
-        }
-
-        for (int r = 0; haveHead && (r < 3); r++) {
-            for (int c = 0; c < 3; c++) {
-                headRotation[r * 3 + c] = headView.m[c][r];
-            }
-        }
-
+        const bool haveHead = rs64VrHeadRotation(eyeViews, headRotation);
         const bool processTransforms = (prevFrame.matched || rs64WorldPass || haveHead) && !rightEye;
         bool uploadTransforms = false;
         if (processTransforms) {
@@ -1065,20 +1096,10 @@ namespace RT64 {
             framebufferRenderer->rs64TimingReport();
 
             // ROGUESQ_LOG_GPU_WAIT=1: GPU time of the screen render, beside the native render's wait logged by State.
-            static const bool logGpuWait = []() { const char *e = std::getenv("ROGUESQ_LOG_GPU_WAIT"); return (e != nullptr) && (e[0] == '1'); }();
+            static const bool logGpuWait = rs64env::on("ROGUESQ_LOG_GPU_WAIT");
             if (logGpuWait) {
-                static auto windowStart = std::chrono::steady_clock::now();
-                static double gpuMs = 0.0;
-                static int renders = 0;
-                gpuMs += workloadGpuMs;
-                renders++;
-                const auto now = std::chrono::steady_clock::now();
-                if (std::chrono::duration<double>(now - windowStart).count() >= 1.0) {
-                    fprintf(stderr, "[gpu-screen] %.1f ms/s over %d renders (avg %.1f ms GPU)\n", gpuMs, renders, gpuMs / renders);
-                    windowStart = now;
-                    gpuMs = 0.0;
-                    renders = 0;
-                }
+                static rt64diag::PerSecondLog s_screenLog;
+                s_screenLog.add(workloadGpuMs, "[gpu-screen] %.1f ms/s over %d renders (avg %.1f ms GPU)\n");
             }
 
             // Indicate to the texture cache it's safe to delete the textures if no locks are active.
@@ -1185,10 +1206,7 @@ namespace RT64 {
                         }
 
                         // A pair whose color image is the Z buffer is a depth clear, never a presentable color buffer.
-                        static const bool s_keepZClear = []() {
-                            const char *v = std::getenv("ROGUESQ_FOLLOW_DRAW_KEEP_ZCLEAR");
-                            return v && v[0] && v[0] != '0';
-                        }();
+                        static const bool s_keepZClear = rs64env::on("ROGUESQ_FOLLOW_DRAW_KEEP_ZCLEAR");
                         if (!s_keepZClear && fbPair.fillRectOnly && (fbPair.depthImage.address != 0) && (fbPair.colorImage.address == fbPair.depthImage.address)) {
                             continue;
                         }
@@ -1267,7 +1285,7 @@ namespace RT64 {
                     }
 
                     // ROGUESQ_INTERP_VARIABLE: time each real frame by its own VI count instead of the averaged rate, so a frame the game stretched to 3 VIs tweens over 3 VIs.
-                    static const bool s_variable = [](){ const char *e = std::getenv("ROGUESQ_INTERP_VARIABLE"); return !(e && e[0] == '0'); }();
+                    static const bool s_variable = rs64env::on("ROGUESQ_INTERP_VARIABLE", true);
                     const bool variable = s_variable && generateInterpolatedFrames && (workload.viFrameTicks >= 1) && (workload.viFrameTicks <= 8);
                     if (variable) {
                         tickStep = 60;
@@ -1414,32 +1432,12 @@ namespace RT64 {
                     }
 
                     // ROGUESQ_RT_INTERP_REUSE=0 traces every displayed frame again.
-                    static const bool s_reuseTrace = []() { const char *e = std::getenv("ROGUESQ_RT_INTERP_REUSE"); return !(e && (e[0] == '0')); }();
+                    static const bool s_reuseTrace = rs64env::on("ROGUESQ_RT_INTERP_REUSE", true);
                     rs64lights::g_reuseTrace = s_reuseTrace && generateInterpolatedFrames && (frame > 0);
                     // VR: both eyes of this rendered frame use poses located now, stored per rendered frame so the present thread submits the same ones.
                     const rs64vr::EyeViews *vrViews = nullptr;
                     if (rs64_vr_session() && !workload.vrScreen && !interpolationTargetKey.isEmpty()) {
-                        std::vector<rs64vr::EyeViews> &views = ext.sharedResources->vrTargetViews;
-                        if (views.size() <= framesRendered) {
-                            views.resize(framesRendered + 1);
-                        }
-
-                        rs64_vr_locate(framesRendered + 1, &views[framesRendered]);
-                        vrViews = &views[framesRendered];
-
-                        SharedQueueResources &shared = *ext.sharedResources;
-                        int slot = 0;
-                        std::unique_lock<std::mutex> depthLock(shared.vrDepthMutex);
-                        while ((slot == shared.vrDepthPublished) || (slot == shared.vrDepthReading)) {
-                            slot++;
-                        }
-
-                        depthLock.unlock();
-                        rs64VrDepthSlot = &shared.vrDepth[slot];
-                        rs64VrDepthSlot->views = *vrViews;
-                        rs64VrDepthSlot->unitsPerMeter = rs64_vr_units_per_meter();
-                        rs64VrDepthSlot->eyes[0].valid = false;
-                        rs64VrDepthSlot->eyes[1].valid = false;
+                        vrViews = rs64VrBeginFrame(*ext.sharedResources, framesRendered);
                     }
 
                     int64_t renderTimeMicro = workloadTimer.elapsedMicroseconds();

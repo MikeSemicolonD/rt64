@@ -5,6 +5,7 @@
 #pragma once
 
 #include "rt64_shader_common.h"
+#include "common/rt64_rs64_env.h"
 
 #include <condition_variable>
 #include <cstdlib>
@@ -29,7 +30,7 @@ namespace RT64 {
     // slots and have no ubershader. ROGUESQ_TEXTURE_SLOTS=1 forces it for testing, except on D3D12: its raster shaders link bindless DXIL libraries
     // (slot variants are SPIR-V only), so slot layouts would fail every pipeline, and every D3D12 GPU binds the full array anyway.
     inline bool UsesTextureSlots(bool d3d11, bool d3d12, const RenderDeviceCapabilities &capabilities) {
-        static const bool forced = []() { const char *e = std::getenv("ROGUESQ_TEXTURE_SLOTS"); return (e != nullptr) && (e[0] == '1'); }();
+        static const bool forced = rs64env::on("ROGUESQ_TEXTURE_SLOTS");
         if (d3d12) {
             return false;
         }
@@ -40,7 +41,7 @@ namespace RT64 {
     // Textures are decoded ahead of time by TextureDecodeCS when compute is available; otherwise draws sample raw TMEM.
     // ROGUESQ_GPU_TEXTURE_DECODE=0 forces raw TMEM to isolate decode problems on a new GPU.
     inline bool DecodesTexturesOnGPU(const RenderDeviceCapabilities &capabilities) {
-        static const bool allowed = []() { const char *e = std::getenv("ROGUESQ_GPU_TEXTURE_DECODE"); return (e == nullptr) || (e[0] != '0'); }();
+        static const bool allowed = rs64env::on("ROGUESQ_GPU_TEXTURE_DECODE", true);
         return allowed && capabilities.computeShaders;
     }
 

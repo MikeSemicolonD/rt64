@@ -157,6 +157,10 @@ namespace RT64 {
         void finishRDRAMUpload();
         void rs64CallTextureAverage(Workload &workload, uint32_t callIndex);
         void rs64ApplySpriteEmissions(Workload &workload, uint32_t loadCount);
+        bool rs64SkyPin();
+        void rs64LogDrawStateProbes();
+        void rs64SyncLightPresets(Workload &workload, int presetLevel);
+        void rs64SetInspectorCamera();
         void fullSyncFramebufferPairTiles(Workload &workload, FramebufferPair &fbPair, uint32_t &loadOpCursor, uint32_t &rdpTileCursor);
         void listProcessBegin();
         void listProcessEnd();

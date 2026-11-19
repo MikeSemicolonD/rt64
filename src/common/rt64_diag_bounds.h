@@ -7,7 +7,9 @@
 // 5000 and is overridable with ROGUESQ_DIAG_CAP. Once saturated a set reports a
 // recent-window distinct count (<= cap), not an all-time total.
 
+#include <chrono>
 #include <cstddef>
+#include <cstdio>
 #include <cstdlib>
 #include <deque>
 #include <functional>
@@ -61,6 +63,28 @@ public:
 private:
     std::unordered_map<K, V, Hash> map_;
     std::deque<K> order_;
+};
+
+// Sums one value per call and logs the second's total, call count and mean once a second; fmt takes those three as %f, %d, %f.
+struct PerSecondLog {
+    std::chrono::steady_clock::time_point start = std::chrono::steady_clock::now();
+    double sum = 0.0;
+    int count = 0;
+
+    void add(double value, const char *fmt) {
+        sum += value;
+        count++;
+
+        const auto now = std::chrono::steady_clock::now();
+        if (std::chrono::duration<double>(now - start).count() < 1.0) {
+            return;
+        }
+
+        std::fprintf(stderr, fmt, sum, count, sum / count);
+        start = now;
+        sum = 0.0;
+        count = 0;
+    }
 };
 
 } // namespace rt64diag

@@ -3,6 +3,7 @@
 //
 
 #include "rt64_rdp_tmem.h"
+#include "common/rt64_rs64_env.h"
 
 #include <cassert>
 #include <cinttypes>
@@ -82,7 +83,7 @@ namespace RT64 {
 
         if (!memoHit) {
             // Hash texel words written before this tile's own load as zero: a partial load leaves stale bytes from earlier textures in the sampled area, and they differ run to run. ROGUESQ_TEX_HASH_ALL_TMEM=1 restores upstream hashing.
-            static const bool hashAllTMEM = []() { const char *e = std::getenv("ROGUESQ_TEX_HASH_ALL_TMEM"); return e && e[0] == '1'; }();
+            static const bool hashAllTMEM = rs64env::on("ROGUESQ_TEX_HASH_ALL_TMEM");
             uint64_t hashTMEM[RDP_TMEM_WORDS];
             if (!hashAllTMEM) {
                 memcpy(hashTMEM, state->rdp->TMEM, sizeof(hashTMEM));

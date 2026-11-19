@@ -916,6 +916,146 @@ namespace RT64 {
             fbChangesDrawDepth.pipeline = device->createGraphicsPipeline(pipelineDesc);
         }
 
+        setupRS64Shaders(device, multisampling, shaderFormat, fullScreenVertexShader.get());
+
+        // Copy color to depth and depth to color.
+        {
+            RenderTargetCopyDescriptorSet descriptorSet;
+            layoutBuilder.begin();
+            layoutBuilder.addDescriptorSet(descriptorSet);
+            layoutBuilder.addPushConstant(0, 0, sizeof(interop::RenderTargetCopyCB), RenderShaderStageFlag::PIXEL);
+            layoutBuilder.end();
+            rtCopyDepthToColor.pipelineLayout = layoutBuilder.create(device);
+            rtCopyDepthToColorMS.pipelineLayout = layoutBuilder.create(device);
+            rtCopyColorToDepth.pipelineLayout = layoutBuilder.create(device);
+            rtCopyColorToDepthMS.pipelineLayout = layoutBuilder.create(device);
+
+            std::unique_ptr<RenderShader> depthToColorShader = device->createShader(RtCopyDepthToColorPSBlob, RtCopyDepthToColorPSBlobSize, "PSMain", shaderFormat);
+            RenderGraphicsPipelineDesc pipelineDesc;
+            pipelineDesc.renderTargetBlend[0] = RenderBlendDesc::Copy();
+            pipelineDesc.renderTargetFormat[0] = RenderTarget::colorBufferFormat(usesHDR);
+            pipelineDesc.renderTargetCount = 1;
+            pipelineDesc.vertexShader = fullScreenVertexShader.get();
+            pipelineDesc.pipelineLayout = rtCopyDepthToColor.pipelineLayout.get();
+            pipelineDesc.pixelShader = depthToColorShader.get();
+            rtCopyDepthToColor.pipeline = device->createGraphicsPipeline(pipelineDesc);
+
+            if (RtCopyDepthToColorPSMSBlob != nullptr) {
+                std::unique_ptr<RenderShader> depthToColorMSShader = device->createShader(RtCopyDepthToColorPSMSBlob, RtCopyDepthToColorPSMSBlobSize, "PSMain", shaderFormat);
+                pipelineDesc.pixelShader = depthToColorMSShader.get();
+                pipelineDesc.multisampling = multisampling;
+                rtCopyDepthToColorMS.pipeline = device->createGraphicsPipeline(pipelineDesc);
+            }
+
+            std::unique_ptr<RenderShader> colorToDepthShader = device->createShader(RtCopyColorToDepthPSBlob, RtCopyColorToDepthPSBlobSize, "PSMain", shaderFormat);
+            pipelineDesc.depthEnabled = true;
+            pipelineDesc.depthFunction = RenderComparisonFunction::ALWAYS;
+            pipelineDesc.depthWriteEnabled = true;
+            pipelineDesc.depthTargetFormat = RenderFormat::D32_FLOAT;
+            pipelineDesc.pipelineLayout = rtCopyColorToDepth.pipelineLayout.get();
+            pipelineDesc.pixelShader = colorToDepthShader.get();
+            pipelineDesc.multisampling = RenderMultisampling();
+            rtCopyColorToDepth.pipeline = device->createGraphicsPipeline(pipelineDesc);
+
+            if (RtCopyColorToDepthPSMSBlob != nullptr) {
+                std::unique_ptr<RenderShader> colorToDepthMSShader = device->createShader(RtCopyColorToDepthPSMSBlob, RtCopyColorToDepthPSMSBlobSize, "PSMain", shaderFormat);
+                pipelineDesc.pixelShader = colorToDepthMSShader.get();
+                pipelineDesc.multisampling = multisampling;
+                rtCopyColorToDepthMS.pipeline = device->createGraphicsPipeline(pipelineDesc);
+            }
+        }
+
+        // Post process.
+        {
+            PostProcessDescriptorSet descriptorSet(samplerLibrary);
+            layoutBuilder.begin();
+            layoutBuilder.addDescriptorSet(descriptorSet);
+            layoutBuilder.end();
+            postProcess.pipelineLayout = layoutBuilder.create(device);
+
+            std::unique_ptr<RenderShader> pixelShader = device->createShader(CREATE_SHADER_INPUTS(PostProcessPSBlobDXIL, PostProcessPSBlobSPIRV, PostProcessPSBlobMSL, "PSMain", shaderFormat));
+            RenderGraphicsPipelineDesc pipelineDesc;
+            pipelineDesc.pipelineLayout = postProcess.pipelineLayout.get();
+            pipelineDesc.renderTargetBlend[0] = RenderBlendDesc::AlphaBlend();
+            pipelineDesc.renderTargetFormat[0] = RenderTarget::colorBufferFormat(usesHDR);
+            pipelineDesc.renderTargetCount = 1;
+            pipelineDesc.vertexShader = fullScreenVertexShader.get();
+            pipelineDesc.pixelShader = pixelShader.get();
+            pipelineDesc.multisampling = multisampling;
+            postProcess.pipeline = device->createGraphicsPipeline(pipelineDesc);
+        }
+        
+        // Raytracing debug. The browser build has no inspector, and DebugPS includes the RT header's typed buffers.
+#   ifndef PLUME_WEBGPU_ENABLED
+        {
+            FramebufferRendererDescriptorCommonSet descriptorCommonSet(samplerLibrary, deviceCapabilities.raytracing);
+            FramebufferRendererDescriptorTextureSet descriptorTextureSet;
+            FramebufferRendererDescriptorFramebufferSet descriptorFramebufferSet;
+            layoutBuilder.begin();
+            layoutBuilder.addDescriptorSet(descriptorCommonSet);
+            layoutBuilder.addDescriptorSet(descriptorTextureSet);
+            layoutBuilder.addDescriptorSet(descriptorTextureSet);
+            layoutBuilder.addDescriptorSet(descriptorFramebufferSet);
+            layoutBuilder.end();
+            debug.pipelineLayout = layoutBuilder.create(device);
+
+            std::unique_ptr<RenderShader> pixelShader = device->createShader(CREATE_SHADER_INPUTS(DebugPSBlobDXIL, DebugPSBlobSPIRV, DebugPSBlobMSL, "PSMain", shaderFormat));
+            RenderGraphicsPipelineDesc pipelineDesc;
+            pipelineDesc.pipelineLayout = debug.pipelineLayout.get();
+            pipelineDesc.renderTargetBlend[0] = RenderBlendDesc::AlphaBlend();
+            pipelineDesc.renderTargetFormat[0] = RenderTarget::colorBufferFormat(usesHDR);
+            pipelineDesc.renderTargetCount = 1;
+            pipelineDesc.vertexShader = fullScreenVertexShader.get();
+            pipelineDesc.pixelShader = pixelShader.get();
+            pipelineDesc.multisampling = multisampling;
+            debug.pipeline = device->createGraphicsPipeline(pipelineDesc);
+        }
+#   endif
+
+        // RSP Vertex Test Z.
+        {
+            RSPVertexTestZDescriptorSet descriptorTestSet;
+            FramebufferRendererDescriptorFramebufferSet descriptorFramebufferSet;
+            layoutBuilder.begin();
+            layoutBuilder.addPushConstant(0, 0, sizeof(interop::RSPVertexTestZCB), RenderShaderStageFlag::COMPUTE);
+            layoutBuilder.addDescriptorSet(descriptorTestSet);
+            layoutBuilder.addDescriptorSet(descriptorFramebufferSet);
+            layoutBuilder.end();
+            rspVertexTestZ.pipelineLayout = layoutBuilder.create(device);
+            rspVertexTestZMS.pipelineLayout = layoutBuilder.create(device);
+
+            std::unique_ptr<RenderShader> computeShader = device->createShader(CREATE_SHADER_INPUTS(RSPVertexTestZCSBlobDXIL, RSPVertexTestZCSBlobSPIRV, RSPVertexTestZCSBlobMSL, "CSMain", shaderFormat));
+            rspVertexTestZ.pipeline = device->createComputePipeline(RenderComputePipelineDesc(rspVertexTestZ.pipelineLayout.get(), computeShader.get(), 1, 1, 1));
+
+            std::unique_ptr<RenderShader> computeShaderMS = device->createShader(CREATE_SHADER_INPUTS(RSPVertexTestZCSMSBlobDXIL, RSPVertexTestZCSMSBlobSPIRV, RSPVertexTestZCSMSBlobMSL, "CSMain", shaderFormat));
+            rspVertexTestZMS.pipeline = device->createComputePipeline(RenderComputePipelineDesc(rspVertexTestZMS.pipelineLayout.get(), computeShaderMS.get(), 1, 1, 1));
+        }
+
+        // Texture Resolve.
+        if (TextureResolvePSBlob != nullptr) {
+            TextureCopyDescriptorSet descriptorSet;
+            layoutBuilder.begin();
+            layoutBuilder.addPushConstant(0, 0, sizeof(interop::TextureCopyCB), RenderShaderStageFlag::PIXEL);
+            layoutBuilder.addDescriptorSet(descriptorSet);
+            layoutBuilder.end();
+            textureResolve.pipelineLayout = layoutBuilder.create(device);
+
+            std::unique_ptr<RenderShader> pixelShader = device->createShader(TextureResolvePSBlob, TextureResolvePSBlobSize, "PSMain", shaderFormat);
+            RenderGraphicsPipelineDesc pipelineDesc;
+            pipelineDesc.pipelineLayout = textureResolve.pipelineLayout.get();
+            pipelineDesc.renderTargetBlend[0] = RenderBlendDesc::Copy();
+            pipelineDesc.renderTargetFormat[0] = RenderTarget::colorBufferFormat(usesHDR);
+            pipelineDesc.renderTargetCount = 1;
+            pipelineDesc.vertexShader = fullScreenVertexShader.get();
+            pipelineDesc.pixelShader = pixelShader.get();
+            textureResolve.pipeline = device->createGraphicsPipeline(pipelineDesc);
+        }
+    }
+
+    // The RS64 passes: the whole-map terrain, the point lights and, on devices with ray queries, the traced shadow, fog and reflection passes.
+    void ShaderLibrary::setupRS64Shaders(RenderDevice *device, const RenderMultisampling &multisampling, RenderShaderFormat shaderFormat, const RenderShader *fullScreenVertexShader) {
+        RenderPipelineLayoutBuilder layoutBuilder;
+
         // RS64 whole-map terrain: the vertex shader builds the map lattice; depth tested and written like the game's terrain records.
         {
             RS64TerrainDescriptorSet descriptorSet(samplerLibrary);
@@ -983,7 +1123,7 @@ namespace RT64 {
             RenderGraphicsPipelineDesc pipelineDesc;
             pipelineDesc.renderTargetFormat[0] = RenderTarget::colorBufferFormat(usesHDR);
             pipelineDesc.renderTargetCount = 1;
-            pipelineDesc.vertexShader = fullScreenVertexShader.get();
+            pipelineDesc.vertexShader = fullScreenVertexShader;
             pipelineDesc.pixelShader = lightsShader.get();
             pipelineDesc.multisampling = multisampling;
             pipelineDesc.depthTargetFormat = RenderFormat::D32_FLOAT;
@@ -1080,7 +1220,7 @@ namespace RT64 {
             RenderGraphicsPipelineDesc pipelineDesc;
             pipelineDesc.renderTargetFormat[0] = RenderTarget::colorBufferFormat(usesHDR);
             pipelineDesc.renderTargetCount = 1;
-            pipelineDesc.vertexShader = fullScreenVertexShader.get();
+            pipelineDesc.vertexShader = fullScreenVertexShader;
             pipelineDesc.pixelShader = shadowsShader.get();
             pipelineDesc.multisampling = multisampling;
             pipelineDesc.depthTargetFormat = RenderFormat::D32_FLOAT;
@@ -1279,138 +1419,5 @@ namespace RT64 {
             rs64FogShaftsDebug.pipeline = device->createGraphicsPipeline(pipelineDesc);
         }
 #   endif
-
-        // Copy color to depth and depth to color.
-        {
-            RenderTargetCopyDescriptorSet descriptorSet;
-            layoutBuilder.begin();
-            layoutBuilder.addDescriptorSet(descriptorSet);
-            layoutBuilder.addPushConstant(0, 0, sizeof(interop::RenderTargetCopyCB), RenderShaderStageFlag::PIXEL);
-            layoutBuilder.end();
-            rtCopyDepthToColor.pipelineLayout = layoutBuilder.create(device);
-            rtCopyDepthToColorMS.pipelineLayout = layoutBuilder.create(device);
-            rtCopyColorToDepth.pipelineLayout = layoutBuilder.create(device);
-            rtCopyColorToDepthMS.pipelineLayout = layoutBuilder.create(device);
-
-            std::unique_ptr<RenderShader> depthToColorShader = device->createShader(RtCopyDepthToColorPSBlob, RtCopyDepthToColorPSBlobSize, "PSMain", shaderFormat);
-            RenderGraphicsPipelineDesc pipelineDesc;
-            pipelineDesc.renderTargetBlend[0] = RenderBlendDesc::Copy();
-            pipelineDesc.renderTargetFormat[0] = RenderTarget::colorBufferFormat(usesHDR);
-            pipelineDesc.renderTargetCount = 1;
-            pipelineDesc.vertexShader = fullScreenVertexShader.get();
-            pipelineDesc.pipelineLayout = rtCopyDepthToColor.pipelineLayout.get();
-            pipelineDesc.pixelShader = depthToColorShader.get();
-            rtCopyDepthToColor.pipeline = device->createGraphicsPipeline(pipelineDesc);
-
-            if (RtCopyDepthToColorPSMSBlob != nullptr) {
-                std::unique_ptr<RenderShader> depthToColorMSShader = device->createShader(RtCopyDepthToColorPSMSBlob, RtCopyDepthToColorPSMSBlobSize, "PSMain", shaderFormat);
-                pipelineDesc.pixelShader = depthToColorMSShader.get();
-                pipelineDesc.multisampling = multisampling;
-                rtCopyDepthToColorMS.pipeline = device->createGraphicsPipeline(pipelineDesc);
-            }
-
-            std::unique_ptr<RenderShader> colorToDepthShader = device->createShader(RtCopyColorToDepthPSBlob, RtCopyColorToDepthPSBlobSize, "PSMain", shaderFormat);
-            pipelineDesc.depthEnabled = true;
-            pipelineDesc.depthFunction = RenderComparisonFunction::ALWAYS;
-            pipelineDesc.depthWriteEnabled = true;
-            pipelineDesc.depthTargetFormat = RenderFormat::D32_FLOAT;
-            pipelineDesc.pipelineLayout = rtCopyColorToDepth.pipelineLayout.get();
-            pipelineDesc.pixelShader = colorToDepthShader.get();
-            pipelineDesc.multisampling = RenderMultisampling();
-            rtCopyColorToDepth.pipeline = device->createGraphicsPipeline(pipelineDesc);
-
-            if (RtCopyColorToDepthPSMSBlob != nullptr) {
-                std::unique_ptr<RenderShader> colorToDepthMSShader = device->createShader(RtCopyColorToDepthPSMSBlob, RtCopyColorToDepthPSMSBlobSize, "PSMain", shaderFormat);
-                pipelineDesc.pixelShader = colorToDepthMSShader.get();
-                pipelineDesc.multisampling = multisampling;
-                rtCopyColorToDepthMS.pipeline = device->createGraphicsPipeline(pipelineDesc);
-            }
-        }
-
-        // Post process.
-        {
-            PostProcessDescriptorSet descriptorSet(samplerLibrary);
-            layoutBuilder.begin();
-            layoutBuilder.addDescriptorSet(descriptorSet);
-            layoutBuilder.end();
-            postProcess.pipelineLayout = layoutBuilder.create(device);
-
-            std::unique_ptr<RenderShader> pixelShader = device->createShader(CREATE_SHADER_INPUTS(PostProcessPSBlobDXIL, PostProcessPSBlobSPIRV, PostProcessPSBlobMSL, "PSMain", shaderFormat));
-            RenderGraphicsPipelineDesc pipelineDesc;
-            pipelineDesc.pipelineLayout = postProcess.pipelineLayout.get();
-            pipelineDesc.renderTargetBlend[0] = RenderBlendDesc::AlphaBlend();
-            pipelineDesc.renderTargetFormat[0] = RenderTarget::colorBufferFormat(usesHDR);
-            pipelineDesc.renderTargetCount = 1;
-            pipelineDesc.vertexShader = fullScreenVertexShader.get();
-            pipelineDesc.pixelShader = pixelShader.get();
-            pipelineDesc.multisampling = multisampling;
-            postProcess.pipeline = device->createGraphicsPipeline(pipelineDesc);
-        }
-        
-        // Raytracing debug. The browser build has no inspector, and DebugPS includes the RT header's typed buffers.
-#   ifndef PLUME_WEBGPU_ENABLED
-        {
-            FramebufferRendererDescriptorCommonSet descriptorCommonSet(samplerLibrary, deviceCapabilities.raytracing);
-            FramebufferRendererDescriptorTextureSet descriptorTextureSet;
-            FramebufferRendererDescriptorFramebufferSet descriptorFramebufferSet;
-            layoutBuilder.begin();
-            layoutBuilder.addDescriptorSet(descriptorCommonSet);
-            layoutBuilder.addDescriptorSet(descriptorTextureSet);
-            layoutBuilder.addDescriptorSet(descriptorTextureSet);
-            layoutBuilder.addDescriptorSet(descriptorFramebufferSet);
-            layoutBuilder.end();
-            debug.pipelineLayout = layoutBuilder.create(device);
-
-            std::unique_ptr<RenderShader> pixelShader = device->createShader(CREATE_SHADER_INPUTS(DebugPSBlobDXIL, DebugPSBlobSPIRV, DebugPSBlobMSL, "PSMain", shaderFormat));
-            RenderGraphicsPipelineDesc pipelineDesc;
-            pipelineDesc.pipelineLayout = debug.pipelineLayout.get();
-            pipelineDesc.renderTargetBlend[0] = RenderBlendDesc::AlphaBlend();
-            pipelineDesc.renderTargetFormat[0] = RenderTarget::colorBufferFormat(usesHDR);
-            pipelineDesc.renderTargetCount = 1;
-            pipelineDesc.vertexShader = fullScreenVertexShader.get();
-            pipelineDesc.pixelShader = pixelShader.get();
-            pipelineDesc.multisampling = multisampling;
-            debug.pipeline = device->createGraphicsPipeline(pipelineDesc);
-        }
-#   endif
-
-        // RSP Vertex Test Z.
-        {
-            RSPVertexTestZDescriptorSet descriptorTestSet;
-            FramebufferRendererDescriptorFramebufferSet descriptorFramebufferSet;
-            layoutBuilder.begin();
-            layoutBuilder.addPushConstant(0, 0, sizeof(interop::RSPVertexTestZCB), RenderShaderStageFlag::COMPUTE);
-            layoutBuilder.addDescriptorSet(descriptorTestSet);
-            layoutBuilder.addDescriptorSet(descriptorFramebufferSet);
-            layoutBuilder.end();
-            rspVertexTestZ.pipelineLayout = layoutBuilder.create(device);
-            rspVertexTestZMS.pipelineLayout = layoutBuilder.create(device);
-
-            std::unique_ptr<RenderShader> computeShader = device->createShader(CREATE_SHADER_INPUTS(RSPVertexTestZCSBlobDXIL, RSPVertexTestZCSBlobSPIRV, RSPVertexTestZCSBlobMSL, "CSMain", shaderFormat));
-            rspVertexTestZ.pipeline = device->createComputePipeline(RenderComputePipelineDesc(rspVertexTestZ.pipelineLayout.get(), computeShader.get(), 1, 1, 1));
-
-            std::unique_ptr<RenderShader> computeShaderMS = device->createShader(CREATE_SHADER_INPUTS(RSPVertexTestZCSMSBlobDXIL, RSPVertexTestZCSMSBlobSPIRV, RSPVertexTestZCSMSBlobMSL, "CSMain", shaderFormat));
-            rspVertexTestZMS.pipeline = device->createComputePipeline(RenderComputePipelineDesc(rspVertexTestZMS.pipelineLayout.get(), computeShaderMS.get(), 1, 1, 1));
-        }
-
-        // Texture Resolve.
-        if (TextureResolvePSBlob != nullptr) {
-            TextureCopyDescriptorSet descriptorSet;
-            layoutBuilder.begin();
-            layoutBuilder.addPushConstant(0, 0, sizeof(interop::TextureCopyCB), RenderShaderStageFlag::PIXEL);
-            layoutBuilder.addDescriptorSet(descriptorSet);
-            layoutBuilder.end();
-            textureResolve.pipelineLayout = layoutBuilder.create(device);
-
-            std::unique_ptr<RenderShader> pixelShader = device->createShader(TextureResolvePSBlob, TextureResolvePSBlobSize, "PSMain", shaderFormat);
-            RenderGraphicsPipelineDesc pipelineDesc;
-            pipelineDesc.pipelineLayout = textureResolve.pipelineLayout.get();
-            pipelineDesc.renderTargetBlend[0] = RenderBlendDesc::Copy();
-            pipelineDesc.renderTargetFormat[0] = RenderTarget::colorBufferFormat(usesHDR);
-            pipelineDesc.renderTargetCount = 1;
-            pipelineDesc.vertexShader = fullScreenVertexShader.get();
-            pipelineDesc.pixelShader = pixelShader.get();
-            textureResolve.pipeline = device->createGraphicsPipeline(pipelineDesc);
-        }
     }
 };

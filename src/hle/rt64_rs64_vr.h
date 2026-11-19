@@ -103,10 +103,7 @@ namespace rs64vr {
 
     // ROGUESQ_LOG_VR=1: headset frame paths and eye-less workloads every 2 s, and the eye target size when it changes.
     inline bool logEnabled() {
-        static const bool enabled = []() {
-            const char *v = std::getenv("ROGUESQ_LOG_VR");
-            return (v != nullptr) && (v[0] != '\0') && (v[0] != '0');
-        }();
+        static const bool enabled = rs64env::on("ROGUESQ_LOG_VR");
         return enabled;
     }
 }
