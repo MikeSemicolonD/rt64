@@ -21,7 +21,7 @@ namespace rs64lights {
     };
 
     // A level preset's haze: sunlit air near the camera that shows shafts on its own, whatever the game's fog. amount = the share of light a
-    // fully sunlit ray of length range scatters; color < 0 = the sun's colour.
+    // fully sunlit ray of length range scatters; color < 0 = the level's mission sun, or the scene's sun where the level has none.
     struct Haze {
         float amount = 0.0f;
         float range = 0.0f;

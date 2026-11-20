@@ -1206,6 +1206,12 @@ namespace RT64 {
             }
         }
 
+        // Without a preset colour the haze takes the level's mission sun, so a level's intro cutscene (lit by its own hmp) matches its mission.
+        float levelSun[3];
+        if ((workload.rs64Haze.amount > 0.0f) && (workload.rs64Haze.color[0] < 0.0f) && (presetLevel >= 0) && rs64_level_sun_color(uint32_t(presetLevel), levelSun)) {
+            memcpy(workload.rs64Haze.color, levelSun, sizeof(levelSun));
+        }
+
         if ((emissiveMeshes != rs64EmissiveMeshes) || (emissiveTranslucent != rs64EmissiveTranslucent)) {
             rs64EmissiveMeshes = emissiveMeshes;
             rs64EmissiveTranslucent = emissiveTranslucent;

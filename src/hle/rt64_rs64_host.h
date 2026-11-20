@@ -13,6 +13,8 @@ extern "C" {
     int rs64_terrain_fog_clip(void);
     int rs64_terrain_tessellation(void);
     int rs64_terrain_textures(uint32_t level, const uint8_t **bank, uint32_t *bankSize, const uint8_t **ids, uint32_t *idsSize);
+    // The level's mission sun colour (normalized), read from its hmp; 0 when unknown.
+    int rs64_level_sun_color(uint32_t level, float *rgb);
     float rs64_draw_dist(void);
     float rs64_fog_dist(void);
     float rs64_fog_tail_end(void);

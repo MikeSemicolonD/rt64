@@ -404,7 +404,7 @@ namespace RT64 {
             if (lightsCfg.log) {
                 static uint32_t s_f = 0;
                 if ((++s_f % 120) == 1) {
-                    std::fprintf(stderr, "[rt-fog] pick: valid=%d tris=%u mul=%.2f offset=%.2f color=(%.3f,%.3f,%.3f) filled=%d haze=%.2f/%.0f\n", (int)fog.valid, fog.tris, fog.mul, fog.offset, fog.color[0], fog.color[1], fog.color[2], (int)fogFilled, hazeVisible ? haze.amount : 0.0f, haze.range);
+                    std::fprintf(stderr, "[rt-fog] pick: valid=%d tris=%u mul=%.2f offset=%.2f color=(%.3f,%.3f,%.3f) filled=%d haze=%.2f/%.0f hazeColor=(%.3f,%.3f,%.3f)\n", (int)fog.valid, fog.tris, fog.mul, fog.offset, fog.color[0], fog.color[1], fog.color[2], (int)fogFilled, hazeVisible ? haze.amount : 0.0f, haze.range, haze.color[0], haze.color[1], haze.color[2]);
                 }
             }
         }
