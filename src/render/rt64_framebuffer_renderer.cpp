@@ -2030,6 +2030,8 @@ namespace RT64 {
         // A new view: since the last 3D pair into this colour image, a pair cleared this pair's depth (a fill into the depth image).
         bool depthCleared = false;
         framebuffer.rs64.newView = false;
+        framebuffer.rs64.viewTop = 0;
+        framebuffer.rs64.viewBottom = 0;
         for (uint32_t f = p.fbPairIndex; f-- > 0;) {
             const auto &prev = p.curWorkload->fbPairs[f];
             if ((prev.colorImage.address == fbPair.depthImage.address) && (prev.colorImage.address != fbPair.colorImage.address)) {
@@ -2147,6 +2149,9 @@ namespace RT64 {
                 passes.transformsIndex = proj.transformsIndex;
                 passes.screenScale = triangles.screenScale;
                 passes.screenOffset = triangles.screenOffset;
+                const RenderRect viewScissor = convertFixedRect(proj.scissorRect, p.resolutionScale, p.fbWidth, projInvRatioScale, extOriginPercentage, 0, G_EX_ORIGIN_NONE, G_EX_ORIGIN_NONE);
+                framebuffer.rs64.viewTop = viewScissor.top;
+                framebuffer.rs64.viewBottom = viewScissor.bottom;
             }
 
             for (uint32_t d = 0; (d < proj.gameCallCount) && (globalCallIndex < p.maxGameCall); d++) {

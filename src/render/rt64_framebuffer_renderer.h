@@ -192,6 +192,9 @@ namespace RT64 {
             const void *target = nullptr;
             // This pair draws a new view over an earlier 3D pair on the same colour target after clearing its depth (the cockpit over the world).
             bool newView = false;
+            // Rows the main view draws in (its scissor: a cutscene's letterbox picture); the passes write only there. Empty = the whole viewport.
+            int32_t viewTop = 0;
+            int32_t viewBottom = 0;
             std::unique_ptr<RenderBuffer> fogBuffer;
             std::unique_ptr<RS64TracedDescriptorSet> fogSet;
             bool fogDebug = false;

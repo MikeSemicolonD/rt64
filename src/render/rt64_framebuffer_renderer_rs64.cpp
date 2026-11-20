@@ -60,6 +60,19 @@ namespace RT64 {
         return s.terrainNormalGpu || (s.terrainActive && s.terrainMap && (s.terrainBuiltVersion != s.terrainMap->version));
     }
 
+    // A pass's scissor: the viewport cut to the main view's rows (top < bottom), so a cutscene's letterbox bars, drawn over scene depth, stay black.
+    // div 2 for the half-resolution targets.
+    static RenderRect rs64PassRect(const RenderViewport &v, int32_t top, int32_t bottom, int32_t div = 1) {
+        int32_t y0 = int32_t(v.y);
+        int32_t y1 = int32_t(v.y + v.height);
+        if (bottom > top) {
+            y0 = std::max(y0, top);
+            y1 = std::min(y1, bottom);
+        }
+
+        return RenderRect(int32_t(v.x) / div, y0 / div, (int32_t(v.x + v.width) + div - 1) / div, (y1 + div - 1) / div);
+    }
+
     // Two projections show the same 3D view when their raw view and projection matrices and their N64 viewport match (the radar shares the matrices but not the viewport).
     // ignoreProj: camera-space positions only need the same camera; the player craft is drawn under its own projection (nearer clip) in the same view.
     static bool rs64SameView(const DrawData &drawData, uint32_t a, uint32_t b, bool ignoreProj = false) {
@@ -1447,7 +1460,7 @@ namespace RT64 {
         const RenderViewport &v = framebuffer.viewport;
         if (framebuffer.rs64.shadowsSoft) {
             // Trace into the mask, blur H into ping, then blur V and darken the colour target (left bound as colorWriteDepthRead, as submitDepthAccess set it).
-            const RenderRect sc(int32_t(v.x), int32_t(v.y), int32_t(v.x + v.width), int32_t(v.y + v.height));
+            const RenderRect sc = rs64PassRect(v, framebuffer.rs64.viewTop, framebuffer.rs64.viewBottom);
             RenderTexture *mask = framebuffer.rs64.softMask.get();
             RenderTexture *ping = framebuffer.rs64.softPing.get();
             RenderTexture *ind = framebuffer.rs64.softIndirect.get();
@@ -1467,7 +1480,7 @@ namespace RT64 {
                 worker->commandList->clearColor(2, RenderColor(0.0f, 0.0f, 0.0f, 0.0f));
                 if (framebuffer.rs64.softHalf) {
                     worker->commandList->setViewports(RenderViewport(v.x / 2.0f, v.y / 2.0f, v.width / 2.0f, v.height / 2.0f, v.minDepth, v.maxDepth));
-                    worker->commandList->setScissors(RenderRect(int32_t(v.x) / 2, int32_t(v.y) / 2, (int32_t(v.x + v.width) + 1) / 2, (int32_t(v.y + v.height) + 1) / 2));
+                    worker->commandList->setScissors(rs64PassRect(v, framebuffer.rs64.viewTop, framebuffer.rs64.viewBottom, 2));
                 }
                 else {
                     worker->commandList->setViewports(v);
@@ -1549,7 +1562,7 @@ namespace RT64 {
         }
         const ShaderRecord &record = framebuffer.rs64.shadowsDebug ? shaderLibrary->rs64ShadowsDebug : shaderLibrary->rs64Shadows;
         worker->commandList->setViewports(v);
-        worker->commandList->setScissors(RenderRect(int32_t(v.x), int32_t(v.y), int32_t(v.x + v.width), int32_t(v.y + v.height)));
+        worker->commandList->setScissors(rs64PassRect(v, framebuffer.rs64.viewTop, framebuffer.rs64.viewBottom));
         worker->commandList->setPipeline(record.pipeline.get());
         worker->commandList->setGraphicsPipelineLayout(record.pipelineLayout.get());
         bindRS64Traced(worker, *framebuffer.rs64.shadowsSet, framebuffer.rs64.shadowsBuffer.get(), offsetof(interop::RS64ShadowsCB, cutoutDrawCount), false);
@@ -1762,7 +1775,7 @@ namespace RT64 {
         const RenderViewport &v = framebuffer.viewport;
 
         worker->commandList->setViewports(v);
-        worker->commandList->setScissors(RenderRect(int32_t(v.x), int32_t(v.y), int32_t(v.x + v.width), int32_t(v.y + v.height)));
+        worker->commandList->setScissors(rs64PassRect(v, framebuffer.rs64.viewTop, framebuffer.rs64.viewBottom));
         worker->commandList->setVertexBuffers(0, nullptr, 0, nullptr);
 
         for (const ShaderRecord *rec : { &shaderLibrary->rs64WaterMirror, &shaderLibrary->rs64WaterMirrorNeg }) {
@@ -1778,8 +1791,9 @@ namespace RT64 {
         submitDepthAccess(worker, targetDrawCall.fbStorage, true, depthState);
         framebuffer.rs64.fogSet->setAccelerationStructure(framebuffer.rs64.fogSet->gScene, rs64Shadow.tlas.get());
         const RenderViewport &v = framebuffer.viewport;
+        const RenderRect sc = rs64PassRect(v, framebuffer.rs64.viewTop, framebuffer.rs64.viewBottom);
         worker->commandList->setViewports(v);
-        worker->commandList->setScissors(RenderRect(int32_t(v.x), int32_t(v.y), int32_t(v.x + v.width), int32_t(v.y + v.height)));
+        worker->commandList->setScissors(sc);
         worker->commandList->setVertexBuffers(0, nullptr, 0, nullptr);
         auto draw = [&](const ShaderRecord &record) {
             worker->commandList->setPipeline(record.pipeline.get());
@@ -1799,7 +1813,7 @@ namespace RT64 {
             worker->commandList->setFramebuffer(framebuffer.rs64.hazeHalf.framebuffer.get());
             worker->commandList->clearColor(0, RenderColor(0.0f, 0.0f, 0.0f, 0.0f));
             worker->commandList->setViewports(RenderViewport(v.x / 2.0f, v.y / 2.0f, v.width / 2.0f, v.height / 2.0f, v.minDepth, v.maxDepth));
-            worker->commandList->setScissors(RenderRect(int32_t(v.x) / 2, int32_t(v.y) / 2, (int32_t(v.x + v.width) + 1) / 2, (int32_t(v.y + v.height) + 1) / 2));
+            worker->commandList->setScissors(rs64PassRect(v, framebuffer.rs64.viewTop, framebuffer.rs64.viewBottom, 2));
             draw(shaderLibrary->rs64HazeShafts);
 
             RenderTexture *color = targetDrawCall.fbStorage->colorTarget->texture.get();
@@ -1807,7 +1821,7 @@ namespace RT64 {
             worker->commandList->barriers(RenderBarrierStage::GRAPHICS, toUpsample, uint32_t(std::size(toUpsample)));
             worker->commandList->setFramebuffer(targetDrawCall.fbStorage->colorWriteDepthRead.get());
             worker->commandList->setViewports(v);
-            worker->commandList->setScissors(RenderRect(int32_t(v.x), int32_t(v.y), int32_t(v.x + v.width), int32_t(v.y + v.height)));
+            worker->commandList->setScissors(sc);
             draw(shaderLibrary->rs64HazeUpsample);
         }
     }
@@ -2668,7 +2682,7 @@ namespace RT64 {
         const ShaderRecord &record = shadowed ? (framebuffer.rs64.lightsDebug ? shaderLibrary->rs64LightsShadowedDebug : shaderLibrary->rs64LightsShadowed)
                                               : (framebuffer.rs64.lightsDebug ? shaderLibrary->rs64LightsDebug : shaderLibrary->rs64Lights);
         const RenderViewport &v = framebuffer.viewport;
-        const RenderRect sc(int32_t(v.x), int32_t(v.y), int32_t(v.x + v.width), int32_t(v.y + v.height));
+        const RenderRect sc = rs64PassRect(v, framebuffer.rs64.viewTop, framebuffer.rs64.viewBottom);
         const bool half = framebuffer.rs64.lightsHalfOn && (framebuffer.rs64.lightsHalf.framebuffer != nullptr);
         const ShaderRecord &pass = !half ? record : (shadowed ? shaderLibrary->rs64LightsShadowedHalf : shaderLibrary->rs64LightsHalf);
         if (half) {
@@ -2678,7 +2692,7 @@ namespace RT64 {
             worker->commandList->setFramebuffer(framebuffer.rs64.lightsHalf.framebuffer.get());
             worker->commandList->clearColor(0, RenderColor(0.0f, 0.0f, 0.0f, 65000.0f));
             worker->commandList->setViewports(RenderViewport(v.x / 2.0f, v.y / 2.0f, v.width / 2.0f, v.height / 2.0f, v.minDepth, v.maxDepth));
-            worker->commandList->setScissors(RenderRect(int32_t(v.x) / 2, int32_t(v.y) / 2, (int32_t(v.x + v.width) + 1) / 2, (int32_t(v.y + v.height) + 1) / 2));
+            worker->commandList->setScissors(rs64PassRect(v, framebuffer.rs64.viewTop, framebuffer.rs64.viewBottom, 2));
         }
         else {
             worker->commandList->setViewports(v);
