@@ -293,10 +293,28 @@ namespace RT64 {
         const bool hitColors = !passes.newView && (lightsCfg.gi || lightsCfg.reflections || (rs64Shadow.terrainWaterPrim > 0));
         thread_local std::vector<std::pair<rs64lights::IndexRange, uint32_t>> terrainCalls;
         terrainCalls.clear();
+
+        // A fragment's draws count over the whole workload: the game's pair split can leave one draw of a big view alone in a pair (a hangar wall
+        // piece), which then failed the radar's draw-count test every other frame.
+        auto workloadCalls = [&](uint32_t ti) {
+
+            uint32_t calls = 0;
+
+            for (uint32_t f = 0; f < p.curWorkload->fbPairCount; f++) {
+                const FramebufferPair &pair = p.curWorkload->fbPairs[f];
+                for (uint32_t q = 0; q < pair.projectionCount; q++) {
+                    const Projection &other = pair.projections[q];
+                    calls += ((other.type == Projection::Type::Perspective) && (other.transformsIndex == ti)) ? other.gameCallCount : 0;
+                }
+            }
+
+            return calls;
+        };
+
         // Ranges accumulate over the workload's framebuffer pairs (the game can split one view across pairs); recordSetup consumes them.
         for (uint32_t pr = 0; pr < fbPair.projectionCount; pr++) {
             const Projection &proj = fbPair.projections[pr];
-            if ((proj.type != Projection::Type::Perspective) || proj.scissorRect.isNull() || !rs64lights::casterFragment(pr == passes.projIndex, rs64SameView(drawData, proj.transformsIndex, mainTi), proj.gameCallCount)) {
+            if ((proj.type != Projection::Type::Perspective) || proj.scissorRect.isNull() || !rs64lights::casterFragment(pr == passes.projIndex, rs64SameView(drawData, proj.transformsIndex, mainTi), workloadCalls(proj.transformsIndex))) {
                 continue;
             }
             for (uint32_t d = 0; d < proj.gameCallCount; d++) {
