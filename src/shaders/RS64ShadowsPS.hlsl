@@ -143,17 +143,16 @@ static const float kTerrainSelfSkipCells = 1.0f;
 // How far past side-on (-N.L) a model face turned away from the sun reaches full shadow.
 static const float kModelTerminatorBand = 0.15f;
 
-// A drawn caster or cutout lies at this pixel's view distance.
+// A drawn caster or cutout lies at this pixel's view distance. Cutouts count only where sun rays meet them, so the traced sky dome (a ring around
+// the camera) doesn't, or terrain at its distance takes the model terminator in a band that follows the player.
 bool rs64OnDrawnCaster(float3 p, float dist) {
     RayDesc ray;
     ray.Origin = float3(0.0f, 0.0f, 0.0f);
     ray.Direction = p / dist;
     ray.TMin = dist * 0.98f;
     ray.TMax = dist * 1.02f;
-    RayQuery<RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH | RAY_FLAG_SKIP_PROCEDURAL_PRIMITIVES | RAY_FLAG_FORCE_OPAQUE> q;
-    q.TraceRayInline(gScene, RAY_FLAG_NONE, 0x05, ray);
-    q.Proceed();
-    return q.CommittedStatus() == COMMITTED_TRIANGLE_HIT;
+    float hitT;
+    return rs64CasterHit(ray, gShadows.cutoutDrawCount, hitT);
 }
 
 // A model face turned away from the sun is in its own shadow, as dark as a cast one (rs64lights::Config::modelTerminator). Only with the static
