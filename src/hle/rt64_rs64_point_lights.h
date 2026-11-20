@@ -285,7 +285,9 @@ namespace rs64lights {
                 Resolved& k = lights[j];
                 const float dx = k.pos[0] - lights[i].pos[0], dy = k.pos[1] - lights[i].pos[1], dz = k.pos[2] - lights[i].pos[2];
                 const bool sameColor = (k.color[0] == lights[i].color[0]) && (k.color[1] == lights[i].color[1]) && (k.color[2] == lights[i].color[2]);
-                if (sameColor && ((dx * dx + dy * dy + dz * dz) <= (eps * eps))) {
+                // The r_pow pickup emits one copy per part, a few units apart: a fixed eps merged them only some frames, so its light doubled and halved (flicker).
+                const float reach = std::max(eps, 0.01f * std::max(k.radius, lights[i].radius));
+                if (sameColor && ((dx * dx + dy * dy + dz * dz) <= (reach * reach))) {
                     if (lights[i].intensity > k.intensity) {
                         k = lights[i];
                     }
