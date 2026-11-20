@@ -51,7 +51,7 @@ uint chunkLod(int2 c) {
 }
 
 // The terrain draw: one instance per visible chunk of this draw's LOD (chunkCells * 4 * sub >> lod quads per edge), two triangles per quad (no
-// index buffer), in fine units (sub per lattice step); an edge vertex next to a coarser chunk collapses onto one of that chunk's own vertices, so both sides compute identical positions and no T-junction opens.
+// index buffer), in fine units (sub per lattice step); an edge vertex next to a coarser chunk (or the map border) collapses onto one of that side's own vertices, so both sides compute identical positions and no T-junction opens.
 // The water draw (gTerrain.water): one flat quad per water or shore cell at the water level; where the ground rises above it, the depth test cuts the shore.
 // Positions follow RSPProcessCS (world then view-projection, N64 viewport) and RasterVS (screen to clip, the anchor draw's screen scale/offset).
 void VSMain(uint vertexId : SV_VertexID, uint instanceId : SV_InstanceID,
@@ -152,6 +152,16 @@ void VSMain(uint vertexId : SV_VertexID, uint instanceId : SV_InstanceID,
             if ((nl != 0xFF) && (nl > gTerrain.lod)) {
                 S.x = (F.x >> nl) << nl;
             }
+        }
+
+        // The map border meets the water draw's outer ring, one flat quad per cell: collapse onto cell corners like a coarser neighbour, or a crack opens where the ground is curved.
+        const uint cellFine = 4 * gTerrain.sub;
+        if ((F.x == 0) || (F.x == gTerrain.mapWidth * cellFine)) {
+            S.y = (F.y / cellFine) * cellFine;
+        }
+
+        if ((F.y == 0) || (F.y == gTerrain.mapHeight * cellFine)) {
+            S.x = (F.x / cellFine) * cellFine;
         }
 
         uvLattice = float2(F) / float(gTerrain.sub);

@@ -2323,9 +2323,12 @@ namespace RT64 {
                             const bool regularOrigins = (call.callDesc.rectLeftOrigin == G_EX_ORIGIN_NONE) && (call.callDesc.rectRightOrigin == G_EX_ORIGIN_NONE);
                             const bool coversScissorWidth = regularOrigins && coversFbWidth(call.callDesc.rect.ulx, call.callDesc.rect.lrx);
                             // A full-height rect touching a scissor side (the mission-start wipe panel) stretches like a full-width one, so its moving edge sweeps the widened screen.
+                            // Height is checked against the call's own scissor: a cutscene's wipe is clipped to the letterbox, shorter than the pair's.
                             const FixedRect &sc = fbPair.scissorRect;
+                            const FixedRect &csc = call.callDesc.scissorRect;
                             const FixedRect &rc = call.callDesc.rect;
-                            const bool edgePanel = regularOrigins && !sc.isNull() && (rc.uly <= sc.uly + 4) && (rc.lry + 4 >= sc.lry) && ((rc.ulx <= sc.ulx + 4) || (rc.lrx + 4 >= sc.lrx));
+                            const FixedRect &hsc = csc.isNull() ? sc : csc;
+                            const bool edgePanel = regularOrigins && !sc.isNull() && (rc.uly <= hsc.uly + 4) && (rc.lry + 4 >= hsc.lry) && ((rc.ulx <= sc.ulx + 4) || (rc.lrx + 4 >= sc.lrx));
                             FixedRect drawRect = rc;
                             if (tileCopiesUsed || coversScissorWidth || edgePanel) {
                                 invRatioScale = 1.0f;
