@@ -590,7 +590,8 @@ namespace RT64 {
         const bool RGBA32 = (loadTile.siz == G_IM_SIZ_32b) && (loadTile.fmt == G_IM_FMT_RGBA);
         if (deferred) {
             // Flush current framebuffer pair if any of the images being written to are loaded by this TLUT.
-            const uint32_t textureEnd = textureStart + (rowCount - 1) * bytesPerRow + (wordsPerRow << 3);
+            // RDRAM holds each entry at the image's texel size; << 3 is its quadricated TMEM footprint, which made a palette just below a framebuffer overlap it.
+            const uint32_t textureEnd = textureStart + (rowCount - 1) * bytesPerRow + ((wordsPerRow << loadTexture.siz) >> 1);
             checkImageOverlap(textureStart, textureEnd);
 
             // Discard any FB regions currently loaded into TMEM within the specified range.
