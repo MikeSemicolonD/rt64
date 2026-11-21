@@ -217,10 +217,10 @@ bool rs64CasterHit(RayDesc ray, uint count, out float hitT) {
     return hit;
 }
 
-// a = 1 emissive (tag 255), -1 floor (tag 253, rs64lights::markFloor), 0 otherwise.
+// a = 1 emissive (tag 255, or 252 for one that writes no depth: rs64lights::markDepthless), -1 floor (tag 253, rs64lights::markFloor), 0 otherwise.
 float4 rs64UnpackHit(uint rgba) {
     const uint tag = rgba >> 24;
-    return float4(float(rgba & 0xFFu), float((rgba >> 8) & 0xFFu), float((rgba >> 16) & 0xFFu), 0.0f) / 255.0f + float4(0.0f, 0.0f, 0.0f, (tag == 255u) ? 1.0f : ((tag == 253u) ? -1.0f : 0.0f));
+    return float4(float(rgba & 0xFFu), float((rgba >> 8) & 0xFFu), float((rgba >> 16) & 0xFFu), 0.0f) / 255.0f + float4(0.0f, 0.0f, 0.0f, ((tag == 255u) || (tag == 252u)) ? 1.0f : ((tag == 253u) ? -1.0f : 0.0f));
 }
 
 uint rs64HitEntry(uint prim, uint count, bool emissive) {

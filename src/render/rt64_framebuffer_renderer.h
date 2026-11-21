@@ -302,6 +302,8 @@ namespace RT64 {
             std::vector<uint32_t> rangeCalls;
             std::vector<rs64lights::IndexRange> emissiveRanges;
             std::vector<uint32_t> emissiveCalls;
+            // Per emissive range: 1 when the draw writes no depth (translucent), tagged 252 in its hit colour.
+            std::vector<uint8_t> emissiveDepthless;
             // The sky dome's draws this frame and the colours a missed water reflection ray takes from them (horizon, zenith; w = 1 when valid).
             std::vector<rs64lights::IndexRange> skyRanges;
             std::vector<uint32_t> skyCalls;

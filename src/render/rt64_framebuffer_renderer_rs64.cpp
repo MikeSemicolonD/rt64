@@ -351,6 +351,7 @@ namespace RT64 {
                 if (!passes.newView && (emissive || glowCard) && !cm.fillOrCopy) {
                     rs64Shadow.emissiveRanges.push_back({ call.meshDesc.faceIndicesStart, call.callDesc.triangleCount });
                     rs64Shadow.emissiveCalls.push_back(call.callDesc.callIndex);
+                    rs64Shadow.emissiveDepthless.push_back((emissive && cm.xlu && !cm.zUpd) ? 1 : 0);
                 }
 
                 // Translucent world draws (a World Devastator's foot beams, foam) join the cutouts flagged translucent: water reflections alpha-test them.
@@ -1323,6 +1324,10 @@ namespace RT64 {
                 float c[3];
                 drawColor(ranges[r], calls[r], c);
                 uint32_t rgba = rs64lights::packHitColor(c[0], c[1], c[2], emissive);
+                if (emissive && (r < s.emissiveDepthless.size()) && (s.emissiveDepthless[r] != 0)) {
+                    rgba = rs64lights::markDepthless(rgba);
+                }
+
                 if ((floorUp != nullptr) && !emissive && drawNormalSum(ranges[r], sumN)) {
                     if (rs64lights::floorFacing(sumN, floorUp, 0.9f)) {
                         rgba = rs64lights::markFloor(rgba);

@@ -401,6 +401,11 @@ namespace rs64lights {
         return (rgba & 0x00FFFFFFu) | (253u << 24);
     }
 
+    // Emissive draws that write no depth (tag 252): the pixels they cover count as emissive wherever the depth buffer lies behind them.
+    inline uint32_t markDepthless(uint32_t rgba) {
+        return (rgba & 0x00FFFFFFu) | (252u << 24);
+    }
+
     // A draw whose area-weighted normal sum lies along the floor's up (either winding) is floor.
     inline bool floorFacing(const float normalSum[3], const float up[3], float cosMin) {
         const float len = std::sqrt(normalSum[0] * normalSum[0] + normalSum[1] * normalSum[1] + normalSum[2] * normalSum[2]);

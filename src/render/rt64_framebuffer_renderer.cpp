@@ -1691,6 +1691,7 @@ namespace RT64 {
         rs64Shadow.rangeCalls.clear();
         rs64Shadow.emissiveRanges.clear();
         rs64Shadow.emissiveCalls.clear();
+        rs64Shadow.emissiveDepthless.clear();
         rs64Shadow.skyRanges.clear();
         rs64Shadow.skyCalls.clear();
         rs64Shadow.skyWorldValid = false;

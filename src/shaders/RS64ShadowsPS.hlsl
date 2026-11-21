@@ -355,7 +355,8 @@ float3 rs64HitIdColor(uint id) {
 }
 
 // The pixel shows an emissive draw (an emissive light preset, a glow card): the camera's ray meets the emissive instance (7, mask 0x80) at the
-// pixel's own depth. Those keep their drawn colour, with no shadow, AO or bounce light.
+// pixel's own depth, or in front of it for a draw that writes no depth (tag 252, a shuttle's translucent exhaust). Those keep their drawn colour,
+// with no shadow, AO or bounce light.
 bool rs64EmissiveReceiver(RS64Receiver rc) {
     if (gShadows.hitParams.y == 0) {
         return false;
@@ -364,12 +365,16 @@ bool rs64EmissiveReceiver(RS64Receiver rc) {
     RayDesc r;
     r.Origin = float3(0.0f, 0.0f, 0.0f);
     r.Direction = rc.p / rc.dist;
-    r.TMin = rc.dist * 0.98f;
+    r.TMin = 0.0f;
     r.TMax = rc.dist * 1.02f;
-    RayQuery<RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH | RAY_FLAG_SKIP_PROCEDURAL_PRIMITIVES> q;
+    RayQuery<RAY_FLAG_SKIP_PROCEDURAL_PRIMITIVES> q;
     q.TraceRayInline(gScene, RAY_FLAG_NONE, 0x80, r);
     q.Proceed();
-    return (q.CommittedStatus() == COMMITTED_TRIANGLE_HIT);
+    if (q.CommittedStatus() != COMMITTED_TRIANGLE_HIT) {
+        return false;
+    }
+
+    return (q.CommittedRayT() >= rc.dist * 0.98f) || ((gEmissiveColors[rs64HitEntry(q.CommittedPrimitiveIndex(), gShadows.hitParams.y, true)].y >> 24) == 252u);
 }
 
 // What water reflection ray r meets past a translucent hit at t (water point p), translucent draws aside: the next hit as the frame draws it or its
