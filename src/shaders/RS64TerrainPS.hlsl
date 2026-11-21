@@ -75,7 +75,10 @@ float4 PSMain(in float4 vPosition : SV_POSITION, in float4 vShade : COLOR0, in f
 
         // lod = log2 of the base magnification (8 map units a texel); repeats 2^(k-1) and 2^k keep detail texels at half to one a pixel.
         const float lod = min(log2(8.0f / max(footprint, 1e-3f)), kWaterDetailMaxLod);
-        const float detailWeight = kWaterDetail * saturate(lod);
+        // Past the map edge (vEdge.x) the water look, detail included, goes only as far as the edge cell has it (vEdge.y): none on carried-on ground.
+        const bool outside = (vEdge.x > 0.5f);
+        const float waterLook = outside ? vEdge.y : 1.0f;
+        const float detailWeight = kWaterDetail * saturate(lod) * waterLook;
         if (detailWeight > 0.0f) {
             const float k = floor(lod);
             const float3 detail = lerp(texelRepeated(vLayer, m, exp2(k - 1.0f)), texelRepeated(vLayer, m, exp2(k)), lod - k);
@@ -95,10 +98,8 @@ float4 PSMain(in float4 vPosition : SV_POSITION, in float4 vShade : COLOR0, in f
         const float rv = saturate(dot(reflect(-l, n), v));
         const float glint = pow(rv, kWaterGlintPower) + (kWaterSheen / kWaterGlint) * pow(rv, kWaterSheenPower);
 
-        // Past the map edge (vEdge.x): opaque, the water look as far as its edge cell has it (vEdge.y), and fog that adds a fade by distance past the edge
-        // and (from two cells out) toward the far plane, so it meets the map with the same fog. In the map: the shoreline fade and the game's fog.
-        const bool outside = (vEdge.x > 0.5f);
-        const float waterLook = outside ? vEdge.y : 1.0f;
+        // Past the map edge: opaque, and fog that adds a fade by distance past the edge and (from two cells out) toward the far plane, so it meets
+        // the map with the same fog. In the map: the shoreline fade and the game's fog.
         color = lerp(color, lerp(color, gTerrain.fogColor.rgb, fresnel * kWaterFresnel) + (gFrame[1].rgb / 255.0f) * glint * kWaterGlint, waterLook);
         alpha = outside ? 1.0f : waterShoreAlpha(vLattice);
         fog = terrainFog(vViewPos);

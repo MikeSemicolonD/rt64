@@ -78,6 +78,7 @@ void VSMain(uint vertexId : SV_VertexID, uint instanceId : SV_InstanceID,
     float3 c;
     bool outside = false;
     float edgeWater = 1.0f;
+    bool2 mirror = bool2(false, false);
     if (gTerrain.water) {
         // Past the map edge every cell is drawn, so the map never ends in a void.
         const int margin = int(gTerrain.waterMargin);
@@ -96,6 +97,9 @@ void VSMain(uint vertexId : SV_VertexID, uint instanceId : SV_InstanceID,
         cell = uint2(clamp(signedCell, int2(0, 0), int2(gTerrain.mapWidth - 1, gTerrain.mapHeight - 1)));
         const uint kind = (gCellLayers[cell.y * gTerrain.mapWidth + cell.x] >> 16) & 3u;
         outside = any(signedCell != int2(cell));
+
+        // Every other cell out from the edge shows the edge cell's texture mirrored, so a tile that does not repeat with itself leaves no line per cell.
+        mirror = ((signedCell - int2(cell)) & 1) != 0;
         if ((kind == 0) && !outside) {
             oPosition = float4(2.0f, 2.0f, 2.0f, 1.0f);
             return;
@@ -155,16 +159,20 @@ void VSMain(uint vertexId : SV_VertexID, uint instanceId : SV_InstanceID,
         }
 
         // The map border meets the water draw's outer ring, one flat quad per cell: collapse onto cell corners like a coarser neighbour, or a crack opens where the ground is curved.
+        // These take the corner's texture coordinate too (it stays in the cell): a whole cell edge collapses, and the original ones smeared a texel-thin slice along the border.
         const uint cellFine = 4 * gTerrain.sub;
+        uint2 T = F;
         if ((F.x == 0) || (F.x == gTerrain.mapWidth * cellFine)) {
             S.y = (F.y / cellFine) * cellFine;
+            T.y = S.y;
         }
 
         if ((F.y == 0) || (F.y == gTerrain.mapHeight * cellFine)) {
             S.x = (F.x / cellFine) * cellFine;
+            T.x = S.x;
         }
 
-        uvLattice = float2(F) / float(gTerrain.sub);
+        uvLattice = float2(T) / float(gTerrain.sub);
         f = float2(S) / float(gTerrain.sub);
         const float4 hc = surfacePoint(f, latticeW, latticeH);
         h = hc.x;
@@ -208,7 +216,8 @@ void VSMain(uint vertexId : SV_VertexID, uint instanceId : SV_InstanceID,
     p.xy = (p.xy * gTerrain.screenScale) + gTerrain.screenOffset * p.w;
 
     // Texture rows run opposite to the cell's z, as the game maps its terrain tiles.
-    const float2 inCell = (gTerrain.water ? f : uvLattice) * 0.25f - cellOrigin;
+    float2 inCell = (gTerrain.water ? f : uvLattice) * 0.25f - cellOrigin;
+    inCell = float2(mirror.x ? 1.0f - inCell.x : inCell.x, mirror.y ? 1.0f - inCell.y : inCell.y);
     oPosition = p;
     oShade = float4(c, fogAlpha);
     oUV = float2(inCell.x, 1.0f - inCell.y);
