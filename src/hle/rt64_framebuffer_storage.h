@@ -23,6 +23,8 @@ namespace RT64 {
         };
 
         uint32_t rdramUsed;
+        uint32_t recentPeak = 0;
+        uint32_t resetsSincePeak = 0;
         std::vector<uint8_t> rdramData;
         std::vector<Handle> handleVector;
 

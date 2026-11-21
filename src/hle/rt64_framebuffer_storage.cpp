@@ -15,6 +15,18 @@ namespace RT64 {
     }
 
     void FramebufferStorage::reset() {
+        // A frame's copies are dead once it resets, so a buffer that a heavier scene (an earlier level) grew is given back after a stretch of lighter frames.
+        constexpr uint32_t ShrinkAfterResets = 600;
+        recentPeak = std::max(recentPeak, rdramUsed);
+        if (++resetsSincePeak >= ShrinkAfterResets) {
+            if (rdramData.size() > size_t(recentPeak) * 2) {
+                std::vector<uint8_t>((size_t(recentPeak) * 3) / 2, 0).swap(rdramData);
+            }
+
+            recentPeak = 0;
+            resetsSincePeak = 0;
+        }
+
         rdramUsed = 0;
         handleVector.clear();
     }
