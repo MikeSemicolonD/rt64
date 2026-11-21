@@ -1234,6 +1234,17 @@ namespace RT64 {
         static const bool s_domeNearDrop = rs64env::on("ROGUESQ_F5_DOME_NEAR_DROP", true);
         if (anyNear && isDomeTri && s_domeNearDrop) return true;
 
+        // The craft's ground shadow (black, alpha = silhouette texture x prim, render mode 0xC8110231) is cast along the sun onto the terrain: a low sun ahead
+        // throws it back past the camera, where its triangles in front of the near plane fill the sky in front of the view. A shadow that close is never seen.
+        const interop::ColorCombiner &cc = state->rdp->colorCombinerStack[state->rdp->colorCombinerStackSize - 1];
+        if ((cc.L == 0xFC127FFFu) && (cc.H == 0xFFFFF238u) && (state->rdp->otherMode.L == 0xC8110231u)) {
+            for (int i = 0; i < 3; i++) {
+                if (workload.drawData.posTransformed[globalIndices[i]].z < 0.0f) {
+                    return true;
+                }
+            }
+        }
+
         if (extreme) {
             // Signed distance to near and the guard-band lateral planes; clipping at |x| = w cut the sky at the 4:3 edge once widescreen widens the view.
             auto planeDist = [guardX, farDepth, &vrFarPlane](const hlslpp::float4 &p, int plane) -> float {
