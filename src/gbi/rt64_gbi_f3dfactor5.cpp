@@ -3323,6 +3323,15 @@ namespace RT64 {
                 }
             }
 
+            // The sky dome (the first modelview of the frame's matrix ring) is drawn point sampled; its small cloud and haze textures stretched over the
+            // dome showed as blocks and a hard band under 3-point filtering, so it always filters bilinearly. F5 sets no extended flags of its own.
+            if (!proj) {
+                const uint32_t off = w1 & 0x00FFFFFFu;
+                const int ring = f5_ring_buffer(off);
+                const bool skyDome = ((ring == 0) || (ring == 1)) && ((off & 0xFFFFu) == 0x40u);
+                state->rdp->forceTrueBilerp(skyDome ? G_EX_BILERP_ALL : G_EX_BILERP_NONE);
+            }
+
             if (!proj) {
                 f5_regrid_after_load(state);
                 f5_cloud_floor(state, w1 & 0x00FFFFFFu);
