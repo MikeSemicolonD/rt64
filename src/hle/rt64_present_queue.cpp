@@ -281,6 +281,25 @@ namespace RT64 {
     // VR: both controllers into the controller layer's images at this headset frame's eye poses; the frame then ends with that layer on top.
     static void rs64VrDrawHands(RenderDevice *device, RenderWorker *worker, const ShaderLibrary *shaderLibrary, SharedQueueResources *shared) {
         constexpr uint32_t kHandVertices = 3 * 24 * 13 * 6;
+
+        // The pass goes to OpenXR's queue (the present worker's) on a list of its own and is not waited for: the CPU waited behind every GPU job queued
+        // ahead of it, 5 ms of each headset frame. The last pass's fence is waited on here instead, before its list and the depth slot it read are reused.
+        static std::unique_ptr<RenderCommandList> handsList;
+        static std::unique_ptr<RenderCommandFence> handsFence;
+        static bool handsInFlight = false;
+        if (handsList == nullptr) {
+            handsList = worker->commandQueue->createCommandList();
+            handsFence = device->createCommandFence();
+        }
+
+        if (handsInFlight) {
+            worker->commandQueue->waitForCommandFence(handsFence.get());
+            handsInFlight = false;
+
+            const std::lock_guard<std::mutex> lock(shared->vrDepthMutex);
+            shared->vrDepthReading = -1;
+        }
+
         rs64vr::EyeViews views;
         rs64vr::Pose hands[2] = {};
         int valid[2] = {};
@@ -369,7 +388,7 @@ namespace RT64 {
             depthBuffers[e]->unmap();
         }
 
-        RenderCommandList *commandList = worker->commandList.get();
+        RenderCommandList *commandList = handsList.get();
         commandList->begin();
         commandList->barriers(RenderBarrierStage::GRAPHICS, RenderTextureBarrier(noDepth.get(), RenderTextureLayout::SHADER_READ));
         for (int e = 0; e < 2; e++) {
@@ -426,11 +445,8 @@ namespace RT64 {
         }
 
         commandList->end();
-        worker->execute();
-        worker->wait();
-
-        depthLock.lock();
-        shared->vrDepthReading = -1;
+        worker->commandQueue->executeCommandLists(commandList, handsFence.get());
+        handsInFlight = true;
     }
 
     // VR: a headset frame begun (xrWaitFrame + xrBeginFrame) and not yet ended, so the next fresh frame can go into it. kVrNone = none begun.
