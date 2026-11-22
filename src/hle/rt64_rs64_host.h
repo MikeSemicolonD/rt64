@@ -21,6 +21,8 @@ extern "C" {
     uint32_t rs64_level_fog_rgb(void);
     int rs64_level_has_clouds(void);
     int rs64_credits_active(void);
+    // The DeveloperShortcut a key-down scancode is bound to, or -1 to pass the key on.
+    int rs64_dev_shortcut(int scancode);
 
     // ultramodern: tell the game this graphics task is done before its GPU work finishes.
     void rs64_gfx_complete_early(void);

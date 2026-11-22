@@ -4,6 +4,7 @@
 
 #include "rt64_application.h"
 #include "common/rt64_rs64_env.h"
+#include "hle/rt64_rs64_host.h"
 #include "rhi/rt64_render_hooks.h"
 
 #include <cinttypes>
@@ -635,24 +636,11 @@ namespace RT64 {
             }
         }
 
-        if (event->type == SDL_KEYDOWN) {
-            switch (event->key.keysym.scancode) {
-            case SDL_SCANCODE_F1:
-                processDeveloperShortcut(DeveloperShortcut::Inspector);
-                return true;
-            case SDL_SCANCODE_F2:
-                processDeveloperShortcut(DeveloperShortcut::RayTracing);
-                return true;
-            case SDL_SCANCODE_F3:
-                processDeveloperShortcut(DeveloperShortcut::ViewRDRAM);
-                return true;
-            case SDL_SCANCODE_F4:
-                processDeveloperShortcut(DeveloperShortcut::Replacements);
-                return true;
-            default:
-                // Don't filter the key event.
-                break;
-            }
+        const int shortcut = (event->type == SDL_KEYDOWN) ? rs64_dev_shortcut(event->key.keysym.scancode) : -1;
+
+        if (shortcut >= 0) {
+            processDeveloperShortcut((DeveloperShortcut)shortcut);
+            return true;
         }
 
         return false;
