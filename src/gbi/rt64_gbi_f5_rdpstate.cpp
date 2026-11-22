@@ -387,18 +387,18 @@ namespace RT64 {
             s_hud_task = state->displayListCounter;
         }
 
-        // VR outside missions: texrects that do not span the full height (wipes keep their masking tile only as texrects).
-        static bool vr_scene_texrect(State *state, const DisplayList *dl) {
-            if ((rs64_vr_active() == 0) || (rs64_vr_hud_quads() != 0) || (g_active_overlay <= 0)) {
-                return false;
-            }
-
-            if (((state->rdp->otherMode.H >> 20) & 3u) == 3u) {
+        // Outside missions: texrects that do not span the full height (wipes keep their masking tile only as texrects).
+        static bool scene_texrect(State *state, const DisplayList *dl) {
+            if ((g_active_overlay <= 0) || (((state->rdp->otherMode.H >> 20) & 3u) == 3u)) {
                 return false;
             }
 
             const FixedRect &sc = state->rdp->scissorRectStack[state->rdp->scissorStackSize - 1];
             return !rs64hud::spansHeight(int32_t(dl->w1 & 0xFFFu), int32_t(dl->w0 & 0xFFFu), sc.uly, sc.lry);
+        }
+
+        static bool vr_scene_texrect(State *state, const DisplayList *dl) {
+            return (rs64_vr_active() != 0) && (rs64_vr_hud_quads() == 0) && scene_texrect(state, dl);
         }
 
         // VR in missions: a full-height texrect is a wipe (the demo's closing one), placed as one quad so both eyes see the same edge.
@@ -649,6 +649,10 @@ namespace RT64 {
                     }
                 }
             }
+            if (scene_texrect(state, *dl)) {
+                f5_note_backdrop_texrect(state);
+            }
+
             if (f5_crosshair_quad(state, *dl) || f5_credits_glyph_quad(state, *dl) || (vr_hud_texrect(state, *dl) && f5_vr_hud_quad(state, *dl)) || (vr_wipe_texrect(state, *dl) && f5_vr_wipe_quad(state, *dl)) || (vr_scene_texrect(state, *dl) && f5_vr_scene_quad(state, *dl))) {
                 (*dl)++;
                 return;

@@ -97,8 +97,8 @@ namespace RT64 {
         // The anchor's generation: bumped when the map's placement in the anchor's frame (origin * 512 - offset) changes with no rebase to carry
         // the previous transform over (a cut, a new root node, a snap before k is learned), so the map never blends across the jump.
         static uint32_t s_anchor_gen = 0;
-        // The task whose VR backdrop quads were placed; its terrain records are dropped.
-        static uint64_t s_vr_backdrop_task = ~0ull;
+        // The task drawn over a 2D backdrop (the N64 logo before its explosion); its terrain records are dropped.
+        static uint64_t s_backdrop_task = ~0ull;
         static uint64_t s_rebase_task = ~0ull;
         static uint32_t f5_terrain_anchor_id() {
             return F5_TERRAIN_ANCHOR_ID | ((s_anchor_gen & 0xFu) << 20);
@@ -2761,8 +2761,8 @@ namespace RT64 {
         static bool f5_terrain_pass_record(State* state, DisplayList* rec, bool flat)
         {
 
-            // VR: a task drawn over a 2D backdrop (the N64 logo) shows no land on the flat screen, so a turned head sees none either.
-            if (s_vr_backdrop_task == state->displayListCounter)
+            // A task drawn over a 2D backdrop (the N64 logo) shows no land: the backdrop covers it on N64, and wider views or a turned head would reveal it.
+            if (s_backdrop_task == state->displayListCounter)
             {
                 return true;
             }
@@ -3711,6 +3711,12 @@ namespace RT64 {
         // VR outside missions: a texrect drawn before any 3D face of its task is a backdrop (the crawl's planet), placed at half the far plane; menu text,
         // pictures and cutscene subtitles drawn over the 3D scene sit a meter ahead. Both stay where the game camera faces instead of following the head.
         // A 2D screen with a small model on it (the memory pak icon, 46 faces) keeps all its texrects on one plane; text pulled a meter ahead would shift between eyes.
+        void f5_note_backdrop_texrect(State* state) {
+            if (s_task_faces == 0) {
+                s_backdrop_task = state->displayListCounter;
+            }
+        }
+
         bool f5_vr_scene_quad(State* state, const DisplayList* dl) {
             static uint64_t s_screenTask = ~0ull;
             static float s_screenDepth = 0.0f;
@@ -3752,7 +3758,7 @@ namespace RT64 {
 
                 s_screenTask = state->displayListCounter;
                 s_screenDepth = depth;
-                s_vr_backdrop_task = state->displayListCounter;
+                s_backdrop_task = state->displayListCounter;
             }
 
             // The crawl's planet is drawn as texrects after the starfield; it sits at the starfield's depth, not a picture's.

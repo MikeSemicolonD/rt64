@@ -49,6 +49,8 @@ namespace RT64 {
         bool f5_vr_wipe_quad(State *state, const DisplayList *dl);
         // VR outside missions: a backdrop or menu texrect as a quad where the game camera faces; false leaves it to the texrect path.
         bool f5_vr_scene_quad(State *state, const DisplayList *dl);
+        // Outside missions: a scene texrect drawn before any 3D face makes its task a backdrop, whose terrain is dropped.
+        void f5_note_backdrop_texrect(State *state);
         // The task whose scene clear fill was stretched to the whole target (VR).
         extern uint64_t g_vr_fill_task;
 
