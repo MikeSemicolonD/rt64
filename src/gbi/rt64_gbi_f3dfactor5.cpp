@@ -3974,10 +3974,7 @@ namespace RT64 {
         // pushDepth > 0 slides the quad along its view rays to that camera-space depth: the same screen spot flat, that distance in stereo.
         static bool f5_texrect_quad(State* state, const DisplayList* dl, uint32_t id, const char* probe, float dx, float dy, bool stIsZero, float pushDepth, bool screenFrustum, bool sharedGrid) {
             const uint32_t w0 = dl[0].w0, w1 = dl[0].w1;
-            // Copy and fill modes include the lower-right edge, as RT64's own texrects do; without it tiled images (SELECT LEVEL's preview) part by a pixel.
-            const uint32_t cycle = (state->rdp->otherMode.H >> 20) & 3u;
-            const float inclusive = (cycle >= 2u) ? 1.0f : 0.0f;
-            const rs64xhair::Rect r{ ((w1 >> 12) & 0xFFFu) / 4.0f + dx, (w1 & 0xFFFu) / 4.0f + dy, ((w0 >> 12) & 0xFFFu) / 4.0f + dx + inclusive, (w0 & 0xFFFu) / 4.0f + dy + inclusive };
+            const rs64xhair::Rect r{ ((w1 >> 12) & 0xFFFu) / 4.0f + dx, (w1 & 0xFFFu) / 4.0f + dy, ((w0 >> 12) & 0xFFFu) / 4.0f + dx, (w0 & 0xFFFu) / 4.0f + dy };
             const uint8_t tile = (uint8_t)((w1 >> 24) & 7u);
             const int16_t uls = stIsZero ? (int16_t)0 : (int16_t)(dl[1].w0 >> 16), ult = stIsZero ? (int16_t)0 : (int16_t)(dl[1].w0 & 0xFFFFu);
             const int16_t dsdx = (int16_t)(dl[1].w1 >> 16), dtdy = (int16_t)(dl[1].w1 & 0xFFFFu);
