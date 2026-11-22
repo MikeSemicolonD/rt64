@@ -306,21 +306,6 @@ namespace RT64 {
             textureCheck = true;
         }
 
-        // A walker's foot shadow (black quads, render mode 0xC8104240) has no depth compare, so past the stock draw distance a walker behind a hill printed
-        // its shadow across the hill as dashes. A one-sided decal (RasterPS, marked by the unused blend mask bits) keeps the flat quad on a slope and hides it behind nearer terrain.
-        if (drawStatus.isChanged(DrawAttribute::Combine) || drawStatus.isChanged(DrawAttribute::OtherMode)) {
-            constexpr uint32_t kFootShadowL = 0xC8104240u;
-            constexpr uint32_t kOneSidedMark = 0xFu;
-            const bool footShadow = (drawCall.colorCombiner.L == 0xFC1217FFu) && (drawCall.colorCombiner.H == 0xFFFFFE38u) && (rdp->otherMode.L == kFootShadowL);
-            if (footShadow) {
-                drawCall.otherMode.L = kFootShadowL | ZMODE_DEC;
-                drawCall.otherMode.H = rdp->otherMode.H | kOneSidedMark;
-            }
-            else if (drawCall.otherMode.L == (kFootShadowL | ZMODE_DEC)) {
-                drawCall.otherMode = rdp->otherMode;
-            }
-        }
-
         if (drawStatus.isChanged(DrawAttribute::GeometryMode)) {
             drawCall.geometryMode = rsp->geometryModeStack[rsp->geometryModeStackSize - 1];
         }
