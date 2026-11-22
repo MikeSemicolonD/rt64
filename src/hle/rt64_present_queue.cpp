@@ -461,7 +461,8 @@ namespace RT64 {
             return;
         }
 
-        const int64_t periodUs = int64_t(rs64_vr_target_rate() > 0 ? (1000000 / rs64_vr_target_rate()) : 0);
+        const uint32_t rate = rs64_vr_target_rate();
+        const int64_t periodUs = (rate > 0) ? int64_t(1000000 / rate) : 0;
         const int64_t gapUs = (rs64VrLastBegin == Timestamp()) ? 0 : Timer::deltaMicroseconds(rs64VrLastBegin, waitEnd);
         vs.waitUs += Timer::deltaMicroseconds(waitStart, waitEnd);
         vs.handsUs += Timer::deltaMicroseconds(waitEnd, handsEnd);
@@ -1367,6 +1368,11 @@ namespace RT64 {
             if (vrSession && presentFrame) {
                 rs64VrStats.windowUs += Timer::deltaMicroseconds(windowStart, Timer::current());
             }
+        }
+
+        // A workload that rendered no frames (VR behind the game's rate) leaves the loop unrun; the next workload still waits for this present.
+        if (!presentNotified) {
+            notifyPresentId(present);
         }
     }
 

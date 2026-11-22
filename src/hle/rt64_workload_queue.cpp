@@ -1255,7 +1255,7 @@ namespace RT64 {
                     matchingProfiler.log();
 
                     // VR always tweens: every headset frame needs its own render at its own pose, and a cutscene can run below the rate this estimate assumes.
-                    const bool displayRateAboveOriginal = (workload.viOriginalRate > 0) && ((workloadConfig.targetRate > workload.viOriginalRate) || (rs64_vr_session() != 0));
+                    const bool displayRateAboveOriginal = (workload.viOriginalRate > 0) && (workloadConfig.targetRate > 0) && ((workloadConfig.targetRate > workload.viOriginalRate) || (rs64_vr_session() != 0));
                     generateInterpolatedFrames = !workload.paused && displayRateAboveOriginal && !interpolationTargetKey.isEmpty();
 
                     // VR: workloads that render no eyes, by cause, every 2 s.
@@ -1361,7 +1361,7 @@ namespace RT64 {
                 curFrameCounters.vr = vrFrames;
                 curFrameCounters.vrScreen = workload.vrScreen;
                 const bool usesHDR = ext.sharedResources->renderTargetManager.usesHDR;
-                uint32_t requiredFrames = (allFramesTargeted && generateInterpolatedFrames) ? displayFrames : (displayFrames - 1);
+                uint32_t requiredFrames = (allFramesTargeted && generateInterpolatedFrames) ? displayFrames : ((displayFrames > 0) ? (displayFrames - 1) : 0);
                 if ((requiredFrames > 0) && (interpolatedTargets.size() < requiredFrames)) {
                     uint32_t previousSize = uint32_t(interpolatedTargets.size());
                     interpolatedTargets.resize(requiredFrames);
@@ -1373,7 +1373,8 @@ namespace RT64 {
                 const int64_t originalTimeMicro = (generateInterpolatedFrames && (tickStep == 60)) ? (1000000 * frameSpan / (60 * int64_t(workloadConfig.targetRate))) : ((workload.viOriginalRate > 0) ? (1000000 / workload.viOriginalRate) : 0);
                 const int64_t setupTimeMicro = workloadTimer.elapsedMicroseconds();
                 const int64_t adjustedTimeWindowMicro = originalTimeMicro - setupTimeMicro;
-                const int64_t maxTimePerFrameMicro = adjustedTimeWindowMicro / displayFrames;
+                // VR tweens even when the headset rate is below the game's, which can leave no display frame this time (displayFrames 0).
+                const int64_t maxTimePerFrameMicro = adjustedTimeWindowMicro / std::max(displayFrames, 1u);
                 bool skippedFrames = false;
                 bool skipWorkloadNow = false;
                 uint32_t targetIndex = 0;
@@ -1502,6 +1503,11 @@ namespace RT64 {
                     }
 
                     framesRendered++;
+                }
+
+                // No display frame (VR behind the game's rate): the present waiting on this workload still needs its id.
+                if (framesRendered == 0) {
+                    threadAdvanceWorkloadId(workload.workloadId);
                 }
 
                 // Set the skipped parameter on the frame counter if the workload wasn't skipped but some of its frames were.
