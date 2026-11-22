@@ -100,7 +100,9 @@ LIBRARY_EXPORT bool RasterPS(const RenderParams rp, float4 vertexPosition, float
         // Perform the decal depth tolerance check.
         const float DepthTolerance = max(CoplanarDepthTolerance(surfaceDepth), dz);
         const float pixelDepth = select(depthClampNear, max(vertexPosition.z, 0.0f), vertexPosition.z);
-        if (abs(pixelDepth - surfaceDepth) > DepthTolerance) {
+        // RS64: the blend mask bits (unused by the RDP) mark a one-sided decal: a flat ground shadow passes above or sunk into a slope, and fails only behind nearer terrain.
+        const bool oneSided = (otherMode.H & 0xFU) == 0xFU;
+        if (oneSided ? (pixelDepth - surfaceDepth > 16.0f * DepthTolerance) : (abs(pixelDepth - surfaceDepth) > DepthTolerance)) {
             return false;
         }
     }
