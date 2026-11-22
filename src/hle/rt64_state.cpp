@@ -48,23 +48,29 @@ extern "C" { std::atomic<uint32_t> g_rs64_frame_texloads{0}; }
 #define MI_INTR_DP          0x00000020
 #define MI_INTR_SP          0x00000001
 
-// Missions skip the copy back to RDRAM and its GPU wait; numMissionObjectives (0x80130B17) is non-zero in one. The env var overrides it: 1 = always skip, 0 = never.
-static bool rs64SkipReadback(const uint8_t *RDRAM, const char *value) {
+// Missions and cutscenes (mission and cinematic overlays) skip the copy back to RDRAM and its GPU wait; numMissionObjectives turned on late and stayed set at SELECT LEVEL. The env var overrides it: 1 = always skip, 0 = never.
+static bool rs64SkipReadback(const char *value) {
     if (value != nullptr) {
         return value[0] != '0';
     }
 
-    return RDRAM[0x130B17u ^ 3] != 0;
+    return (g_active_overlay == 0) || (g_active_overlay == 2);
 }
 
-static bool rs64SkipColorReadback(const uint8_t *RDRAM) {
+static bool rs64SkipColorReadback() {
     static const char *s_value = rs64env::str("ROGUESQ_SKIP_COLOR_READBACK");
-    return rs64SkipReadback(RDRAM, s_value);
+    return rs64SkipReadback(s_value);
 }
 
-static bool rs64SkipDepthReadback(const uint8_t *RDRAM) {
+static bool rs64SkipDepthReadback() {
     static const char *s_value = rs64env::str("ROGUESQ_SKIP_DEPTH_READBACK");
-    return rs64SkipReadback(RDRAM, s_value);
+    return rs64SkipReadback(s_value);
+}
+
+// With both copies skipped, the native-resolution draws have no output, so they are skipped too; RDRAM change detection still runs (the game clears depth from the CPU). ROGUESQ_SKIP_NATIVE_RENDER: 1 = whenever both are skipped, 0 = never.
+static bool rs64SkipNativeRender() {
+    static const char *s_value = rs64env::str("ROGUESQ_SKIP_NATIVE_RENDER");
+    return (s_value == nullptr) || (s_value[0] != '0');
 }
 
 // The F5 ucode emits garbage colour images in code (~0x470, ~0x3CBxx), the texture-material pool (0x15FDE0) and past 8 MB, where a write-back corrupts
@@ -1267,6 +1273,9 @@ namespace RT64 {
         // Validate all tile copies to be used during the rendering.
         const bool extendedRenderToRAMSet = (extended.renderToRAM < UINT8_MAX);
         const bool renderToRDRAM = extendedRenderToRAMSet ? (extended.renderToRAM != 0) : ext.emulatorConfig->framebuffer.renderToRAM;
+        const bool skipColorRb = !ext.emulatorConfig->framebuffer.writeBack || rs64SkipColorReadback();
+        const bool skipDepthRb = !ext.emulatorConfig->framebuffer.writeBack || rs64SkipDepthReadback();
+        const bool nativeDraws = renderToRDRAM && !(skipColorRb && skipDepthRb && rs64SkipNativeRender());
         const bool warningsEnabled = ext.userConfig->developerMode;
         const bool linearFiltering = !ext.userConfig->threePointFiltering;
         const size_t callTileCount = workload.drawData.callTiles.size();
@@ -1599,7 +1608,7 @@ namespace RT64 {
             { workload.drawData.worldTransforms.data(), workload.drawRanges.worldTransforms, sizeof(interop::float4x4), RenderBufferFlag::STORAGE, { }, &workload.drawBuffers.worldTransformsBuffer},
         });
 
-        if (renderToRDRAM) {
+        if (nativeDraws) {
             // Run RSP processor.
             RSPProcessor::ProcessParams rspParams;
             rspParams.worker = ext.framebufferGraphicsWorker;
@@ -1747,7 +1756,7 @@ namespace RT64 {
 
                 // Add all framebuffers for rendering.
                 pairCursor = framebufferPairCursor;
-                while (pairCursor < maxFramebufferPair) {
+                while (nativeDraws && (pairCursor < maxFramebufferPair)) {
                     const FramebufferPair &fbPair = workload.fbPairs[pairCursor];
                     if (getTargetsFromPair(pairCursor)) {
                         RenderFramebufferStorage &fbStorage = renderFramebufferManager->get(fbKey, colorTarget, (depthTarget != nullptr) ? depthTarget : dummyDepthTarget.get());
@@ -1813,7 +1822,7 @@ namespace RT64 {
                 if (!firstSynchronizationPerformed) {
                     bufferUploaders.emplace_back(ext.drawDataUploader);
                     bufferUploaders.emplace_back(ext.transformsUploader);
-                    queuedProcessor = rspProcessor.get();
+                    queuedProcessor = nativeDraws ? rspProcessor.get() : nullptr;
                     firstSynchronizationPerformed = true;
                 }
 
@@ -1914,7 +1923,9 @@ namespace RT64 {
                             }
                         }
 
-                        framebufferRenderer->recordFramebuffer(ext.framebufferGraphicsWorker, framebufferIndex++);
+                        if (nativeDraws) {
+                            framebufferRenderer->recordFramebuffer(ext.framebufferGraphicsWorker, framebufferIndex++);
+                        }
 
                         const uint64_t writeTimestamp = framebufferManager.nextWriteTimestamp();
                         colorFb->lastWriteRect.merge(fbPair.drawColorRect);
@@ -1926,14 +1937,12 @@ namespace RT64 {
                             depthFb->lastWriteType = Framebuffer::Type::Depth;
                         }
 
-                        // Copy results from render targets back to RAM. ROGUESQ_SKIP_COLOR_READBACK=1 skips it (A/B for games that never read their color buffers back).
-                        const bool s_skip_color_rb = !ext.emulatorConfig->framebuffer.writeBack || rs64SkipColorReadback(RDRAM);
-                        if (!s_skip_color_rb) {
+                        // Copy results from render targets back to RAM.
+                        if (!skipColorRb) {
                             colorFb->copyRenderTargetToNative(ext.framebufferGraphicsWorker, colorTarget, colorWriteWidth, colorRowStart, colorRowEnd, colorImg.fmt, ditherRandomSeed++, ext.shaderLibrary);
                         }
 
-                        const bool s_skip_depth_rb = !ext.emulatorConfig->framebuffer.writeBack || rs64SkipDepthReadback(RDRAM);
-                        if (depthWriteWidth > 0 && !s_skip_depth_rb) {
+                        if (depthWriteWidth > 0 && !skipDepthRb) {
                             depthFb->copyRenderTargetToNative(ext.framebufferGraphicsWorker, depthTarget, depthWriteWidth, depthRowStart, depthRowEnd, G_IM_FMT_DEPTH, ditherRandomSeed++, ext.shaderLibrary);
                         }
                     }
@@ -1952,7 +1961,7 @@ namespace RT64 {
                 ext.framebufferGraphicsWorker->execute();
 
                 // The last batch with no write-back leaves nothing that touches the game's RDRAM, so the game can start its next frame during the wait.
-                if ((maxFramebufferPair == workload.fbPairCount) && !ext.emulatorConfig->framebuffer.writeBack) {
+                if ((maxFramebufferPair == workload.fbPairCount) && skipColorRb && skipDepthRb) {
                     rs64_gfx_complete_early();
                 }
 
@@ -1965,8 +1974,7 @@ namespace RT64 {
                 pairCursor = framebufferPairCursor;
                 while (pairCursor < maxFramebufferPair) {
                     if (getFramebufferPairs(pairCursor)) {
-                        const bool s_skip_color_wb = !ext.emulatorConfig->framebuffer.writeBack || rs64SkipColorReadback(RDRAM);
-                        if (!s_skip_color_wb && rs64WritebackAllowed(colorFb->addressStart)) {
+                        if (!skipColorRb && rs64WritebackAllowed(colorFb->addressStart)) {
                             colorFb->copyNativeToRAM(&(writeBackRDRAM ? writeBackRDRAM : RDRAM)[colorFb->addressStart], colorWriteWidth, colorRowStart, std::min(colorRowEnd, colorFb->height));
                             if (rs64LogTransition() && (colorFb->siz == G_IM_SIZ_16b)) {
                                 const uint8_t *wbRAM = writeBackRDRAM ? writeBackRDRAM : RDRAM;
@@ -1988,8 +1996,7 @@ namespace RT64 {
                             const uint64_t key = ((uint64_t)depthFb->addressStart << 32) | ((uint64_t)depthWriteWidth << 16) | (uint64_t)std::min(depthRowEnd, depthFb->height);
                             if (seenD.insert(key).second) { fprintf(stderr, "[wb] depth addr=0x%06X width=%u rows=%u..%u" "\n", depthFb->addressStart, depthWriteWidth, depthRowStart, std::min(depthRowEnd, depthFb->height)); fflush(stderr); }
                         }
-                        const bool s_skip_depth_wb = !ext.emulatorConfig->framebuffer.writeBack || rs64SkipDepthReadback(RDRAM);
-                        if (!s_skip_depth_wb && (depthWriteWidth > 0) && rs64WritebackAllowed(depthFb->addressStart)) {
+                        if (!skipDepthRb && (depthWriteWidth > 0) && rs64WritebackAllowed(depthFb->addressStart)) {
                             depthFb->copyNativeToRAM(&(writeBackRDRAM ? writeBackRDRAM : RDRAM)[depthFb->addressStart], depthWriteWidth, depthRowStart, std::min(depthRowEnd, depthFb->height));
                         }
                     }
