@@ -141,7 +141,7 @@ namespace rs64lights {
             std::clamp(envFloat("ROGUESQ_RT_SHADOWS_TERMINATOR_FLAT_HI", 0.9f), 0.0f, 1.0f),
             envFloat("ROGUESQ_RT_SHADOWS_MODEL_TERMINATOR", 1.0f) != 0.0f,
             envFloat("ROGUESQ_RT_LIGHTS_SPRITE_SHADOW_START", 1.0f),
-            std::clamp(envFloat("ROGUESQ_RT_SHADOWS_TERRAIN_NORMAL_WINDOW", 0.03f), 0.0f, 0.5f),
+            std::clamp(envFloat("ROGUESQ_RT_SHADOWS_TERRAIN_NORMAL_WINDOW", 0.05f), 0.0f, 0.5f),
             std::clamp((int)envFloat("ROGUESQ_RT_SHADOWS_HISTORY", 2.0f), 0, 4),
             std::max((int)envFloat("ROGUESQ_RT_SHADOWS_HISTORY_INTERVAL", 8.0f), 1),
             envFloat("ROGUESQ_RT_SHADOWS_HISTORY_SKIP", 0.0f),
