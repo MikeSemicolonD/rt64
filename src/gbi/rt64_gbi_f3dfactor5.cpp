@@ -3661,7 +3661,7 @@ namespace RT64 {
             (*dl) += 2;
         }
 
-        static bool f5_texrect_quad(State* state, const DisplayList* dl, uint32_t id, const char* probe, float dx, float dy, bool stIsZero = false, float pushDepth = 0.0f, bool screenFrustum = false);
+        static bool f5_texrect_quad(State* state, const DisplayList* dl, uint32_t id, const char* probe, float dx, float dy, bool stIsZero = false, float pushDepth = 0.0f, bool screenFrustum = false, bool sharedGrid = false);
 
         // VR crawl: the camera-space depth the starfield was pushed to; the planet backdrop sits there too. 0 until a crawl draws its stars.
         static float s_crawl_star_depth = 0.0f;
@@ -3788,10 +3788,40 @@ namespace RT64 {
                 rdp.popFillColor();
             }
 
+            // A rect drawn from last task's texture (its nth draw, a few pixels from where it was) keeps a texture id, so every tile of a drifting picture pairs.
+            // Others (an explosion's flipbook frame) keep a whole-pixel position id, which a drifting tile lost while its neighbour kept it.
+            struct SceneRect { uint32_t addr; uint32_t nth; float x; float y; };
+            static std::vector<SceneRect> s_prev_rects;
+            static std::vector<SceneRect> s_cur_rects;
+            static uint64_t s_rects_task = ~0ull;
+
+            if (s_rects_task != state->displayListCounter) {
+                s_rects_task = state->displayListCounter;
+                s_prev_rects.swap(s_cur_rects);
+                s_cur_rects.clear();
+            }
+
+            const uint32_t addr = state->rdp->texture.address;
+            const float x = ((dl[0].w1 >> 12) & 0xFFFu) / 4.0f;
+            const float y = (dl[0].w1 & 0xFFFu) / 4.0f;
+            uint32_t nth = 0;
+
+            for (const SceneRect &r : s_cur_rects) {
+                nth += (r.addr == addr) ? 1u : 0u;
+            }
+
+            s_cur_rects.push_back({ addr, nth, x, y });
+
+            bool tracked = false;
+
+            for (const SceneRect &r : s_prev_rects) {
+                tracked = tracked || ((r.addr == addr) && (r.nth == nth) && (std::fabs(r.x - x) < 8.0f) && (std::fabs(r.y - y) < 8.0f));
+            }
+
             const uint32_t ulx = (dl[0].w1 >> 14) & 0x3FFu;
             const uint32_t uly = (dl[0].w1 >> 2) & 0x3FFu;
-            const uint32_t id = 0x83000000u | (ulx << 10) | uly;
-            return f5_texrect_quad(state, dl, id, "vr-scene", 0.0f, 0.0f, false, depth, backdrop);
+            const uint32_t id = tracked ? (0x85000000u | (((addr >> 3) ^ (nth * 0x9E37u)) & 0xFFFFFFu)) : (0x83000000u | (ulx << 10) | uly);
+            return f5_texrect_quad(state, dl, id, "vr-scene", 0.0f, 0.0f, false, depth, backdrop, true);
         }
 
         extern "C" int rs64_f5_screen2d(void) {
@@ -3902,7 +3932,7 @@ namespace RT64 {
 
         // Draws the texrect at dl, moved by dx, dy pixels, as a camera-space quad on transform `id`; false leaves it to the texrect path. stIsZero: dl's S and T hold something else and the texture starts at 0.
         // pushDepth > 0 slides the quad along its view rays to that camera-space depth: the same screen spot flat, that distance in stereo.
-        static bool f5_texrect_quad(State* state, const DisplayList* dl, uint32_t id, const char* probe, float dx, float dy, bool stIsZero, float pushDepth, bool screenFrustum) {
+        static bool f5_texrect_quad(State* state, const DisplayList* dl, uint32_t id, const char* probe, float dx, float dy, bool stIsZero, float pushDepth, bool screenFrustum, bool sharedGrid) {
             const uint32_t w0 = dl[0].w0, w1 = dl[0].w1;
             // Copy and fill modes include the lower-right edge, as RT64's own texrects do; without it tiled images (SELECT LEVEL's preview) part by a pixel.
             const uint32_t cycle = (state->rdp->otherMode.H >> 20) & 3u;
@@ -3953,42 +3983,80 @@ namespace RT64 {
                     centre[a] += 0.25f * corner[k][a];
                 }
             }
+            // sharedGrid (pictures on the VR screen plane): every rect takes the screen centre's depth push, so neighbours scale their shared edge alike.
+            float screenCentre[3];
+            if (sharedGrid && !unproject((float)vp.translate.x, (float)vp.translate.y, screenCentre)) {
+                return false;
+            }
+
+            const float* depthRef = sharedGrid ? screenCentre : centre;
+
             // F5 projections carry no view, so the eye is the origin and scaling every point keeps it on its view ray. Only a perspective has rays.
+            float push = 1.0f;
             if (pushDepth > 0.0f) {
                 const bool perspective = screenFrustum || (std::fabs(float(proj[3][3])) < 1e-6f);
-                if (!perspective || !(centre[2] > 0.0f)) {
+                if (!perspective || !(depthRef[2] > 0.0f)) {
                     return false;
                 }
 
                 // Never nearer than the unprojected depth, which sits just past the near plane.
-                const float k = std::max(pushDepth / centre[2], 1.0f);
+                push = std::max(pushDepth / depthRef[2], 1.0f);
                 for (int a = 0; a < 3; a++) {
-                    centre[a] *= k;
+                    centre[a] *= push;
                     for (int c = 0; c < 4; c++) {
-                        corner[c][a] *= k;
+                        corner[c][a] *= push;
                     }
                 }
             }
-            // Vertices are int16, so build the quad at a fixed size and carry the real size in the transform scale. Each quad rounds its corners on its own
-            // grid, so a coarse one left sub-pixel cracks between tiled rects in VR (the N64 logo's tiles shimmered); 16384 keeps the rounding far below a pixel.
+
+            // Vertices are int16, so build the quad at a fixed size and carry the real size in the transform scale. 16384 keeps the rounding far below a pixel.
+            constexpr float QuadRefSize = 16384.0f;
             float extent = 0.0f;
             for (int k = 0; k < 4; k++) {
                 for (int a = 0; a < 3; a++) {
                     extent = std::max(extent, std::fabs(corner[k][a] - centre[a]));
                 }
             }
+
             if (!(extent > 0.0f)) {
                 return false;
             }
-            constexpr float QuadRefSize = 16384.0f;
+
             const float scale = extent / QuadRefSize;
+
+            // sharedGrid: a unit square the transform maps onto the corners, blended as a plain matrix, so corners that neighbouring tiles share move together.
+            // With the shape in the vertices a resized tile drew its new shape at its blended centre, opening gaps between tiles in the in-between frames.
+            float axisX[3];
+            float axisY[3];
+            float axisZ[3];
+
+            for (int a = 0; a < 3; a++) {
+                axisX[a] = (corner[1][a] - corner[0][a]) * 0.5f / QuadRefSize;
+                axisY[a] = (corner[2][a] - corner[0][a]) * 0.5f / QuadRefSize;
+            }
+
+            axisZ[0] = axisX[1] * axisY[2] - axisX[2] * axisY[1];
+            axisZ[1] = axisX[2] * axisY[0] - axisX[0] * axisY[2];
+            axisZ[2] = axisX[0] * axisY[1] - axisX[1] * axisY[0];
+
+            const float axisLen = std::sqrt(axisX[0] * axisX[0] + axisX[1] * axisX[1] + axisX[2] * axisX[2]);
+
+            if (sharedGrid && !(axisLen > 0.0f)) {
+                return false;
+            }
+
+            for (int a = 0; a < 3; a++) {
+                axisZ[a] = sharedGrid ? (axisZ[a] / axisLen) : 0.0f;
+            }
 
             RSP::Vertex* tmp = reinterpret_cast<RSP::Vertex*>(state->fromRDRAM(F5_VTX_SCRATCH + F5_FACE_SLOT * sizeof(RSP::Vertex)));
             for (int k = 0; k < 4; k++) {
                 RSP::Vertex v = {};
-                v.x = (int16_t)std::lround((corner[k][0] - centre[0]) / scale);
-                v.y = (int16_t)std::lround((corner[k][1] - centre[1]) / scale);
-                v.z = (int16_t)std::lround((corner[k][2] - centre[2]) / scale);
+                const int16_t unitX = (k & 1) ? (int16_t)QuadRefSize : (int16_t)-QuadRefSize;
+                const int16_t unitY = (k & 2) ? (int16_t)QuadRefSize : (int16_t)-QuadRefSize;
+                v.x = sharedGrid ? unitX : (int16_t)std::lround((corner[k][0] - centre[0]) / scale);
+                v.y = sharedGrid ? unitY : (int16_t)std::lround((corner[k][1] - centre[1]) / scale);
+                v.z = sharedGrid ? (int16_t)0 : (int16_t)std::lround((corner[k][2] - centre[2]) / scale);
                 v.s = (int16_t)(uls + (int32_t)std::lround((sx[k] - r.ulx) * dsdx / 32.0f));
                 v.t = (int16_t)(ult + (int32_t)std::lround((sy[k] - r.uly) * dtdy / 32.0f));
                 v.color.r = v.color.g = v.color.b = v.color.a = 0xFF;
@@ -4000,18 +4068,42 @@ namespace RT64 {
             uint32_t &gm = state->rsp->geometryModeStack[state->rsp->geometryModeStackSize - 1];
             const uint32_t savedGM = gm;
             gm &= ~(uint32_t)(G_LIGHTING | G_FOG | G_TEXTURE_GEN | state->rsp->cullBothMask);
-            state->rsp->matrixId(id, /*push*/true, /*proj*/false, /*decompose*/true,
+            state->rsp->matrixId(id, /*push*/true, /*proj*/false, /*decompose*/!sharedGrid,
                 G_EX_COMPONENT_INTERPOLATE, G_EX_COMPONENT_INTERPOLATE, G_EX_COMPONENT_INTERPOLATE, G_EX_COMPONENT_INTERPOLATE, G_EX_COMPONENT_INTERPOLATE,
                 G_EX_COMPONENT_SKIP, G_EX_COMPONENT_SKIP, G_EX_COMPONENT_AUTO, G_EX_COMPONENT_AUTO,
                 G_EX_ORDER_LINEAR, G_EX_ASPECT_AUTO, G_EX_EDIT_NONE, /*idIsAddress*/false, /*editGroup*/false);
             auto &modelTop = state->rsp->modelMatrixStack[state->rsp->modelMatrixStackSize - 1];
             const hlslpp::float4x4 savedModel = modelTop;
-            modelTop = hlslpp::float4x4(scale, 0, 0, 0, 0, scale, 0, 0, 0, 0, scale, 0, centre[0], centre[1], centre[2], 1);
+            modelTop = sharedGrid
+                ? hlslpp::float4x4(axisX[0], axisX[1], axisX[2], 0, axisY[0], axisY[1], axisY[2], 0, axisZ[0], axisZ[1], axisZ[2], 0, centre[0], centre[1], centre[2], 1)
+                : hlslpp::float4x4(scale, 0, 0, 0, 0, scale, 0, 0, 0, 0, scale, 0, centre[0], centre[1], centre[2], 1);
             state->rsp->modelViewProjChanged = true;
+            // The RDP samples a rect at pixel corners, a quad half a pixel further at their centres, so an unclamped tile blended in the texel past its edge
+            // (TMEM beyond the tile): a seam along every edge of a tiled picture.
+            LoadTile &tile0 = state->rdp->tiles[tile];
+            LoadTile &tile1 = state->rdp->tiles[(tile + 1) & 7];
+            const LoadTile savedTile0 = tile0;
+            const LoadTile savedTile1 = tile1;
+
+            if (sharedGrid) {
+                tile0.cms |= G_TX_CLAMP;
+                tile0.cmt |= G_TX_CLAMP;
+                tile1.cms |= G_TX_CLAMP;
+                tile1.cmt |= G_TX_CLAMP;
+                state->updateDrawStatusAttribute(DrawAttribute::Texture);
+            }
+
             state->rsp->setVertex(0x80000000u | (F5_VTX_SCRATCH + F5_FACE_SLOT * sizeof(RSP::Vertex)), 4, F5_FACE_SLOT);
             f5_hud_probe_slot(state, probe, F5_FACE_SLOT, 4);
             state->rsp->drawIndexedTri(F5_FACE_SLOT, F5_FACE_SLOT + 2, F5_FACE_SLOT + 3);
             state->rsp->drawIndexedTri(F5_FACE_SLOT, F5_FACE_SLOT + 3, F5_FACE_SLOT + 1);
+
+            if (sharedGrid) {
+                tile0 = savedTile0;
+                tile1 = savedTile1;
+                state->updateDrawStatusAttribute(DrawAttribute::Texture);
+            }
+
             modelTop = savedModel;
             state->rsp->popMatrixId(1, false);
             state->rsp->modelViewProjChanged = true;
