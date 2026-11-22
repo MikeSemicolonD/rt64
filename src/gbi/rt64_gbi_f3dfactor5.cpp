@@ -4128,6 +4128,29 @@ namespace RT64 {
             }
         }
 
+        // Scene nodes of the static ground marks (explosion scorches) the game tested lately, filled by rs64_f5_note_ground_mark. They share the drop shadows'
+        // material and fade with a translucent prim, but no ray-traced shadow stands in for them.
+        static std::atomic<uint32_t> s_ground_marks[64] = {};
+        static std::atomic<uint32_t> s_ground_mark_next{ 0 };
+
+        void f5_note_ground_mark_impl(uint32_t node) {
+            s_ground_marks[s_ground_mark_next.fetch_add(1, std::memory_order_relaxed) % std::size(s_ground_marks)].store(node, std::memory_order_relaxed);
+        }
+
+        static bool f5_is_ground_mark(uint32_t node) {
+            if (node == 0) {
+                return false;
+            }
+
+            for (const auto &mark : s_ground_marks) {
+                if (mark.load(std::memory_order_relaxed) == node) {
+                    return true;
+                }
+            }
+
+            return false;
+        }
+
         // Emit one face from cache indices. Texcoords are per-face, so the referenced vertices are
         // re-emitted into temp slots with their UVs scaled by the current 03 82 texcoord scale.
         static void f5_emit_face(State* state, const uint32_t* idx, int n, const uint32_t* st, uint32_t colorWord) {
@@ -4139,7 +4162,7 @@ namespace RT64 {
             const interop::ColorCombiner& cc = state->rdp->colorCombinerStack[state->rdp->colorCombinerStackSize - 1];
             const bool dropShadow = ((cc.L & 0x00FFFFFFu) == 0x001217FFu) && (cc.H == 0xFFFFFE38u) && (state->rdp->texture.fmt == G_IM_FMT_I) && ((float)prim.x == 0.0f) &&
                 ((float)prim.y == 0.0f) && ((float)prim.z == 0.0f) && ((float)prim.w > 0.0f) && ((float)prim.w < 1.0f);
-            if (rs64lights::config().shadows && dropShadow) {
+            if (rs64lights::config().shadows && dropShadow && !f5_is_ground_mark(f5_lookup_node_id(s_mv_last_w1))) {
                 return;
             }
 
@@ -4513,6 +4536,11 @@ namespace RT64 {
 // Safe no-op until that hook exists; the lookup falls back to G_EX_ID_AUTO when the map is empty.
 extern "C" void rs64_f5_map_node(uint32_t ringDst, uint32_t nodeId) {
     RT64::GBI_F3DFACTOR5::f5_map_node_impl(ringDst, nodeId);
+}
+
+// Game-side hook in advanceNpcOnCurvedPath at a static ground mark's view test: node = the mark's scene node (mark + 0x20), kept out of the drop-shadow filter.
+extern "C" void rs64_f5_note_ground_mark(uint32_t node) {
+    RT64::GBI_F3DFACTOR5::f5_note_ground_mark_impl(node);
 }
 
 // Game-side hook in renderLitMeshFaceGroup at each 0xBD emission: dlAddr = the command's DL address, face = the emitting mesh face.

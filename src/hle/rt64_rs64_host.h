@@ -1,7 +1,7 @@
 #pragma once
 
 // RS64 host boundary: what the game host defines for RT64, and the hooks and counters RT64 defines for the host. The VR callbacks are in rt64_rs64_vr.h.
-// toml_hooks.c, compiled as C with the recompiled code, declares the three F5 hooks it calls in rs64_toml_hooks.h.
+// toml_hooks.c, compiled as C with the recompiled code, declares the F5 hooks it calls in rs64_toml_hooks.h.
 
 #include <atomic>
 #include <cstdint>
@@ -38,6 +38,7 @@ extern "C" {
     void rs64_f5_set_texture_pool_move(uint32_t orig, uint32_t moved, uint32_t size);
     void rs64_f5_map_node(uint32_t ringDst, uint32_t nodeId);
     void rs64_f5_map_sprite(uint32_t dlAddr, uint32_t face);
+    void rs64_f5_note_ground_mark(uint32_t node);
     void rs64_f5_cable_submit(uint32_t pool, uint32_t meshInstance, uint32_t state);
 
     // The heaviest-drawn color image, its width and the steady-clock ms of its last texrect.
