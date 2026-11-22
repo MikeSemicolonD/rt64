@@ -23,6 +23,8 @@ extern "C" {
     int rs64_credits_active(void);
     // The DeveloperShortcut a key-down scancode is bound to, or -1 to pass the key on.
     int rs64_dev_shortcut(int scancode);
+    // 1 while the mission's pause menu is open.
+    int rs64_game_paused(void);
 
     // ultramodern: tell the game this graphics task is done before its GPU work finishes.
     void rs64_gfx_complete_early(void);

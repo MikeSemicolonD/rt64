@@ -3166,6 +3166,11 @@ namespace RT64 {
             return d2;
         }
 
+        // VR: the pause medal's camera-space depth (1 world unit) and the share of it it is moved to, in front of the player's craft.
+        constexpr float kPauseMedalDepth = 256.0f;
+        constexpr float kPauseMedalNear = 0.3f;
+        constexpr float kPauseTextDepth = 0.95f * kPauseMedalNear * kPauseMedalDepth;
+
         void op_01_matrix(State* state, DisplayList** dl) {
             const uint32_t w0 = (*dl)->w0, w1 = (*dl)->w1;
             const uint32_t addr = state->rsp->fromSegmentedMasked(w1);
@@ -3295,6 +3300,29 @@ namespace RT64 {
             else {
                 state->rsp->matrix(w1, proj ? 0x03 : 0x02);   // F3D constants: PROJECTION=1, LOAD=2
             }
+
+            // VR: the pause screen (the medal 1 world unit ahead and its labels) is drawn over the mission, so the player's craft nearer than it showed in
+            // front in depth yet hidden by it. Scaled toward the eye it covers the same view and sits in front of the craft. A paused mission task draws it
+            // after a depth clear, from its fourth framebuffer pair on; its texrect text follows in f5_vr_hud_quad.
+            if (!proj && (g_active_overlay == 0) && (rs64_vr_session() != 0) && (rs64_game_paused() != 0)) {
+                hlslpp::float4x4 &mv = state->rsp->modelMatrixStack[state->rsp->modelMatrixStackSize - 1];
+                const auto &workload = state->ext.workloadQueue->workloads[state->ext.workloadQueue->writeCursor];
+
+                // The medal keeps its shape; any other model on the pause screen moves along its view ray onto the text plane, keeping its place and size on screen.
+                const float tz = (float)mv[3][2];
+                const bool medal = ((float)mv[3][0] == 0.0f) && ((float)mv[3][1] == 0.0f) && (tz == kPauseMedalDepth);
+
+                if ((workload.currentFramebufferPairIndex() >= 3) && (tz > 0.0f)) {
+                    const float scale = medal ? kPauseMedalNear : (kPauseTextDepth / tz);
+
+                    for (int r = 0; r < 4; r++) {
+                        mv[r].xyz = mv[r].xyz * scale;
+                    }
+
+                    state->rsp->modelViewProjChanged = true;
+                }
+            }
+
             if (!proj) {
                 f5_regrid_after_load(state);
                 f5_cloud_floor(state, w1 & 0x00FFFFFFu);
@@ -3682,8 +3710,11 @@ namespace RT64 {
             constexpr float kVrDashboardMeters = 0.45f;
             const FixedRect &sc = state->rdp->scissorRectStack[state->rdp->scissorStackSize - 1];
             const float top = float(sc.uly) + kDashboardTop * float(sc.lry - sc.uly);
-            const bool overDashboard = (rs64_vr_cockpit_view() != 0) && (float(dl[0].w1 & 0xFFFu) >= top);
-            const float depth = overDashboard ? kVrDashboardMeters * rs64_vr_units_per_meter() : kHudDepth;
+            // The pause medal's menu text goes just in front of it (op_01_matrix moves the medal), all rows alike, so the two don't part as the head turns.
+            const bool paused = (rs64_game_paused() != 0);
+            const bool overDashboard = !paused && (rs64_vr_cockpit_view() != 0) && (float(dl[0].w1 & 0xFFFu) >= top);
+            const float hudDepth = paused ? kPauseTextDepth : kHudDepth;
+            const float depth = overDashboard ? kVrDashboardMeters * rs64_vr_units_per_meter() : hudDepth;
             return f5_texrect_quad(state, dl, id, "vr-hud", 0.0f, 0.0f, false, depth);
         }
 
@@ -4200,6 +4231,22 @@ namespace RT64 {
                 y1 = std::max(y1, y);
             }
             const bool fullScreen = front && (x0 <= -1.0f) && (x1 >= 1.0f) && (y0 <= -1.0f) && (y1 >= 1.0f) && (x1 < 2.0f) && (x0 > -2.0f) && (std::fabs(x0 + x1) < 0.2f) && (std::fabs(y0 + y1) < 0.2f);
+
+            // VR draws no pause dim (untextured black prim at partial alpha): a plane can't cover a turning head, so its edges showed. It collapses to a point.
+            const interop::ColorCombiner &cc = state->rdp->colorCombinerStack[state->rdp->colorCombinerStackSize - 1];
+            const hlslpp::float4 &prim = state->rdp->primColorStack[state->rdp->primColorStackSize - 1];
+            const bool pauseDim = ((cc.L & 0x00FFFFFFu) == 0x00FFFFFFu) && (cc.H == 0xFFFE7638u) && ((float)prim.x == 0.0f) && ((float)prim.y == 0.0f) && ((float)prim.z == 0.0f) &&
+                ((float)prim.w > 0.0f) && ((float)prim.w < 1.0f);
+
+            if (pauseDim && (rs64_vr_session() != 0) && (rs64_game_paused() != 0)) {
+                for (int k = 1; k < n; ++k) {
+                    tmp[k] = tmp[0];
+                }
+
+                state->rsp->setVertex(0x80000000u | (F5_VTX_SCRATCH + F5_FACE_SLOT * sizeof(RSP::Vertex)), n, F5_FACE_SLOT);
+                return;
+            }
+
             if (fullScreen) {
                 float cx = 0, cy = 0, cz = 0;
                 for (int k = 0; k < n; ++k) {
