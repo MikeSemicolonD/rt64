@@ -60,6 +60,14 @@ namespace rs64vr {
         return m;
     }
 
+    // Scales camera-space x and y by `s`.
+    inline Mat4 scaleXY(float s) {
+        Mat4 m = rs64lights::identity();
+        m.m[0][0] = s;
+        m.m[1][1] = s;
+        return m;
+    }
+
     // Head turned left by `degrees` about the up axis, no eye offset: the fake head turn for cull testing.
     inline Mat4 yawView(float degrees) {
         const float half = degrees * 3.14159265f / 360.0f;

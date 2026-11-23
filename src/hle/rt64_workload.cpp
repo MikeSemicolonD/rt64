@@ -44,6 +44,7 @@ namespace RT64 {
         rs64CastOnly.clear();
         rs64Rebase.clear();
         rs64Cut = false;
+        rs64CamZoom = 1.0f;
         rs64CallTex.clear();
         rs64CallTile.clear();
         rs64SpriteEmissions.clear();

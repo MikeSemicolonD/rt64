@@ -251,6 +251,10 @@ namespace RT64 {
         // A camera cut: nothing in this workload pairs with the previous frame, so in-between frames show the new shot.
         bool rs64Cut = false;
 
+        // Camera-space x/y over z scale, measured from the sky dome's modelview (1 = none). Cutscene cameras zoom by scaling x and y in the view and
+        // let the projection undo it; VR replaces the projection's x/y terms, so the eye view divides it out first.
+        float rs64CamZoom = 1.0f;
+
         // The previous frame's transform for current transform t, in this frame's local frame (rs64Rebase).
         hlslpp::float4x4 rs64PrevInFrame(uint32_t t, const hlslpp::float4x4 &prev) const {
             if (rs64Rebase.empty() || (t >= drawData.worldTransformGroups.size())) {

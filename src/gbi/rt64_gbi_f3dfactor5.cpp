@@ -3330,6 +3330,17 @@ namespace RT64 {
                 const int ring = f5_ring_buffer(off);
                 const bool skyDome = ((ring == 0) || (ring == 1)) && ((off & 0xFFFFu) == 0x40u);
                 state->rdp->forceTrueBilerp(skyDome ? G_EX_BILERP_ALL : G_EX_BILERP_NONE);
+
+                if (skyDome) {
+                    const hlslpp::float4x4 &mv = state->rsp->modelMatrixStack[state->rsp->modelMatrixStackSize - 1];
+                    const float cx = std::sqrt(float(mv[0][0] * mv[0][0] + mv[1][0] * mv[1][0] + mv[2][0] * mv[2][0]));
+                    const float cz = std::sqrt(float(mv[0][2] * mv[0][2] + mv[1][2] * mv[1][2] + mv[2][2] * mv[2][2]));
+                    const float zoom = (cz > 0.0f) ? (cx / cz) : 1.0f;
+
+                    if ((zoom > 0.25f) && (zoom < 4.0f)) {
+                        state->ext.workloadQueue->workloads[state->ext.workloadQueue->writeCursor].rs64CamZoom = zoom;
+                    }
+                }
             }
 
             if (!proj) {

@@ -189,17 +189,30 @@ namespace RT64 {
                 sceneView = sceneProj.projectionIndex <= mainProjection;
             }
 
+            // The camera's zoom (Workload::rs64CamZoom) divided out, so the head turns and moves in true proportions.
+            const float zoom = workload.rs64CamZoom;
+            const rs64vr::Mat4 unzoom = rs64vr::scaleXY(1.0f / zoom);
+
             if ((proj.type == Projection::Type::Perspective) && sceneView && rs64_vr_fake_head(&fakeHead)) {
                 const rs64vr::Mat4 head = rs64vr::eyeView(fakeHead, rs64_vr_units_per_meter());
-                applyVrView(viewMatrix, head);
-                applyVrView(prevViewTransform, head);
+                const rs64vr::Mat4 rezoom = rs64vr::scaleXY(zoom);
+
+                for (interop::float4x4 *m : { &viewMatrix, &prevViewTransform }) {
+                    applyVrView(*m, unzoom);
+                    applyVrView(*m, head);
+                    applyVrView(*m, rezoom);
+                }
             }
 
             // VR: the eye's view composes after the game camera and its asymmetric fov replaces the game's x/y terms; prev gets the same so the head is no motion.
             if ((p.eyeViews != nullptr) && p.eyeViews->valid && (proj.type == Projection::Type::Perspective)) {
                 const rs64vr::Mat4 eye = rs64vr::eyeView(p.eyeViews->eye[p.eye], rs64_vr_units_per_meter());
-                applyVrView(viewMatrix, eye);
-                applyVrView(prevViewTransform, eye);
+
+                for (interop::float4x4 *m : { &viewMatrix, &prevViewTransform }) {
+                    applyVrView(*m, unzoom);
+                    applyVrView(*m, eye);
+                }
+
                 projMatrix = toFloat4x4(rs64vr::eyeProjection(toMat4(projMatrix), p.eyeViews->fov[p.eye]));
                 prevProjTransform = projMatrix;
             }
