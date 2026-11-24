@@ -1210,12 +1210,17 @@ namespace RT64 {
                 const hlslpp::float4 p = workload.drawData.posTransformed[globalIndices[i]];
                 const float pw = p.w, px = p.x, py = p.y;
                 if (s_farClip && p.z > farDepth * pw) farCount++;
-                if (pw <= kNearW) { extreme = true; anyNear = true; }
+
+                // The near plane is z = -w (the game's GL-style projection), as the RSP clips; a point between the camera and it has a tiny w and,
+                // with the GPU's depth clamp on, was thrown across the screen as a one-frame streak.
+                const float pz = p.z;
+                if ((pw <= kNearW) || (pz + pw < 0.0f)) { extreme = true; anyNear = true; }
                 const float apx = px < 0.0f ? -px : px;
                 const float apy = py < 0.0f ? -py : py;
                 if (apx > guardX * pw || apy > kGuard * pw) extreme = true;
             }
         }
+
         if (farCount == 3) return true;
         if (farCount > 0) extreme = true;
 
@@ -1250,7 +1255,7 @@ namespace RT64 {
             auto planeDist = [guardX, farDepth, &vrFarPlane](const hlslpp::float4 &p, int plane) -> float {
                 const float x = p.x, y = p.y, z = p.z, w = p.w;
                 switch (plane) {
-                    case 0:  return w - kNearW;
+                    case 0:  return std::min(w - kNearW, z + w);
                     case 1:  return guardX * w + x;
                     case 2:  return guardX * w - x;
                     case 3:  return kGuard * w + y;
@@ -1425,6 +1430,23 @@ namespace RT64 {
         }
 
         // Indicates the vertex has been used in a tri. Whatever routines modify the vertex afterwards must use a new index instead.
+
+        // A triangle spanning more than three quarters of the 16-bit vertex range on an axis has a coordinate that wrapped: a glow the game bakes in camera space,
+        // drawn past the stock draw distance, crossed +-32767 and became a line across the screen. The crosshair's own quad spans exactly half (+-16384), so it stays.
+        // ROGUESQ_F5_WRAP_DROP=0 draws it.
+        static const bool s_wrapDrop = rs64env::on("ROGUESQ_F5_WRAP_DROP", true);
+        if (s_wrapDrop) {
+            const auto &pf = workload.drawData.posFloats;
+            for (int k = 0; k < 3; k++) {
+                const float p0 = pf[globalIndices[0] * 3 + k];
+                const float p1 = pf[globalIndices[1] * 3 + k];
+                const float p2 = pf[globalIndices[2] * 3 + k];
+                const float span = std::max({ p0, p1, p2 }) - std::min({ p0, p1, p2 });
+                if (span > 49152.0f) {
+                    return;
+                }
+            }
+        }
 
         if (clipTriangle(workload, fbPair, globalIndices, geometryMode, doubleSided, cullTestMask)) {
             return;
