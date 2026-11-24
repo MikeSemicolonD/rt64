@@ -139,7 +139,7 @@ namespace rs64lights {
         if (hash == nullptr) {
             return false;
         }
-        static const char* const kCraft[] = { "xwing", "ywing", "awing", "vwing", "snowspeeder", "falcon", "tie_inter", "tie_fighter", "tie_d", "imp_shuttle" };
+        static const char* const kCraft[] = { "xwing", "ywing", "awing", "vwing", "snowspeeder", "falcon", "tie_inter", "tie_fighter", "tie_d", "imp_shuttle", "t16", "c_t16" };
         const size_t len = size_t(hash - meshKey);
         // Wingmen use their own models, "wm" + craft + "wng" (wmxwng, wmvwng).
         if ((len == 6) && (std::strncmp(meshKey, "wm", 2) == 0) && (std::strncmp(meshKey + 3, "wng", 3) == 0)) {
