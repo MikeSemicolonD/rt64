@@ -6,6 +6,13 @@
 #include "rt64_rs64_point_lights.h"
 
 namespace rs64lights {
+    // Terrain shadow-mesh subdivision. The browser traces in software, so its terrain BLAS is a quarter the size.
+#ifdef __EMSCRIPTEN__
+    constexpr float kTerrainSubDefault = 1.0f;
+#else
+    constexpr float kTerrainSubDefault = 2.0f;
+#endif
+
     inline float envFloat(const char* name, float def) {
         return rs64env::number(name, def);
     }
@@ -118,7 +125,7 @@ namespace rs64lights {
             envFloat("ROGUESQ_RT_SHADOWS_TMAX", 30000.0f),
             envFloat("ROGUESQ_RT_SHADOWS_BIAS", 0.002f),
             envFloat("ROGUESQ_RT_SHADOWS_TERRAIN", 1.0f) != 0.0f,
-            std::clamp((int)envFloat("ROGUESQ_RT_SHADOWS_TERRAIN_SUB", 2.0f), 1, 4),
+            std::clamp((int)envFloat("ROGUESQ_RT_SHADOWS_TERRAIN_SUB", kTerrainSubDefault), 1, 4),
             envFloat("ROGUESQ_RT_SHADOWS_TERRAIN_TMIN", 0.0f),
             envFloat("ROGUESQ_RT_LIGHTS_SHADOWS", 1.0f) != 0.0f,
             envFloat("ROGUESQ_RT_LIGHTS_SHADOW_END", 0.1f),

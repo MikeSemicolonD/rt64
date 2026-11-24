@@ -1,6 +1,7 @@
 // RT64 - Browser test of RS64SoftRayQuery: traces gRays against the bound scene and writes each closest hit to gOut.
-// Ray (12 words): origin, tmin, direction, tmax, flags, mask, mode (1: commit only even candidates), count (ray 0 only).
-// Hit (8 words): status, t, primitive, instance id, barycentrics, front face, object-space origin x.
+// Ray (12 words): origin, tmin, direction, tmax, flags, mask, mode (1: commit only even candidates), count (ray 0 only). RS64SoftRayQuery
+// offers no candidates, so the loop below never runs in the browser; it stays so the shader reads like a real caller.
+// Hit (8 words): status, t, primitive, instance id, barycentrics, front face, object-to-world translation x.
 
 ByteAddressBuffer gScene : register(t0);
 ByteAddressBuffer gRays : register(t1);
@@ -36,5 +37,5 @@ void CSMain(uint3 id : SV_DispatchThreadID) {
     const uint outAt = id.x * 32;
     const bool hit = q.CommittedStatus() == COMMITTED_TRIANGLE_HIT;
     gOut.Store4(outAt, uint4(q.CommittedStatus(), asuint(hit ? q.CommittedRayT() : 0.0f), hit ? q.CommittedPrimitiveIndex() : 0, hit ? q.CommittedInstanceID() : 0));
-    gOut.Store4(outAt + 16, uint4(asuint(hit ? q.CommittedTriangleBarycentrics() : float2(0.0f, 0.0f)), (hit && q.CommittedTriangleFrontFace()) ? 1u : 0u, asuint(hit ? q.CommittedObjectRayOrigin().x : 0.0f)));
+    gOut.Store4(outAt + 16, uint4(asuint(hit ? q.CommittedTriangleBarycentrics() : float2(0.0f, 0.0f)), (hit && q.CommittedTriangleFrontFace()) ? 1u : 0u, asuint(hit ? q.CommittedObjectToWorld3x4()[0].w : 0.0f)));
 }

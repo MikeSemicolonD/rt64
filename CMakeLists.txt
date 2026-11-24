@@ -184,6 +184,8 @@ set (DXC_PS_OPTS "${DXC_COMMON_OPTS}" "-E" "PSMain" "-T ps_6_3")
 set (DXC_PS_RQ_OPTS "${DXC_COMMON_OPTS}" "-E" "PSMain" "-T ps_6_5" "-fspv-target-env=vulkan1.2")
 set (DXC_VS_OPTS "${DXC_COMMON_OPTS}" "-E" "VSMain" "-T vs_6_3" "-fvk-invert-y")
 if (EMSCRIPTEN)
+    # The browser's ray queries are software (RS64SoftRayQuery.hlsli), and its WGSL converter reads SPIR-V up to 1.3, not Vulkan 1.2's 1.5.
+    set (DXC_PS_RQ_OPTS "${DXC_COMMON_OPTS}" "-E" "PSMain" "-T ps_6_5")
     # WebGPU clip space is y-up like D3D's.
     set (DXC_VS_OPTS "${DXC_COMMON_OPTS}" "-E" "VSMain" "-T vs_6_3")
 endif()

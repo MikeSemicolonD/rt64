@@ -422,9 +422,10 @@ namespace RT64 {
         // exhaustion and getCPUHandleAt asserted (the cinematic descriptor-heap crash).
         // A fixed-capacity set is created once and reused (setTexture updates entries in
         // place).
-        // Slot mode needs the bindless set only for the ray passes; drivers without descriptor indexing can't allocate it.
+        // Slot mode needs the bindless set only for the ray passes (cutout alpha tests); drivers without descriptor indexing (and the browser's
+        // software ray queries) can't allocate it.
         const RenderDeviceCapabilities &caps = worker->device->getCapabilities();
-        const bool needsBindlessSet = !textureSlots || caps.raytracing || caps.rayQuery;
+        const bool needsBindlessSet = !textureSlots || ((caps.raytracing || caps.rayQuery) && caps.descriptorIndexing);
         const bool createSet = needsBindlessSet && ((descTextureSet == nullptr) || (descTextureSet->textureCacheSize < (textureCacheSize + 1)));
         if (createSet) {
             const uint32_t legacyCap = ((textureCacheSize + 1) * 3) / 2;

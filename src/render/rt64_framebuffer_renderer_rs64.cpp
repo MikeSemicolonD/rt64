@@ -1659,8 +1659,11 @@ namespace RT64 {
         }
         paramsBuffer->unmap();
         worker->commandList->setGraphicsDescriptorSet(descCommonSet->get(), 0);
-        worker->commandList->setGraphicsDescriptorSet(descTextureSet->get(), 1);
-        worker->commandList->setGraphicsDescriptorSet(descTextureSet->get(), 2);
+        if (descTextureSet != nullptr) {
+            worker->commandList->setGraphicsDescriptorSet(descTextureSet->get(), 1);
+            worker->commandList->setGraphicsDescriptorSet(descTextureSet->get(), 2);
+        }
+
         worker->commandList->setGraphicsDescriptorSet(set.get(), 3);
     }
 
@@ -2467,8 +2470,9 @@ namespace RT64 {
             grow(s.blasScratch, s.blasScratchCapacity, blasInfo.scratchSize, RenderBufferDesc::DefaultBuffer(blasInfo.scratchSize, RenderBufferFlag::ACCELERATION_STRUCTURE_SCRATCH));
             instances[instanceCount++] = RenderTopLevelASInstance(RenderBufferReference(s.blasBuffer.get()), 0, 0x01, 0, true, RenderAffineTransform());
         }
-        // Cutouts: a non-opaque BLAS hit-tested against the draw's texture alpha; left out when the tex-coord buffer is missing.
-        if (dynamic && !s.cutoutIndices.empty() && (s.texCoords != nullptr)) {
+        // Cutouts: a non-opaque BLAS hit-tested against the draw's texture alpha; left out when the tex-coord buffer is missing, or without
+        // descriptor indexing (the browser), where the traced passes can't sample a draw's texture.
+        if (dynamic && !s.cutoutIndices.empty() && (s.texCoords != nullptr) && device->getCapabilities().descriptorIndexing) {
             const uint64_t idxBytes = s.cutoutIndices.size() * sizeof(uint32_t);
             grow(s.cutoutIndexBuffer, s.cutoutIndexCapacity, idxBytes, RenderBufferDesc::UploadBuffer(idxBytes, RenderBufferFlag::ACCELERATION_STRUCTURE_INPUT | RenderBufferFlag::STORAGE));
             memcpy(s.cutoutIndexBuffer->map(), s.cutoutIndices.data(), idxBytes);

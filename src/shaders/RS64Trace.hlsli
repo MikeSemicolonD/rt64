@@ -7,7 +7,19 @@
 #include "shared/rt64_color_combiner.h"
 #include "shared/rt64_rs64_cutout.h"
 
+#ifdef RT64_WEBGPU
+// WebGPU has no ray queries: plume's software AS heap is a plain buffer, walked by RS64SoftRayQuery.
+#define RaytracingAccelerationStructure ByteAddressBuffer
+#endif
+
 RaytracingAccelerationStructure gScene : register(t3, space3);
+
+#ifdef RT64_WEBGPU
+#define RS64_SRQ_SCENE gScene
+#include "RS64SoftRayQuery.hlsli"
+#define RayQuery RS64SoftRayQuery
+#endif
+
 StructuredBuffer<RS64CutoutDraw> gCutoutDraws : register(t4, space3);
 ByteAddressBuffer gCutoutIndices : register(t5, space3);
 ByteAddressBuffer gTexCoords : register(t6, space3);
@@ -48,6 +60,11 @@ static const float kTranslucentAlphaMin = 0.2f;
 // Texels 0 and 1 (the draw's next tile; texel 0 again unless both is set) at a cutout hit, white for a texture the draw does not use. One sampler
 // in a loop: every inlined copy of sampleTexture in the ray query loops grew the shader until DXC overflowed.
 void rs64CutoutTexels(RS64CutoutDraw d, uint prim, float2 bary, bool both, out float4 texel0, out float4 texel1) {
+#ifdef RT64_WEBGPU
+    // No bindless textures in the browser: the renderer leaves cutouts out of the scene there, so this only has to compile without them.
+    texel0 = float4(1.0f, 1.0f, 1.0f, 1.0f);
+    texel1 = texel0;
+#else
     const RenderParams rp = DynamicRenderParams[d.instanceIndex];
     const uint i0 = gCutoutIndices.Load((prim * 3 + 0) * 4);
     const uint i1 = gCutoutIndices.Load((prim * 3 + 1) * 4);
@@ -74,6 +91,7 @@ void rs64CutoutTexels(RS64CutoutDraw d, uint prim, float2 bary, bool both, out f
     }
     texel0 = texels[0];
     texel1 = both ? texels[1] : texels[0];
+#endif
 }
 
 // A translucent cutout's colour and opacity at a hit as its colour combiner makes them, from both textures (texel 0 again in 1-cycle, as RasterPS)
@@ -90,6 +108,10 @@ float4 rs64CutoutShade(RS64CutoutDraw d) {
 }
 
 float4 rs64TranslucentCombined(RS64CutoutDraw d, float4 texel0, float4 texel1, float4 shade) {
+#ifdef RT64_WEBGPU
+    // Cutouts never reach the browser's scene, and the WGSL converter can't read the combiner's switches as DXC emits them here.
+    return shade;
+#else
     const RenderParams rp = DynamicRenderParams[d.instanceIndex];
     const ColorCombiner colorCombiner = { rp.ccL, rp.ccH };
     const OtherMode otherMode = { rp.omL, rp.omH };
@@ -112,6 +134,7 @@ float4 rs64TranslucentCombined(RS64CutoutDraw d, float4 texel0, float4 texel1, f
     float alphaCompare;
     colorCombiner.run(ccInputs, combined, alphaCompare);
     return combined;
+#endif
 }
 
 // Texel-0 alpha at the hit against the draw's alpha-compare threshold (mirrors rs64lights::cutoutThreshold); untextured cutouts block.
