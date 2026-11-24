@@ -701,6 +701,7 @@ endif()
 # Browser tests of plume WebGPU's software acceleration structures (tests/wasm/plume_webgpu_test).
 if (EMSCRIPTEN)
     build_compute_shader(rt64 "src/shaders/ReadSceneHeaderCS.hlsl")
+    build_compute_shader(rt64 "src/shaders/RS64SoftRayQueryTestCS.hlsl")
 endif()
 build_pixel_shader(  rt64 "src/shaders/TextureCopyPS.hlsl")
 build_compute_shader(rt64 "src/shaders/TextureDecodeCS.hlsl")
