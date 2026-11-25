@@ -7,8 +7,9 @@
 namespace rs64lights {
     // Fog alpha from the linear fog value x (depth * mul + offset, over 255). With tailEnd past the knee the fog follows x to the knee, then thins
     // to full at x = tailEnd, for a fog-limited level drawn further than stock; 0 keeps the stock ramp. Mirrored by rs64FogCurve (rt64_rsp_fog.h).
+    // The knee sits near full fog so terrain past the stock fog shows only faintly, not as dark silhouettes.
     inline float fogCurve(float x, float tailEnd) {
-        const float knee = 0.85f;
+        const float knee = 0.97f;
         if ((tailEnd > knee) && (x > knee)) {
             x = knee + (1.0f - knee) * (x - knee) / (tailEnd - knee);
         }

@@ -44,7 +44,7 @@ float rs64FogDepth(float4x4 viewProj, float3 v, RSPFog fog) {
 
 // Mirrors rs64lights::fogCurve.
 float rs64FogCurve(float x, float tailEnd) {
-    const float knee = 0.85f;
+    const float knee = 0.97f;
     if ((tailEnd > knee) && (x > knee)) {
         x = knee + (1.0f - knee) * (x - knee) / (tailEnd - knee);
     }
