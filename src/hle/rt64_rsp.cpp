@@ -1192,6 +1192,16 @@ namespace RT64 {
         bool anyNear = false;
         int farCount = 0;
         const float farDepth = ((farClipGeomMode != 0) && (geometryMode == farClipGeomMode)) ? std::min(farClipDepth, farClipGeomDepth) : farClipDepth;
+
+        // The near plane is a quarter of the game's near distance (w at the projection's z = -w), so flying between Corellia's buildings no longer cuts
+        // them open. Depth past the game's near plane stays inside the 1/1024 depth mapping, so it still sorts. An orthographic projection keeps z = -w.
+        constexpr float kNearFraction = 0.25f;
+        const hlslpp::float4x4 &proj = projMatrixStack[projectionMatrixStackSize - 1];
+        const float nzw = float(proj[2][2]) + float(proj[2][3]);
+        const float nearEye = (nzw != 0.0f) ? -(float(proj[3][2]) + float(proj[3][3])) / nzw : 0.0f;
+        const float gameNearW = nearEye * float(proj[2][3]) + float(proj[3][3]);
+        const bool perspective = (float(proj[3][3]) == 0.0f) && (gameNearW > kNearW);
+        const float nearW = perspective ? std::max(kNearW, kNearFraction * gameNearW) : kNearW;
         // VR draws each eye with its own projection after recording, so near and side clips against the game camera would cut what the head turns to; the GPU clips per eye.
         // The game's far distance still cuts geometry (Taloraan's cloud layers), on a plane facing each triangle so every direction gets the same reach.
         // Camera space is clip space times the inverse projection (affine for these points, w stays 1).
@@ -1211,10 +1221,10 @@ namespace RT64 {
                 const float pw = p.w, px = p.x, py = p.y;
                 if (s_farClip && p.z > farDepth * pw) farCount++;
 
-                // The near plane is z = -w (the game's GL-style projection), as the RSP clips; a point between the camera and it has a tiny w and,
-                // with the GPU's depth clamp on, was thrown across the screen as a one-frame streak.
+                // A point between the camera and the near plane has a tiny w and, with the GPU's depth clamp on, was thrown across the screen as a one-frame streak.
                 const float pz = p.z;
-                if ((pw <= kNearW) || (pz + pw < 0.0f)) { extreme = true; anyNear = true; }
+                const bool nearOut = perspective ? (pw < nearW) : ((pw <= kNearW) || (pz + pw < 0.0f));
+                if (nearOut) { extreme = true; anyNear = true; }
                 const float apx = px < 0.0f ? -px : px;
                 const float apy = py < 0.0f ? -py : py;
                 if (apx > guardX * pw || apy > kGuard * pw) extreme = true;
@@ -1252,10 +1262,10 @@ namespace RT64 {
 
         if (extreme) {
             // Signed distance to near and the guard-band lateral planes; clipping at |x| = w cut the sky at the 4:3 edge once widescreen widens the view.
-            auto planeDist = [guardX, farDepth, &vrFarPlane](const hlslpp::float4 &p, int plane) -> float {
+            auto planeDist = [guardX, farDepth, perspective, nearW, &vrFarPlane](const hlslpp::float4 &p, int plane) -> float {
                 const float x = p.x, y = p.y, z = p.z, w = p.w;
                 switch (plane) {
-                    case 0:  return std::min(w - kNearW, z + w);
+                    case 0:  return perspective ? (w - nearW) : std::min(w - kNearW, z + w);
                     case 1:  return guardX * w + x;
                     case 2:  return guardX * w - x;
                     case 3:  return kGuard * w + y;
