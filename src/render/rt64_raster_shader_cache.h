@@ -56,6 +56,7 @@ namespace RT64 {
         bool usesHDR = false;
         std::atomic<bool> noUbershader = false;
         std::atomic<uint32_t> compiledCount = 0;
+        std::atomic<int64_t> pipelineCacheSavedMs = 0;
         FILE *comboFile = nullptr;
         
         RasterShaderCache(uint32_t threadCount, uint32_t ubershaderThreadCount);

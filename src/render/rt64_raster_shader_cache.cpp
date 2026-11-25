@@ -5,6 +5,7 @@
 #include "rt64_raster_shader_cache.h"
 
 #include <atomic>
+#include <chrono>
 #include <cstdio>
 #include <cstdlib>
 #include <filesystem>
@@ -120,7 +121,12 @@ namespace RT64 {
                     idle = shaderCache->descQueue.empty() && shaderCache->warmupQueue.empty();
                 }
 
-                if (idle) {
+                // Also saved every 10 s while the queues drain: a warm-up that outlasts the session (minutes on a Raspberry Pi) would otherwise never be kept.
+                constexpr int64_t SaveIntervalMs = 10000;
+                const int64_t nowMs = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
+                int64_t lastMs = shaderCache->pipelineCacheSavedMs.load();
+                const bool due = ((nowMs - lastMs) >= SaveIntervalMs) && shaderCache->pipelineCacheSavedMs.compare_exchange_strong(lastMs, nowMs);
+                if (idle || due) {
                     shaderCache->device->savePipelineCache();
                 }
             }
