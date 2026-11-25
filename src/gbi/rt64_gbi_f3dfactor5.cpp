@@ -1356,36 +1356,157 @@ namespace RT64 {
             std::memcpy(&f, &u, sizeof f);
             return f;
         }
-        // The cell's lights for the terrain lighting: index map at descriptor +8, link table at 0x80136FCC (type-2 links, at most 9), as mapCellGeometryToGridSpace 0x8004AA94.
-        static size_t f5_terrain_cell_lights(const uint8_t* ram, uint32_t W, uint32_t col, uint32_t row, rs64lights::TerrainLight out[9]) {
+        static void f5_read_terrain_light(const uint8_t* ram, uint32_t L, rs64lights::TerrainLight& t) {
+            for (int i = 0; i < 3; ++i) {
+                t.rgb[i] = rd_be_f32(ram, L + i * 4);
+                t.pos[i] = rd_be_f32(ram, L + 0x10 + i * 4);
+            }
+            t.radius = rd_be_f32(ram, L + 0x1C);
+            t.box = ram[((L + 0xE) & 0x00FFFFFFu) ^ 3] != 0;
+        }
+
+        // The level's point lights: the HMP light list ([[0x80136FC4] + 0x20]: count, then 0x20-byte records from +0xC, type byte +0xC, 1 = point).
+        struct F5HmpLights {
+            uint32_t first = 0;
+            uint32_t end = 0;
+        };
+
+        static F5HmpLights f5_hmp_lights(const uint8_t* ram) {
+            F5HmpLights r;
+            const uint32_t hdr = rd_be_u32(ram, 0x80136FC4u);
+
+            if (!f5_vaddr_ok(hdr, 0x24))
+            {
+                return r;
+            }
+
+            const uint32_t list = rd_be_u32(ram, hdr + 0x20);
+
+            if (!f5_vaddr_ok(list, 4))
+            {
+                return r;
+            }
+
+            const uint32_t count = rd_be_u32(ram, list);
+
+            if ((count == 0) || (count > 4096) || !f5_vaddr_ok(list + 0xC, count * 0x20))
+            {
+                return r;
+            }
+
+            r.first = list + 0xC;
+            r.end = r.first + count * 0x20;
+            return r;
+        }
+
+        // Which cells each point light reaches, as load_level_hmp links them (scaleObjectPosToGridUnits 0x8004B1E4, on the light's already-halved values):
+        // cells within the radius box, kept when the light is a box light or within the radius of the cell's height span. The game later unlinks lamps
+        // far from the player (the link pool is shared), which would make them pop on at a distance, so the port links every one itself.
+        static void f5_hmp_light_cells(const uint8_t* ram, const F5HmpLights& hl, uint32_t W, uint32_t H, std::vector<std::vector<uint32_t>>& cells) {
+            const uint32_t D = 0x80136DC0u;
+            const uint32_t map = rd_be_u32(ram, D), tiles = rd_be_u32(ram, D + 4);
+            const float hscale = rd_be_f32(ram, D + 0x10) * (1.0f / 256.0f) * 0.5f;
+
+            cells.assign(size_t(W) * H, {});
+
+            if (!f5_vaddr_ok(map, W * H * 2) || !f5_vaddr_ok(tiles, 30))
+            {
+                return;
+            }
+
+            for (uint32_t L = hl.first; L < hl.end; L += 0x20) {
+                if (ram[((L + 0xC) & 0x00FFFFFFu) ^ 3] != 1) {
+                    continue;
+                }
+
+                const float x = rd_be_f32(ram, L + 0x10), y = rd_be_f32(ram, L + 0x14), z = rd_be_f32(ram, L + 0x18), r = rd_be_f32(ram, L + 0x1C);
+                const bool box = ram[((L + 0xE) & 0x00FFFFFFu) ^ 3] != 0;
+                const int32_t row0 = std::max(0, (int32_t)(z - r)), row1 = std::min((int32_t)H - 1, (int32_t)(z + r));
+                const int32_t col0 = std::max(0, (int32_t)(x - r)), col1 = std::min((int32_t)W - 1, (int32_t)(x + r));
+
+                for (int32_t row = row0; row <= row1; ++row) {
+                    for (int32_t col = col0; col <= col1; ++col) {
+                        const uint32_t tile = tiles + (rd_be_u16(ram, map + uint32_t(row * W + col) * 2) & 0x1FFFu) * 30;
+
+                        if (!f5_vaddr_ok(tile, 30))
+                        {
+                            continue;
+                        }
+
+                        float dz = z - (float)row;
+                        float dx = x - (float)col;
+
+                        if (dz > 0.0f) {
+                            dz -= 1.0f;
+                        }
+
+                        if (dx > 0.0f) {
+                            dx -= 1.0f;
+                        }
+
+                        float dy = (float)(int8_t)ram[((tile + 3) & 0x00FFFFFFu) ^ 3] * hscale - y;
+
+                        if (dy < 0.0f) {
+                            dy = std::max(0.0f, y - (float)(int8_t)ram[((tile + 4) & 0x00FFFFFFu) ^ 3] * hscale);
+                        }
+
+                        if (box || ((dx * dx + dy * dy + dz * dz) < (r * r))) {
+                            cells[size_t(row) * W + col].push_back(L);
+                        }
+                    }
+                }
+            }
+        }
+
+        // The cell's lights for the terrain lighting (at most 9, as mapCellGeometryToGridSpace 0x8004AA94): its HMP point lights, then the other type-2
+        // links of the cell in the link table at 0x80136FCC (index map at descriptor +8).
+        static size_t f5_terrain_cell_lights(const uint8_t* ram, uint32_t W, uint32_t col, uint32_t row, const F5HmpLights& hl, const std::vector<uint32_t>* hmp, rs64lights::TerrainLight out[9]) {
+            size_t n = 0;
+
+            if (hmp != nullptr) {
+                for (uint32_t L : *hmp) {
+                    if (n == 9) {
+                        break;
+                    }
+
+                    f5_read_terrain_light(ram, L, out[n++]);
+                }
+            }
+
             const uint32_t D = 0x80136DC0u;
             const uint32_t lightIdx = rd_be_u32(ram, D + 8), links = rd_be_u32(ram, 0x80136FCCu);
-            if (!f5_vaddr_ok(lightIdx, (row * W + col + 1) * 2) || !f5_vaddr_ok(links, 12)) {
-                return 0;
+
+            if (!f5_vaddr_ok(lightIdx, (row * W + col + 1) * 2) || !f5_vaddr_ok(links, 12))
+            {
+                return n;
             }
+
             uint32_t v = rd_be_u16(ram, lightIdx + (row * W + col) * 2);
-            if (v == 0xFFFFu) {
-                return 0;
+
+            if (v == 0xFFFFu)
+            {
+                return n;
             }
+
             v = rd_be_u16(ram, links + (v & 0x7FFFu) * 12 + 2);
-            size_t n = 0;
+
             for (int hops = 0; (v != 0xFFFFu) && (n < 9) && (hops < 4096); ++hops) {
                 const uint32_t e = links + v * 12;
+
                 if (!f5_vaddr_ok(e, 12)) {
                     break;
                 }
+
                 const uint32_t L = rd_be_u32(ram, e + 8);
-                if ((rd_be_u16(ram, e + 4) == 2) && f5_vaddr_ok(L, 0x20)) {
-                    rs64lights::TerrainLight& t = out[n++];
-                    for (int i = 0; i < 3; ++i) {
-                        t.rgb[i] = rd_be_f32(ram, L + i * 4);
-                        t.pos[i] = rd_be_f32(ram, L + 0x10 + i * 4);
-                    }
-                    t.radius = rd_be_f32(ram, L + 0x1C);
-                    t.box = ram[((L + 0xE) & 0x00FFFFFFu) ^ 3] != 0;
+                const bool listed = (L >= hl.first) && (L < hl.end);
+
+                if ((rd_be_u16(ram, e + 4) == 2) && !listed && f5_vaddr_ok(L, 0x20)) {
+                    f5_read_terrain_light(ram, L, out[n++]);
                 }
+
                 v = rd_be_u16(ram, e + 2);
             }
+
             return n;
         }
         // The ported colours of cells [x0, x1] x [z0, z1] (all by default); the rest keep theirs.
@@ -1405,11 +1526,18 @@ namespace RT64 {
             if (m.colors.size() != size_t(m.width) * m.height * 75) {
                 m.colors.assign(size_t(m.width) * m.height * 75, 0);
             }
+            const F5HmpLights hl = f5_hmp_lights(ram);
+            std::vector<std::vector<uint32_t>> hmpCells;
+
+            f5_hmp_light_cells(ram, hl, m.width, m.height, hmpCells);
+
             for (uint32_t row = z0; row <= std::min(z1, m.height - 1); ++row) {
                 for (uint32_t col = x0; col <= std::min(x1, m.width - 1); ++col) {
+                    const size_t c = size_t(row) * m.width + col;
                     rs64lights::TerrainLight lights[9];
-                    const size_t n = f5_terrain_cell_lights(ram, m.width, col, row, lights);
-                    rs64lights::terrainCellColors(m, col, row, s, lights, n, &m.colors[(size_t(row) * m.width + col) * 75]);
+                    const size_t n = f5_terrain_cell_lights(ram, m.width, col, row, hl, (c < hmpCells.size()) ? &hmpCells[c] : nullptr, lights);
+
+                    rs64lights::terrainCellColors(m, col, row, s, lights, n, &m.colors[c * 75]);
                 }
             }
         }
@@ -2505,9 +2633,9 @@ namespace RT64 {
             f5_emit_terrain_strips(state, geom.data(), N);
         }
 
-        // The cell's 25 vertex colours: the ported static ones plus the record's difference from them, read where the ucode reads the record's
-        // colours as-is and interpolated in between. The record differs where the game lit the cell with runtime lights (the lit pool,
-        // unpackGridVertexBytes 0x8004B644); returns whether it did. ROGUESQ_F5_STATIC_TERRAIN_CHECK=1 logs sample totals every 300 tasks.
+        // The cell's 25 vertex colours: the ported static ones plus the record's brightening over them, read where the ucode reads the record's
+        // colours as-is and interpolated in between. The record is brighter where the game lit the cell with runtime lights (the lit pool,
+        // unpackGridVertexBytes 0x8004B644); returns whether it was. ROGUESQ_F5_STATIC_TERRAIN_CHECK=1 logs sample totals every 300 tasks.
         static bool f5_static_record_colors(State* state, const DisplayList* rec, const uint8_t* colors, bool flat, float C[25][4]) {
             static const bool s_log = rs64env::on("ROGUESQ_F5_STATIC_TERRAIN_CHECK", false);
             static uint64_t s_task = ~0ull;
@@ -2530,9 +2658,15 @@ namespace RT64 {
             auto note = [&](int k, uint32_t rgba) {
                 for (int ch = 0; ch < 3; ++ch) {
                     D[k][ch] = (float)((rgba >> (24 - 8 * ch)) & 0xFF) - C[k][ch];
+                }
+
+                ((D[k][0] == 0.0f) && (D[k][1] == 0.0f) && (D[k][2] == 0.0f) ? s_same : s_diff) += 1;
+
+                // Lights only add: a record darker than the port is missing a lamp the game unlinked far from the player, so keep the port there.
+                for (int ch = 0; ch < 3; ++ch) {
+                    D[k][ch] = std::max(D[k][ch], 0.0f);
                     lit = lit || (D[k][ch] != 0.0f);
                 }
-                ((D[k][0] == 0.0f) && (D[k][1] == 0.0f) && (D[k][2] == 0.0f) ? s_same : s_diff) += 1;
             };
             if (flat) {
                 note(0, rec[1].w1);
