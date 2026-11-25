@@ -23,5 +23,7 @@ namespace RT64 {
         bool paused = false;
         uint64_t presentId = 0;
         uint64_t workloadId = 0;
+        // The display vsync whose VI made this present (0 off the vsync-driven VI).
+        uint64_t rs64Vsync = 0;
     };
 };

@@ -1375,6 +1375,12 @@ namespace RT64 {
                     ext.swapChain->wait();
                 }
 
+                // A VI on the display's vsync shows one vsync later, every time: a present racing its own vsync's deadline sometimes missed it,
+                // so a 30 fps image stayed up 3 refreshes and the next 1.
+                if (present.rs64Vsync != 0) {
+                    rs64_vsync_wait(present.rs64Vsync + 1);
+                }
+
                 RenderCommandSemaphore *waitSemaphore = drawSemaphores[swapChainIndex].get();
                 presentTimestamp = Timer::current();
                 swapChainValid = ext.swapChain->present(swapChainIndex, &waitSemaphore, 1);

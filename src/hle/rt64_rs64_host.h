@@ -28,6 +28,9 @@ extern "C" {
 
     // ultramodern: tell the game this graphics task is done before its GPU work finishes.
     void rs64_gfx_complete_early(void);
+    // ultramodern: display vsyncs so far while they drive the VI (0 while the timer does), and a bounded wait until that count reaches `count`.
+    uint64_t rs64_vsync_count(void);
+    void rs64_vsync_wait(uint64_t count);
 
     // Active overlay: 1 menu, 2 cinematic, 0 gameplay, -1 none.
     extern volatile int g_active_overlay;

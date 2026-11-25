@@ -2403,6 +2403,7 @@ namespace RT64 {
         Present &present = ext.presentQueue->presents[presentCursor];
         present.fbOperations.clear();
         present.storage.clear();
+        present.rs64Vsync = rs64_vsync_count();
 
         const bool presentEarly = !ext.presentQueue->viewRDRAM && (ext.enhancementConfig->presentation.mode == EnhancementConfiguration::Presentation::Mode::PresentEarly);
         const uint32_t screenFbAddress = newVI.fbAddress();
