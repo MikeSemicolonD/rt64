@@ -1589,8 +1589,8 @@ namespace RT64 {
 
         // Upload the transforms directly.
         ext.transformsUploader->submit(ext.framebufferGraphicsWorker, {
-            { workload.drawData.viewProjTransforms.data(), workload.drawRanges.viewProjTransforms, sizeof(interop::float4x4), RenderBufferFlag::STORAGE, { }, &workload.drawBuffers.viewProjTransformsBuffer},
-            { workload.drawData.worldTransforms.data(), workload.drawRanges.worldTransforms, sizeof(interop::float4x4), RenderBufferFlag::STORAGE, { }, &workload.drawBuffers.worldTransformsBuffer},
+            { workload.drawData.viewProjTransforms.data(), workload.drawRanges.viewProjTransforms, sizeof(interop::float4x4), TransformBufferFlags, { RenderFormat::R32G32B32A32_FLOAT }, &workload.drawBuffers.viewProjTransformsBuffer},
+            { workload.drawData.worldTransforms.data(), workload.drawRanges.worldTransforms, sizeof(interop::float4x4), TransformBufferFlags, { RenderFormat::R32G32B32A32_FLOAT }, &workload.drawBuffers.worldTransformsBuffer},
         });
 
         if (nativeDraws) {

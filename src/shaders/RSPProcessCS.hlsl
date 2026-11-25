@@ -35,11 +35,18 @@ StructuredBuffer<RSPViewport> rspViewportVector : register(t13);
 StructuredBuffer<RSPFog> rspFogVector : register(t14);
 StructuredBuffer<RSPLight> rspLightVector : register(t15);
 StructuredBuffer<RSPLookAt> rspLookAtVector : register(t16);
-StructuredBuffer<float4x4> viewProjTransforms : register(t17);
-StructuredBuffer<float4x4> worldTransforms : register(t18);
+// Typed float4 views of the float4x4 arrays, so this pass binds 7 storage buffers (Raspberry Pi V3D allows 8 per stage).
+Buffer<float4> viewProjTransforms : register(t17);
+Buffer<float4> worldTransforms : register(t18);
 RWStructuredBuffer<float4> dstPos : register(u19);
 RWStructuredBuffer<float2> dstTc : register(u20);
 RWStructuredBuffer<float4> dstCol : register(u21);
+
+// A StructuredBuffer<float4x4> packs each matrix column-major, so the four float4s are its columns.
+float4x4 loadTransform(Buffer<float4> transforms, uint index) {
+    const uint base = index * 4;
+    return transpose(float4x4(transforms[base + 0], transforms[base + 1], transforms[base + 2], transforms[base + 3]));
+}
 
 [numthreads(GROUP_SIZE, 1, 1)]
 void CSMain(uint vertexIndex : SV_DispatchThreadID) {
@@ -50,8 +57,8 @@ void CSMain(uint vertexIndex : SV_DispatchThreadID) {
     const uint vertexOffsetIndex = gConstants.vertexStart + vertexIndex;
     const uint viewProjIndex = srcViewProjIndices[vertexOffsetIndex];
     const uint transformIndex = srcWorldIndices[vertexOffsetIndex];
-    const float4x4 viewProjMat = viewProjTransforms[viewProjIndex];
-    const float4x4 worldMat = worldTransforms[transformIndex];
+    const float4x4 viewProjMat = loadTransform(viewProjTransforms, viewProjIndex);
+    const float4x4 worldMat = loadTransform(worldTransforms, transformIndex);
     const uint posIndex = vertexOffsetIndex * 3;
     const uint normColIndex = vertexOffsetIndex * 4;
     const float3 norm = float3(

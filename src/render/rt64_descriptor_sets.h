@@ -568,8 +568,8 @@ namespace RT64 {
             rspFogVector = builder.addStructuredBuffer(14);
             rspLightVector = builder.addStructuredBuffer(15);
             rspLookAtVector = builder.addStructuredBuffer(16);
-            viewProjTransforms = builder.addStructuredBuffer(17);
-            worldTransforms = builder.addStructuredBuffer(18);
+            viewProjTransforms = builder.addFormattedBuffer(17);
+            worldTransforms = builder.addFormattedBuffer(18);
             dstPos = builder.addReadWriteStructuredBuffer(19);
             dstTc = builder.addReadWriteStructuredBuffer(20);
             dstCol = builder.addReadWriteStructuredBuffer(21);

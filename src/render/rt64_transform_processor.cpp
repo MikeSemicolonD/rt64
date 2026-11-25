@@ -110,7 +110,7 @@ namespace RT64 {
             const interop::float4x4 *prevWorldMatrices = processed ? drawData.prevWorldTransforms.data() : drawData.worldTransforms.data();
             const interop::float4x4 *invTWorldMatrices = drawData.invTWorldTransforms.data();
             std::pair<size_t, size_t> uploadRange = { 0, drawData.worldTransforms.size() };
-            uploads.emplace_back(BufferUploader::Upload{ worldMatrices, uploadRange, sizeof(interop::float4x4), RenderBufferFlag::STORAGE, { }, &drawBuffers.worldTransformsBuffer });
+            uploads.emplace_back(BufferUploader::Upload{ worldMatrices, uploadRange, sizeof(interop::float4x4), TransformBufferFlags, { RenderFormat::R32G32B32A32_FLOAT }, &drawBuffers.worldTransformsBuffer });
             uploads.emplace_back(BufferUploader::Upload{ prevWorldMatrices, uploadRange, sizeof(interop::float4x4), RenderBufferFlag::STORAGE, { }, &drawBuffers.prevWorldTransformsBuffer });
             uploads.emplace_back(BufferUploader::Upload{ invTWorldMatrices, uploadRange, sizeof(interop::float4x4), RenderBufferFlag::STORAGE, { }, &drawBuffers.invTWorldTransformsBuffer });
         }

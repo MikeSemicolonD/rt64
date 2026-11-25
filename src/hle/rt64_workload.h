@@ -137,6 +137,10 @@ namespace RT64 {
         Range triColorFloats;
     };
 
+    // The world and view-projection transforms: structured for the passes that read whole matrices, formatted (R32G32B32A32_FLOAT) for RSPProcessCS,
+    // which reads them as rows so it binds 7 storage buffers per stage (Raspberry Pi V3D allows 8).
+    constexpr RenderBufferFlags TransformBufferFlags = RenderBufferFlag::STORAGE | RenderBufferFlag::FORMATTED;
+
     struct DrawBuffers {
         BufferPair positionBuffer;
         BufferPair velocityBuffer;

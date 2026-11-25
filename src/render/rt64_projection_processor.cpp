@@ -232,7 +232,7 @@ namespace RT64 {
             const DrawData &drawData = workload.drawData;
             DrawBuffers &drawBuffers = workload.drawBuffers;
             std::pair<size_t, size_t> uploadRange = { 0, drawData.viewProjTransforms.size() };
-            uploads.emplace_back(BufferUploader::Upload{ drawData.modViewProjTransforms.data(), uploadRange, sizeof(interop::float4x4), RenderBufferFlag::STORAGE, { }, &drawBuffers.viewProjTransformsBuffer });
+            uploads.emplace_back(BufferUploader::Upload{ drawData.modViewProjTransforms.data(), uploadRange, sizeof(interop::float4x4), TransformBufferFlags, { RenderFormat::R32G32B32A32_FLOAT }, &drawBuffers.viewProjTransformsBuffer });
         }
 
         bufferUploader->submit(p.worker, uploads);
