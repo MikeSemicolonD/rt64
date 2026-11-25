@@ -1269,6 +1269,9 @@ namespace RT64 {
             int polyN = 3;
             const int planeFirst = vrFarPlane.active ? 6 : 0;
             const int planeCount = vrFarPlane.active ? 7 : ((farCount > 0) ? 6 : 5);
+            // A cloud sheet cut at the far plane fades out to it (its alpha is texture times vertex alpha): a hard cut drew a straight edge across the
+            // nearest layers when flying close to them.
+            const bool sheetFade = (farClipGeomMode != 0) && (geometryMode == farClipGeomMode);
             for (int pl = planeFirst; pl < planeCount && polyN > 0; pl++) {
                 uint32_t out[12];
                 int outCnt = 0;
@@ -1282,7 +1285,13 @@ namespace RT64 {
                     if (inA && outCnt < 12) out[outCnt++] = gA;
                     if ((inA != inB) && outCnt < 12) {
                         const float t = dA / (dA - dB);
-                        out[outCnt++] = appendClippedVertex(gA, gB, t);
+                        const uint32_t cut = appendClippedVertex(gA, gB, t);
+
+                        if (sheetFade && (pl == 5)) {
+                            workload.drawData.normColBytes[cut * 4 + 3] = 0;
+                        }
+
+                        out[outCnt++] = cut;
                     }
                 }
                 polyN = outCnt;
