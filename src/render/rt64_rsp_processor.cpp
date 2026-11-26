@@ -10,6 +10,8 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdlib>
+#include <thread>
+#include <vector>
 
 #include "shared/rt64_rsp_fog.h"
 #include "shared/rt64_rsp_light.h"
@@ -175,74 +177,108 @@ namespace RT64 {
             processCB.vertexCount = 0;
         }
 
-        for (uint32_t v = 0; v < processCB.vertexCount; v++) {
-            const uint32_t vertexOffsetIndex = processCB.vertexStart + v;
-            const uint32_t viewProjIndex = srcViewProjIndices[vertexOffsetIndex];
-            const hlslpp::float4x4 viewProjMat = viewProjTransforms[viewProjIndex];
-            const hlslpp::float4x4 worldMat = worldTransforms[srcWorldIndices[vertexOffsetIndex]];
-            const uint32_t posIndex = vertexOffsetIndex * 3;
-            const uint32_t normColIndex = vertexOffsetIndex * 4;
-            const hlslpp::float3 norm(srcNorm[normColIndex + 0] / 127.0f, srcNorm[normColIndex + 1] / 127.0f, srcNorm[normColIndex + 2] / 127.0f);
+        // A model's vertices share their matrices, so the combined transform is kept until the indices change.
+        auto transformRange = [&](uint32_t begin, uint32_t end) {
 
-            // NDC position.
-            const hlslpp::float3 pos(srcPos[posIndex + 0], srcPos[posIndex + 1], srcPos[posIndex + 2]);
-            const hlslpp::float3 vel = (srcVel != nullptr) ? hlslpp::float3(srcVel[posIndex + 0], srcVel[posIndex + 1], srcVel[posIndex + 2]) : hlslpp::float3(0.0f, 0.0f, 0.0f);
-            hlslpp::float4 tfPos = hlslpp::mul(hlslpp::float4(pos - vel * (1.0f - processCB.curFrameWeight), 1.0f), hlslpp::mul(worldMat, viewProjMat));
+            uint32_t cachedWorldIndex = UINT32_MAX;
+            uint32_t cachedViewProjIndex = UINT32_MAX;
+            hlslpp::float4x4 worldMat;
+            hlslpp::float4x4 worldViewProjMat;
 
-            // Fog.
-            const uint32_t fogIndex = (srcFogIndices != nullptr) ? srcFogIndices[vertexOffsetIndex] : 0;
-            float alpha;
-            if ((fogIndex > 0) && (rspFogs != nullptr)) {
-                const interop::RSPFog &rspFog = rspFogs[fogIndex - 1];
-                const float fogAlpha = (std::max(tfPos.f32[2], 0.0f) / tfPos.f32[3]) * rspFog.mul + rspFog.offset;
-                alpha = std::clamp(fogAlpha / 255.0f, 0.0f, 1.0f);
-            }
-            else {
-                alpha = srcCol[normColIndex + 3] / 255.0f;
-            }
-
-            // Texgen.
-            const uint32_t tcIndex = vertexOffsetIndex * 2;
-            const uint32_t lookAtIndex = (srcLookAtIndices != nullptr) ? srcLookAtIndices[vertexOffsetIndex] : 0;
-            hlslpp::float2 tc = (srcTc != nullptr) ? hlslpp::float2(srcTc[tcIndex + 0], srcTc[tcIndex + 1]) : hlslpp::float2(0.0f, 0.0f);
-            if ((lookAtIndex & RSP_LOOKAT_INDEX_ENABLED) && (rspLookAts != nullptr)) {
-                const bool textureGenLinear = (lookAtIndex & RSP_LOOKAT_INDEX_LINEAR) != 0;
-                tc = computeTextureGen(tc, norm, rspLookAts[lookAtIndex >> RSP_LOOKAT_INDEX_SHIFT], textureGenLinear, worldMat);
-            }
-            else if (srcTcVel != nullptr) {
-                tc -= hlslpp::float2(srcTcVel[tcIndex + 0], srcTcVel[tcIndex + 1]) * (1.0f - processCB.curFrameWeight);
-            }
-
-            // Lighting.
-            const uint32_t lightIndex = (srcLightIndices != nullptr) ? srcLightIndices[vertexOffsetIndex] : 0;
-            const uint32_t lightCount = (srcLightCounts != nullptr) ? srcLightCounts[vertexOffsetIndex] : 0;
-            hlslpp::float3 color;
-            if ((lightCount > 0) && (rspLights != nullptr)) {
-                const uint32_t ambientIndex = lightIndex + lightCount - 1;
-                hlslpp::float3 resultColor = rspLights[ambientIndex].col;
-                for (uint32_t i = lightIndex; i < ambientIndex; i++) {
-                    const interop::RSPLight &light = rspLights[i];
-                    resultColor += (light.kc > 0) ? computePosLight(pos, norm, light, worldMat) : computeDirLight(norm, light, worldMat);
+            for (uint32_t v = begin; v < end; v++) {
+                const uint32_t vertexOffsetIndex = processCB.vertexStart + v;
+                const uint32_t viewProjIndex = srcViewProjIndices[vertexOffsetIndex];
+                const uint32_t worldIndex = srcWorldIndices[vertexOffsetIndex];
+                if ((worldIndex != cachedWorldIndex) || (viewProjIndex != cachedViewProjIndex)) {
+                    const hlslpp::float4x4 viewProjMat = viewProjTransforms[viewProjIndex];
+                    worldMat = worldTransforms[worldIndex];
+                    worldViewProjMat = hlslpp::mul(worldMat, viewProjMat);
+                    cachedWorldIndex = worldIndex;
+                    cachedViewProjIndex = viewProjIndex;
                 }
 
-                color = hlslpp::min(resultColor, hlslpp::float3(1.0f, 1.0f, 1.0f));
-            }
-            else {
-                color = hlslpp::float3(srcCol[normColIndex + 0] / 255.0f, srcCol[normColIndex + 1] / 255.0f, srcCol[normColIndex + 2] / 255.0f);
-            }
+                const uint32_t posIndex = vertexOffsetIndex * 3;
+                const uint32_t normColIndex = vertexOffsetIndex * 4;
+                const hlslpp::float3 norm(srcNorm[normColIndex + 0] / 127.0f, srcNorm[normColIndex + 1] / 127.0f, srcNorm[normColIndex + 2] / 127.0f);
 
-            // Matches the shader's guard for geometry exactly at the near clip plane.
-            if (tfPos.f32[3] == 0.0f) {
-                tfPos.f32[3] = 1e-6f;
-            }
+                // NDC position.
+                const hlslpp::float3 pos(srcPos[posIndex + 0], srcPos[posIndex + 1], srcPos[posIndex + 2]);
+                const hlslpp::float3 vel = (srcVel != nullptr) ? hlslpp::float3(srcVel[posIndex + 0], srcVel[posIndex + 1], srcVel[posIndex + 2]) : hlslpp::float3(0.0f, 0.0f, 0.0f);
+                hlslpp::float4 tfPos = hlslpp::mul(hlslpp::float4(pos - vel * (1.0f - processCB.curFrameWeight), 1.0f), worldViewProjMat);
 
-            // Convert to N64 screen position.
-            const interop::RSPViewport &rspViewport = rspViewports[viewProjIndex];
-            const float w = tfPos.f32[3];
-            const hlslpp::float3 ndcPos(tfPos.f32[0] / w, tfPos.f32[1] / -w, tfPos.f32[2] / w);
-            cpuScreenPos[v] = hlslpp::float4(ndcPos * hlslpp::float3(rspViewport.scale) + hlslpp::float3(rspViewport.translate), w);
-            cpuTexcoords[v] = tc;
-            cpuColors[v] = hlslpp::float4(color, alpha);
+                // Fog.
+                const uint32_t fogIndex = (srcFogIndices != nullptr) ? srcFogIndices[vertexOffsetIndex] : 0;
+                float alpha;
+                if ((fogIndex > 0) && (rspFogs != nullptr)) {
+                    const interop::RSPFog &rspFog = rspFogs[fogIndex - 1];
+                    const float fogAlpha = (std::max(tfPos.f32[2], 0.0f) / tfPos.f32[3]) * rspFog.mul + rspFog.offset;
+                    alpha = std::clamp(fogAlpha / 255.0f, 0.0f, 1.0f);
+                }
+                else {
+                    alpha = srcCol[normColIndex + 3] / 255.0f;
+                }
+
+                // Texgen.
+                const uint32_t tcIndex = vertexOffsetIndex * 2;
+                const uint32_t lookAtIndex = (srcLookAtIndices != nullptr) ? srcLookAtIndices[vertexOffsetIndex] : 0;
+                hlslpp::float2 tc = (srcTc != nullptr) ? hlslpp::float2(srcTc[tcIndex + 0], srcTc[tcIndex + 1]) : hlslpp::float2(0.0f, 0.0f);
+                if ((lookAtIndex & RSP_LOOKAT_INDEX_ENABLED) && (rspLookAts != nullptr)) {
+                    const bool textureGenLinear = (lookAtIndex & RSP_LOOKAT_INDEX_LINEAR) != 0;
+                    tc = computeTextureGen(tc, norm, rspLookAts[lookAtIndex >> RSP_LOOKAT_INDEX_SHIFT], textureGenLinear, worldMat);
+                }
+                else if (srcTcVel != nullptr) {
+                    tc -= hlslpp::float2(srcTcVel[tcIndex + 0], srcTcVel[tcIndex + 1]) * (1.0f - processCB.curFrameWeight);
+                }
+
+                // Lighting.
+                const uint32_t lightIndex = (srcLightIndices != nullptr) ? srcLightIndices[vertexOffsetIndex] : 0;
+                const uint32_t lightCount = (srcLightCounts != nullptr) ? srcLightCounts[vertexOffsetIndex] : 0;
+                hlslpp::float3 color;
+                if ((lightCount > 0) && (rspLights != nullptr)) {
+                    const uint32_t ambientIndex = lightIndex + lightCount - 1;
+                    hlslpp::float3 resultColor = rspLights[ambientIndex].col;
+                    for (uint32_t i = lightIndex; i < ambientIndex; i++) {
+                        const interop::RSPLight &light = rspLights[i];
+                        resultColor += (light.kc > 0) ? computePosLight(pos, norm, light, worldMat) : computeDirLight(norm, light, worldMat);
+                    }
+
+                    color = hlslpp::min(resultColor, hlslpp::float3(1.0f, 1.0f, 1.0f));
+                }
+                else {
+                    color = hlslpp::float3(srcCol[normColIndex + 0] / 255.0f, srcCol[normColIndex + 1] / 255.0f, srcCol[normColIndex + 2] / 255.0f);
+                }
+
+                // Matches the shader's guard for geometry exactly at the near clip plane.
+                if (tfPos.f32[3] == 0.0f) {
+                    tfPos.f32[3] = 1e-6f;
+                }
+
+                // Convert to N64 screen position.
+                const interop::RSPViewport &rspViewport = rspViewports[viewProjIndex];
+                const float w = tfPos.f32[3];
+                const hlslpp::float3 ndcPos(tfPos.f32[0] / w, tfPos.f32[1] / -w, tfPos.f32[2] / w);
+                cpuScreenPos[v] = hlslpp::float4(ndcPos * hlslpp::float3(rspViewport.scale) + hlslpp::float3(rspViewport.translate), w);
+                cpuTexcoords[v] = tc;
+                cpuColors[v] = hlslpp::float4(color, alpha);
+            }
+        };
+
+        // Large batches are split over up to 4 cores; on the Pi this runs on the render thread while the other cores sit mostly idle.
+        const uint32_t vertexCount = processCB.vertexCount;
+        const uint32_t kMinVerticesPerThread = 1024;
+        const uint32_t cores = std::clamp(std::thread::hardware_concurrency(), 1u, 4u);
+        const uint32_t threadCount = std::clamp(vertexCount / kMinVerticesPerThread, 1u, cores);
+        const uint32_t chunk = (vertexCount + threadCount - 1) / threadCount;
+        std::vector<std::thread> workers;
+
+        for (uint32_t t = 1; t < threadCount; t++) {
+            workers.emplace_back(transformRange, t * chunk, std::min(vertexCount, (t + 1) * chunk));
+        }
+
+        transformRange(0, std::min(vertexCount, chunk));
+
+        for (std::thread &worker : workers) {
+            worker.join();
         }
 
         // RSPModifyCS: per-vertex screen position overrides.
