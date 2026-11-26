@@ -43,6 +43,10 @@ elseif (CMAKE_CROSSCOMPILING AND CMAKE_HOST_UNIX AND NOT CMAKE_HOST_APPLE)
 elseif (WIN32)
     # The official release, not dxc-bin's 1.7.2308 dxcompiler.dll, which faulted now and then inside Compile and Link.
     include(FetchContent)
+    if (POLICY CMP0135)
+        cmake_policy(SET CMP0135 NEW)
+    endif()
+
     FetchContent_Declare(dxc_win URL https://github.com/microsoft/DirectXShaderCompiler/releases/download/v1.9.2609/dxc_2026_09_29.zip
         URL_HASH SHA256=ad31b1fc8443175d204f77a611fdb3ef2ec42759bdc2f1167368de24a4a7e7f1)
     FetchContent_MakeAvailable(dxc_win)
