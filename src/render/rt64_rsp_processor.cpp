@@ -93,8 +93,10 @@ namespace RT64 {
         modifySet = std::make_unique<RSPModifyDescriptorSet>(device);
         // ROGUESQ_CPU_RSP=1 transforms vertices on the CPU even with compute, for GPUs slower than the CPU (Raspberry Pi).
         // RSPProcessCS binds 21 storage buffers; WebGPU devices often allow fewer per stage.
+        // Raspberry Pi V3D (Mesa v3dv) runs RSPProcessCS without validation errors but outputs shattered geometry.
         const RenderDeviceCapabilities &capabilities = device->getCapabilities();
-        cpuProcessing = !capabilities.computeShaders || (capabilities.maxStorageBuffersPerStage < 21) || rs64env::on("ROGUESQ_CPU_RSP");
+        const bool v3d = device->getDescription().name.rfind("V3D", 0) == 0;
+        cpuProcessing = !capabilities.computeShaders || (capabilities.maxStorageBuffersPerStage < 21) || v3d || rs64env::on("ROGUESQ_CPU_RSP");
     }
 
     RSPProcessor::~RSPProcessor() { }

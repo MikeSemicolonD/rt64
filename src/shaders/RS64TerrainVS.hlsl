@@ -42,7 +42,7 @@ float4 surfacePoint(float2 f, uint latticeW, uint latticeH) {
 }
 
 uint chunkLod(int2 c) {
-    const uint chunksZ = gTerrain.chunkCount / gTerrain.chunksX;
+    const uint chunksZ = (gTerrain.mapHeight + gTerrain.chunkCells - 1) / gTerrain.chunkCells;
     if ((c.x < 0) || (c.y < 0) || (uint(c.x) >= gTerrain.chunksX) || (uint(c.y) >= chunksZ)) {
         return 0xFF;
     }
@@ -182,8 +182,8 @@ void VSMain(uint vertexId : SV_VertexID, uint instanceId : SV_InstanceID,
     const uint cellWord = gCellLayers[cell.y * gTerrain.mapWidth + cell.x];
 
     const float3 pos = float3((f.x * 0.25f - gTerrain.originX) * 512.0f + gTerrain.offsetX, h * gTerrain.heightScale, (f.y * 0.25f - gTerrain.originZ) * 512.0f + gTerrain.offsetZ);
-    const float4x4 world = gWorldTransforms[gTerrain.worldIndex];
-    float4 tfPos = mul(mul(gViewProjTransforms[gTerrain.viewProjIndex], world), float4(pos, 1.0f));
+    const float4x4 world = loadTerrainTransform(gWorldTransforms, gTerrain.worldIndex);
+    float4 tfPos = mul(mul(loadTerrainTransform(gViewProjTransforms, gTerrain.viewProjIndex), world), float4(pos, 1.0f));
 
     // The world transform is the game's modelview, so this is camera space. The heightmap's +y points down (water fills the largest heights)
     // and the game lights with that +y normal against the sun's travel direction, so both are negated: the open-air normal and the way to the sun.

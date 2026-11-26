@@ -67,10 +67,17 @@ static bool rs64SkipDepthReadback() {
     return rs64SkipReadback(s_value);
 }
 
-// With both copies skipped, the native-resolution draws have no output, so they are skipped too; RDRAM change detection still runs (the game clears depth from the CPU). ROGUESQ_SKIP_NATIVE_RENDER: 1 = whenever both are skipped, 0 = never.
+// Skips the native-resolution draws when both copies are skipped. On by default only on Windows: without them the game's CPU depth clears go missing
+// when the renderer runs slower than the game (Raspberry Pi), leaving stale depth that drops triangles and tile bands. ROGUESQ_SKIP_NATIVE_RENDER overrides it.
 static bool rs64SkipNativeRender() {
-    static const char *s_value = rs64env::str("ROGUESQ_SKIP_NATIVE_RENDER");
-    return (s_value == nullptr) || (s_value[0] != '0');
+
+#if defined(_WIN32)
+    static const bool s_on = rs64env::on("ROGUESQ_SKIP_NATIVE_RENDER", true);
+#else
+    static const bool s_on = rs64env::on("ROGUESQ_SKIP_NATIVE_RENDER");
+#endif
+
+    return s_on;
 }
 
 // The F5 ucode emits garbage colour images in code (~0x470, ~0x3CBxx), the texture-material pool (0x15FDE0) and past 8 MB, where a write-back corrupts

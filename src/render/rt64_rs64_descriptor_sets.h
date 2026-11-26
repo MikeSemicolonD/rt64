@@ -79,8 +79,8 @@ namespace RT64 {
 
         RS64TerrainDescriptorSet(const SamplerLibrary &samplerLibrary, RenderDevice *device = nullptr) {
             builder.begin();
-            gWorldTransforms = builder.addStructuredBuffer(1);
-            gViewProjTransforms = builder.addStructuredBuffer(2);
+            gWorldTransforms = builder.addFormattedBuffer(1);
+            gViewProjTransforms = builder.addFormattedBuffer(2);
             gViewports = builder.addStructuredBuffer(3);
             gFog = builder.addStructuredBuffer(4);
             gHeights = builder.addStructuredBuffer(5);

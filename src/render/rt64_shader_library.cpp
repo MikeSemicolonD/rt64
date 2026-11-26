@@ -350,9 +350,9 @@ namespace RT64 {
             boxFilter.pipeline = device->createComputePipeline(pipelineDesc);
         }
 
-        // Raytracing compose. The browser has no raytracing, and WebGPU can't blend its RGBA32F target.
+        // Raytracing compose. Some GPUs without raytracing can't blend its RGBA32F target (Raspberry Pi V3D, WebGPU).
 #   ifndef PLUME_WEBGPU_ENABLED
-        {
+        if (deviceCapabilities.raytracing) {
             RaytracingComposeDescriptorSet descriptorSet(samplerLibrary);
             layoutBuilder.begin();
             layoutBuilder.addDescriptorSet(descriptorSet);
@@ -985,9 +985,9 @@ namespace RT64 {
             postProcess.pipeline = device->createGraphicsPipeline(pipelineDesc);
         }
         
-        // Raytracing debug. The browser build has no inspector, and DebugPS includes the RT header's typed buffers.
+        // Raytracing debug. DebugPS reads the RT bindings of the common set, which only raytracing devices have.
 #   ifndef PLUME_WEBGPU_ENABLED
-        {
+        if (deviceCapabilities.raytracing) {
             FramebufferRendererDescriptorCommonSet descriptorCommonSet(samplerLibrary, deviceCapabilities.raytracing);
             FramebufferRendererDescriptorTextureSet descriptorTextureSet;
             FramebufferRendererDescriptorFramebufferSet descriptorFramebufferSet;

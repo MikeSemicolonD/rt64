@@ -5,8 +5,9 @@
 #include "shared/rt64_rsp_viewport.h"
 
 [[vk::push_constant]] ConstantBuffer<RS64TerrainCB> gTerrain : register(b0, space0);
-StructuredBuffer<float4x4> gWorldTransforms : register(t1, space0);
-StructuredBuffer<float4x4> gViewProjTransforms : register(t2, space0);
+// The transforms are float4 rows in a formatted buffer: as storage buffers the set would go over 8 per stage (Raspberry Pi V3D).
+Buffer<float4> gWorldTransforms : register(t1, space0);
+Buffer<float4> gViewProjTransforms : register(t2, space0);
 StructuredBuffer<RSPViewport> gViewports : register(t3, space0);
 StructuredBuffer<RSPFog> gFog : register(t4, space0);
 // Lattice of (4 * width + 1) x (4 * height + 1) samples: heights in record units (s8 << 4) and packed RGBA8 vertex colours.
@@ -18,9 +19,14 @@ StructuredBuffer<uint> gTexels : register(t8, space0);
 // Per frame: [0] ambient rgb, cell scale; [1] sun rgb, water level (s8 units); [2] sun direction, w = where the texture pack block starts (0 none);
 // [3..] each texture layer's current layer (animated textures' frame), 4 per float4; then each layer's pack replacement (texture cache index, -1 none).
 StructuredBuffer<float4> gFrame : register(t9, space0);
-// Per frame: [0, chunkCount) each chunk's LOD (0xFF = culled), then the chunk lists of the per-LOD draws.
+// Per frame: [0, chunksX * chunksZ) each chunk's LOD (0xFF = culled), then the chunk lists of the per-LOD draws.
 StructuredBuffer<uint> gChunks : register(t10, space0);
 SamplerState gSampler : register(s11, space0);
+
+float4x4 loadTerrainTransform(Buffer<float4> transforms, uint index) {
+    const uint base = index * 4;
+    return transpose(float4x4(transforms[base + 0], transforms[base + 1], transforms[base + 2], transforms[base + 3]));
+}
 
 #ifdef RS64_TERRAIN_PACKS
 // Set 1: the raster's bindless texture cache, for texture pack replacements.
@@ -77,7 +83,7 @@ float terrainFog(float3 v) {
     }
 
     const RSPFog fog = gFog[gTerrain.fogIndex - 1];
-    const float4x4 proj = gViewProjTransforms[gTerrain.viewProjIndex];
+    const float4x4 proj = loadTerrainTransform(gViewProjTransforms, gTerrain.viewProjIndex);
     return rs64FogCurve((rs64FogDepth(proj, v, fog) * fog.mul + fog.offset) / 255.0f, fog.tailEnd);
 }
 
@@ -93,7 +99,7 @@ float waterShoreAlpha(float2 f) {
 
 // 0 to 1 over the second half of the way to the far plane along camera-space point v's view ray (s v reaches clip z = w at sFar).
 float farPlaneFade(float3 v) {
-    const float4x4 proj = gViewProjTransforms[gTerrain.viewProjIndex];
+    const float4x4 proj = loadTerrainTransform(gViewProjTransforms, gTerrain.viewProjIndex);
     const float denom = dot(proj[2].xyz - proj[3].xyz, v);
     const float sFar = (denom > 0.0f) ? (proj[3].w - proj[2].w) / denom : 0.0f;
     return (sFar > 0.0f) ? smoothstep(0.5f, 1.0f, 1.0f / sFar) : 0.0f;

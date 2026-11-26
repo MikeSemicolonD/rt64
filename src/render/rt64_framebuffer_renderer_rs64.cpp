@@ -2085,7 +2085,6 @@ namespace RT64 {
         rs64TerrainCB.mapWidth = rs64TerrainMap->width;
         rs64TerrainCB.mapHeight = rs64TerrainMap->height;
         rs64TerrainCB.chunksX = (rs64TerrainMap->width + RS64TerrainChunkCells - 1) / RS64TerrainChunkCells;
-        rs64TerrainCB.chunkCount = rs64TerrainCB.chunksX * ((rs64TerrainMap->height + RS64TerrainChunkCells - 1) / RS64TerrainChunkCells);
 
         // Header, then each texture layer's current layer (4 per float4).
         // After the layer remap: each layer's texture pack replacement (texture cache index, -1 none); gFrame[2].w is where that block starts, 0 = none.

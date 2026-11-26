@@ -406,8 +406,8 @@ namespace RT64 {
             }
 
             RS64TerrainDescriptorSet &ts = *rs64TerrainGpu.set;
-            ts.setBuffer(ts.gWorldTransforms, drawBuffers->worldTransformsBuffer.get(), RenderBufferStructuredView(sizeof(interop::float4x4)));
-            ts.setBuffer(ts.gViewProjTransforms, drawBuffers->viewProjTransformsBuffer.get(), RenderBufferStructuredView(sizeof(interop::float4x4)));
+            ts.setBuffer(ts.gWorldTransforms, drawBuffers->worldTransformsBuffer.get(), drawBuffers->worldTransformsBuffer.getView(0));
+            ts.setBuffer(ts.gViewProjTransforms, drawBuffers->viewProjTransformsBuffer.get(), drawBuffers->viewProjTransformsBuffer.getView(0));
             ts.setBuffer(ts.gViewports, drawBuffers->rspViewportsBuffer.get(), RenderBufferStructuredView(sizeof(interop::RSPViewport)));
             ts.setBuffer(ts.gFog, drawBuffers->rspFogBuffer.get(), RenderBufferStructuredView(sizeof(interop::RSPFog)));
         }

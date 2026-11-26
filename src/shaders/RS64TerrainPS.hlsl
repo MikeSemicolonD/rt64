@@ -85,7 +85,7 @@ float4 PSMain(in float4 vPosition : SV_POSITION, in float4 vShade : COLOR0, in f
             color = saturate(tex + (detail - tex) * detailWeight) * vShade.rgb;        }
 
         const float3 nMap = rs64RippleNormal(m, gTerrain.rippleTime, footprint, gTerrain.rippleStrength);
-        float3 n = normalize(mul((float3x3)gWorldTransforms[gTerrain.worldIndex], nMap));
+        float3 n = normalize(mul((float3x3)loadTerrainTransform(gWorldTransforms, gTerrain.worldIndex), nMap));
         float3 l = normalize(vSunDir);
 
         // Seen from below the surface's open-air side: flip both, so a sign slip cannot hide the effect.

@@ -32,7 +32,6 @@ namespace interop {
         // This draw's LOD (quad size (1 << lod) / sub lattice steps) and where its chunk list starts in gChunks.
         uint lod;
         uint chunkListBase;
-        uint chunkCount;
         // 1: the water draw, one flat quad per water or shore cell at the water level (one instance per visible block of chunkCells square), over the map
         // plus waterMargin cells each side, where the edge cell carries on outward and the outer ring reaches past any far plane.
         uint water;
@@ -43,6 +42,9 @@ namespace interop {
         float rippleTime;
         float rippleStrength;
     };
+
 #ifdef HLSL_CPU
+    // Push constants: Vulkan guarantees only 128 bytes (Raspberry Pi V3D has no more).
+    static_assert(sizeof(RS64TerrainCB) <= 128);
 };
 #endif
