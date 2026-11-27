@@ -212,7 +212,11 @@ RS64Receiver rs64Receiver(float2 px) {
                 const int2 cell = int2(floor(gRs64TerrainMapXZ / 512.0f));
                 const int2 mapSize = int2(gShadows.terrainMapWidth, gShadows.terrainMapHeight);
                 const bool border = (mapSize.x > 0) && (any(cell <= int2(1, 1)) || any(cell >= mapSize - 2));
-                const bool groundHit = (gRs64TerrainPrim < gShadows.waterPrim);
+
+                // Past the edge the water draw's quads carry each edge cell on at its edge's height, land or water: they count by that height like the
+                // border rings (a mountain edge stays land, sea floor and the water level read as water), not as water outright.
+                const bool outsideMap = (mapSize.x > 0) && (any(cell < int2(0, 0)) || any(cell >= mapSize));
+                const bool groundHit = (gRs64TerrainPrim < gShadows.waterPrim) || outsideMap;
                 r.waterCover = !groundHit ? 1.0f : rs64WaterCover(gRs64TerrainY + (border ? 4.0f * kWaterLift : 0.0f), kWaterLift);
                 if (groundHit && (r.waterCover > 0.0f)) {
                     r.waterUnder = max(asfloat(gTerrainColors.Load(12)) + kWaterLift - gRs64TerrainY, 0.0f) * gRs64TerrainCell / 512.0f;
